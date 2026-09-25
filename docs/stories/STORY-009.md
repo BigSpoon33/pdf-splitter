@@ -28,6 +28,8 @@ The core of 'tweak the settings' (PRD scope).
 
 ## Acceptance Criteria
 
+> **Orchestrator decision (2026-09-25, from STORY-008 findings):** flags need a JSON source, so this story also adds ONE small backend route: `GET /api/jobs/{id}/manifest` → the last cut's manifest rows (by plan section index; 409 `not_ready` before any cut; 410 for deleted/expired; ids never logged). Architecture § API Interface lists it. Pin it with a pytest test; the SPA reads it for the badges.
+
 - [ ] AC-1: SourcePicker: Outline (level select with counts; disabled with an explanation when the PDF has none) / Headings (threshold slider in ×body size, level select, live count) / Paste list (`Name, page` per line; parse errors shown per line)
 - [ ] AC-2: Switching source replaces the section list (with an undo toast); the choice + list persist via `PUT /plan` (debounced 600 ms)
 - [ ] AC-3: SectionList: rename, delete, add (name + page), change page, merge-with-next; flags from the last cut shown as badges; page shown as sheet number + printed label when available
