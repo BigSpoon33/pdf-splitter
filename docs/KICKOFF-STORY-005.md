@@ -139,3 +139,12 @@ Per-AC ✅/❌ with file:line, the test counts (before 20 / after N), the `ruff 
 output, the commits (on both remotes), and what STORY-006 (worker + analyze) should know: the error-body
 shape, where the source lands, the row a successful upload leaves, and how preflight is invoked (a reusable
 subprocess-runner pattern for the worker). Cite the tests as the contract, not hand-written JSON.
+
+## Orchestrator addendum (after STORY-004's gate)
+
+- **Job ids must not reach logs** (ADR-007: the id is the only credential). Once you add
+  `/api/jobs…` routes, uvicorn's default access log would print raw ids. Run uvicorn with
+  `access_log=False` in `cli.py` and add a small request-logging middleware (or log filter) that logs
+  method, status, duration and the path with any job id replaced by `log_id(id)`. Test it.
+- The store fix from STORY-004's retry (`check_same_thread=False`, always-drop-on-close) is in place
+  before you start; keep using `StoreDep`.

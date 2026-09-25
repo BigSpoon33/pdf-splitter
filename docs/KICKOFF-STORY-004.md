@@ -153,3 +153,21 @@ Per-AC ✅/❌ with file:line, test counts (before 0 / after N), the `ruff check
 curl output, the commits (both remotes), and what STORY-005 (upload + preflight) should know: the exact
 `create_job` signature, the Store and Settings construction pattern tests use, and how the app gets its
 settings. Cite the tests as the contract, not hand-written JSON.
+
+## Previous attempt (RETRY — read this first)
+
+Attempt 1 (`20e34fa`, docs `cb83665`) passed everything except ONE confirmed finding — see
+`docs/findings/STORY-004-review.md`. Fix forward, one commit on feature/mvp:
+`fix: STORY-004 - gate r1: per-request store connections survive cross-thread teardown`
+- `store.connect()` opens with `check_same_thread=False` (each Store/connection is still used by ONE
+  request at a time — safe; say so in a WHY comment). `Store.close()` must always drop `_conn`
+  (try/finally) so a close error can never leak the connection.
+- Regression test that fails on 20e34fa: open the store's connection in one thread and close it in
+  another (mirrors FastAPI's enter/teardown split), and a concurrent-requests test — e.g. N threads
+  hammering `/api/health` through one `TestClient` or a real uvicorn on a free port (stop it by PID;
+  port 8000 is taken on this laptop) — asserting 0 server exceptions and all 200s.
+- Re-run the orchestrator's live repro `scratchpad/s004/burst.py` + `keepalive.py`
+  (/tmp/claude-1000/-home-shuma-Documents-AI-Inkwell/54ef7701-a83b-45c7-89b2-a41e971506db/scratchpad/s004)
+  against your fixed server: expect 0 ProgrammingError lines, all keep-alive requests answered.
+- Update STORY-004 findings ("Gate r1 fix") and KICKOFF-STORY-005 if it cites the store's
+  threading. Do NOT address the access-log note (that's STORY-005's, already in its kickoff).
