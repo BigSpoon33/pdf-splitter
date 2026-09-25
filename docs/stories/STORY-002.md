@@ -1,6 +1,6 @@
 # STORY-002: Engine: outline and big-heading candidate detection
 
-> **Status:** Pending
+> **Status:** Done (2026-09-25)
 > **Size:** M
 > **Date:** 2026-09-25
 > **Architecture ref:** `docs/Architecture.md#Engine additions (monograph-splitter 0.4.0)`
@@ -98,12 +98,12 @@ feat: STORY-002 - detect: outline entries and big-heading candidates for arbitra
 
 ## Status
 
-**Pending**
+**Done** — 2026-09-25 (engine `ef828ab` on `feature/web-mode`; findings `docs/findings/STORY-002-findings.md`)
 
-- [ ] AC-1
-- [ ] AC-2
-- [ ] AC-3
-- [ ] AC-4
-- [ ] AC-5
-- [ ] AC-6
-- [ ] AC-7
+- [x] AC-1
+- [x] AC-2
+- [x] AC-3
+- [x] AC-4
+- [x] AC-5
+- [x] AC-6
+- [x] AC-7
