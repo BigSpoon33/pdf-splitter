@@ -153,3 +153,20 @@ worker) should know, especially the `cut_all` summary shape and the name/filenam
   supplies header/footer bands, column_split, full_width_ratio and heading_wrap_gap) so the web
   worker passes ONE profile to both detection and cutting. Explicit kwargs still override.
 - STORY-002 status: see `docs/findings/STORY-002-review.md` (round 2 result will be appended).
+
+## Previous attempt (RETRY — read this first)
+
+Attempt 1 (`c8935d2`, tag `v0.4.0` on both remotes) passed everything except ONE confirmed finding —
+see `docs/findings/STORY-003-review.md`. Fix forward, one commit on feature/web-mode:
+`fix: STORY-003 - gate r1: the excerpt route maps only the name guard to 404 (0.4.1)`
+- `review/server.py` `excerpt_pdf`: resolve `book = cfg_of(book_id).book` OUTSIDE the try; only
+  `book.excerpt_path(name)` sits inside `except ValueError → 404`. Test: malformed overrides.json +
+  fresh app + first request is the excerpt route → NOT 404 (the error surfaces as before 0.4.0);
+  unsafe name → 404 still.
+- Bump to **0.4.1** (pyproject, uv.lock, `__version__`; `ENGINE_VERSION` stays 17 — no index change),
+  README note if versions are listed, annotated tag `v0.4.1` on the fix commit, push branch + tag to
+  origin and gitea. NEVER move or delete `v0.4.0`.
+- Update STORY-003 findings ("Gate r1 fix") and KICKOFF-STORY-004: the web repo pins
+  `monograph-splitter @ git+https://github.com/BigSpoon33/pdf-splitter-engine@v0.4.1`. The
+  Architecture was updated by the orchestrator (cut_all shape, engine names vs display names,
+  page validation) — make KICKOFF-STORY-004 consistent with it.

@@ -82,7 +82,13 @@ deploy/
     It is pure: one pass over `page.get_text("dict")`, reusing `index.page_lines`.
   - `Book.open(..., entries: EntryList | list[dict] | Path)`. A list goes through the same
     validation as `load_entries_json` (factored into `entries_from_rows`).
-  - `Book.cut_all(progress: Callable[[int,int,str],None] | None, verify=True, preview=False) -> Summary`.
+  - `Book.cut_all(progress=None, verify=True, preview=False, only=None, *, limit=None, redact=True) -> dict`
+    returning `{written: [manifest rows], flags: {flag: n}, notes: {note: n}, leaks: {name: [str]}, missing: [str], unknown: [str]}`;
+    `progress(done, total, name)` after each entry. One `Book` per cut job (`missing` accumulates on a Book).
+    Entry names that contain `/`, `\`, NUL or are `.`/`..`/empty are refused (`ValueError`) before any write
+    (`session.safe_filename`). `heading_candidates(profile=…)` takes bands/column split/wrap gap from the same
+    Profile the cut uses — the worker passes ONE `profile_from_dict(settings)` to both. Engine version is
+    `monograph_splitter.__version__` (the int `ENGINE_VERSION` is only the index-cache key).
     `cli.main`'s loop moves here, and the CLI calls it (diff gate 0).
 - **Failure mode:** loud. A bad settings key raises `ProfileError`. A heading not found → the
   entry gets a whole-page start + a `heading-not-found` flag (the existing behaviour), which is
@@ -169,12 +175,15 @@ janitor ──every 5 min──▶ delete expired /jobs/<id> + row
 |------|-------|---------------|----------------|
 | Job row | `{id, state, kind, created_at, expires_at, ip_hash, filename, pages, bytes, progress, total, message, error_code}` | api | api, worker, janitor |
 | Analysis | `{pages, pageLabels[], size:{W,H}[], outline:{levels:[n1,n2,n3], items:[{name,page,heading,level,y?}]}, headings:{body_size, levels:[{size,count}], candidates:[{name,page,heading,size,level,y,col}]}, suggested:{source, level}}` | worker/analyze | web |
-| Plan | `{source:"outline"\|"headings"\|"manual", settings:{column_split, single_column, header_band, footer_band, heading_min_size}, sections:[{name, page, heading}], overrides:{[name]: {startCut, startCol, endCut, endCol}}}` | web | api (validate) → worker/cut, preview |
+| Plan | `{source:"outline"\|"headings"\|"manual", settings:{column_split, single_column, header_band, footer_band, heading_min_size}, sections:[{name, page, heading}], overrides:{[sectionIndex]: {startCut, startCol, endCut, endCol}}}` | web | api (validate) → worker/cut, preview |
 | Section plan (preview) | the engine's `_plan_view`: `{pages:[a,b], startCut, startCol, endCut, endCol, flags[], rects:[[sheet,[x0,y0,x1,y1]]]}` | preview subprocess | PagePreview |
 | Manifest | the engine's `manifest.json` rows + `{file}` | worker/cut | download zip |
 
-`sections[].name` is unique within a Plan (the API dedupes by suffixing ` (2)`), is ≤ 120 chars,
-and output filenames are `NNN - <slug>.pdf` (the index prefix keeps book order in a file browser).
+`sections[].name` is the DISPLAY name (≤ 120 chars; duplicates allowed in the UI). The engine never sees it:
+the worker passes each section to the engine as a unique, filename-safe `NNN-<ascii-slug>` (≤ 80 bytes), keeps
+the display name in the Plan, and translates `overrides` (keyed by section INDEX in the Plan) to engine names.
+ZIP entries are `NNN - <display name, sanitized>.pdf` (the index prefix keeps book order). Plan validation
+rejects `page ∉ [1, pages]` (the engine's `cuts.plan` raises IndexError past the book end).
 
 ---
 
