@@ -7,11 +7,12 @@ The product lives in two repos:
 
 - **Web (you write code here):** `~/Documents/Repos/pdf-splitter` (GitHub `BigSpoon33/pdf-splitter` = `origin`,
   Gitea mirror = `gitea`), branch **`feature/mvp`**. Stay on that branch. STORY-006 landed as
-  `12b4e9b feat: STORY-006 - sandboxed worker runner and analyze task (outline + heading candidates)` plus its docs
-  commit (`docs: STORY-006 - findings + KICKOFF-STORY-007`). Anything after that is the orchestrator's gate work.
-  Check `git log --oneline -5`. **Baseline: 185 tests pass (`uv run pytest`, ~45 s, because `tests/test_worker.py`
-  runs real subprocesses and deliberate timeouts), and `uv run ruff check` is clean.** `docs/loop-state.json`
-  belongs to the orchestrator, so never stage it.
+  `12b4e9b feat: STORY-006 - sandboxed worker runner and analyze task (outline + heading candidates)`, its docs
+  commit, the gate r1 fix `e15e7f0 fix: STORY-006 - gate r1: MuPDF allocation failures are resources; analysis JSON
+  survives bad text` and that fix's docs commit. Anything after those is the orchestrator's gate work. Check
+  `git log --oneline -6`. **Baseline: 199 tests pass (`uv run pytest`, ~50 s, because `tests/test_worker.py`
+  runs real subprocesses, deliberate timeouts and one 2 GB memory bomb), and `uv run ruff check` is clean.**
+  `docs/loop-state.json` belongs to the orchestrator, so never stage it.
 - **Engine (read-only here):** `~/Documents/Repos/monograph-splitter` (GitHub `BigSpoon33/pdf-splitter-engine`),
   pinned at tag `v0.4.1` in `pyproject.toml`/`uv.lock`. The surface you need:
   - `monograph_splitter.profile`: `profile_from_dict(d, base=WEB_BASE)` (only `WEB_KEYS`; unknown key or bad
@@ -47,6 +48,8 @@ Toolchain: `uv 0.12.10`, Python 3.12. Dev deps: pytest, ruff and `httpx2`.
   - **Failure mapping** (`classify`, `execute`): a wall timeout → `killpg` → `failed/timeout`; SIGXCPU/SIGKILL/
     SIGXFSZ or a `{"ok": false, "code": "resources"}` result → `failed/resources`; anything else (including exit 0
     with the row still `running`) → `failed/internal`. Each gets a user-facing `message` from `runner.MESSAGES`.
+    The `resources` result covers MuPDF's own allocator failing under RLIMIT_AS (gate r1: a `RuntimeError`
+    `code=2: calloc (…) failed`, not a `MemoryError`), so a cut on a hostile PDF reads as `resources` too.
     Failures are written with `Store.transition(id, "running", "failed", …)`, so a deleted job is never resurrected.
     The stderr tail is logged via `loggable_tail` (redacted with `access_log.redact_path`, then JSON-escaped).
     Contracts: `::test_classify`, `::test_runner_failure_mapping`, `::test_the_loop_keeps_running_after_failed_jobs`.
@@ -59,16 +62,22 @@ Toolchain: `uv 0.12.10`, Python 3.12. Dev deps: pytest, ruff and `httpx2`.
 - **The task** `src/pdf_splitter/worker/task.py` (`python -m pdf_splitter.task` is the shim `src/pdf_splitter/task.py`):
   - `main(argv)`: `kind` choices are `["analyze"]`, so add `"cut"`. It refuses ids that aren't a plain path
     component, turns MuPDF display errors off, and runs the job inside `guarded(fn)`. `guarded` prints the result
-    line and returns the exit code: `MemoryError`/`OSError(EFBIG)` → `resources` (exit 3), any other exception →
-    `internal` (exit 1, traceback to stderr), and `fn()` returning False → `internal`. Write `run_cut(settings,
-    job_id, store) -> bool` in the shape of `run_analyze`: check the row is `running` with the right kind, work,
-    then `store.transition(id, "running", "done")`. Contracts: `::test_guarded_maps_exceptions`,
+    line and returns the exit code: `MemoryError`/`OSError(EFBIG)`, or a `RuntimeError` matching
+    `task.MUPDF_ALLOC_FAILED` (`code=2…` / `calloc|malloc|realloc … failed` / `out of memory`) → `resources`
+    (exit 3); any other exception → `internal` (exit 1, traceback to stderr); `fn()` returning False → `internal`.
+    Don't catch MuPDF errors yourself inside `run_cut`: let them reach `guarded`, or the mapping is lost. Write
+    `run_cut(settings, job_id, store) -> bool` in the shape of `run_analyze`: check the row is `running` with the
+    right kind, work, then `store.transition(id, "running", "done")`. Contracts: `::test_guarded_maps_exceptions`
+    (13 cases), `::test_real_task_on_a_mupdf_memory_bomb_is_resources` (the fixture `tests/fixtures/hostile.py::
+    xobj_bomb` is a 4.9 KB PDF that hits 2 GB in MuPDF; reuse it for a cut-side resources test),
     `::test_task_skips_a_job_that_is_not_running`.
   - `Throttle(write)`: progress writes at most every 0.5 s, and a message change waits out the window instead of
     being dropped. Reuse it for `cut_all(progress=…)` (its callback is `(done, total, name)`, so map it to
     `(done, total, "Cutting")`). Contract: `::test_throttle_writes_at_most_every_half_second`.
-  - `_write_json(path, data)` is write-then-rename. Use the same pattern for `result.zip` (write
-    `result.zip.tmp`, then `os.replace`).
+  - `_write_json(path, data)` is write-then-rename, encodes with `errors="replace"` so it can't fail on a
+    string, and removes the `.tmp` on any failure (gate r1). Use the same pattern for `result.zip` and
+    `manifest.json` (write `<name>.tmp`, then `os.replace`, and unlink the `.tmp` in an `except`). Contract:
+    `::test_write_json_never_fails_on_encoding_and_leaves_no_tmp`.
 - **The analysis/plan files** (`src/pdf_splitter/worker/analyze.py`): `<id>/analysis.json` (Architecture shape,
   keys pinned by `::test_analyze_outline_book`, `::test_analyze_headings_book_without_outline`) and
   `<id>/plan.json` = `default_plan(analysis)`: `{source, settings, sections: [{name, page, heading}], overrides:
@@ -77,7 +86,11 @@ Toolchain: `uv 0.12.10`, Python 3.12. Dev deps: pytest, ruff and `httpx2`.
   `::test_default_plan_settings_round_trip_and_match_the_index_profile`,
   `::test_task_main_writes_analysis_and_plan_then_review` (`plan.json == default_plan(analysis.json)`). Pages are
   1-based sheets (ADR-003). Plan `sections[].name` is the display name. The engine gets `NNN-<ascii-slug>` (see
-  Architecture § Data Types).
+  Architecture § Data Types). **Every string in `analysis.json` (and so in the default `plan.json`) is already
+  UTF-8-safe**: `analyze.json_safe` (gate r1) replaces the lone surrogates PyMuPDF's `surrogateescape` decoding
+  leaves in a malformed bookmark title or heading with U+FFFD before the dict is built, so names read from those
+  files need no cleaning. Contracts: `::test_task_survives_a_bookmark_title_that_is_not_valid_unicode` (the two
+  byte-exact titles from the review, through `task.main`), `::test_json_safe_replaces_every_lone_surrogate_and_nothing_else`.
 - **The index cache**: `<id>/work/.book-index.json` is built under `profile_from_dict(DEFAULT_SETTINGS)`. So
   `Book.open(out=<id>/work, profile=profile_from_dict(plan["settings"]))` reuses it only while the settings hash
   matches. Any layout change re-indexes the whole book (Maciocia, 1319 pages: ≈ 12 s), and that matters inside a
@@ -121,7 +134,10 @@ Toolchain: `uv 0.12.10`, Python 3.12. Dev deps: pytest, ruff and `httpx2`.
 5. **Engine names**: `NNN-<ascii-slug>` (≤ 80 bytes, unique). Display names can collide or contain `/`, and the
    engine refuses unsafe names. ZIP entries are `NNN - <sanitized display name>.pdf` (you can reuse
    `upload.sanitize_filename`'s rules, but also strip `/`/`\`). Overrides are keyed by the Plan's section INDEX, so
-   translate them to engine names.
+   translate them to engine names. Names from `analysis.json`/`plan.json` are already JSON-safe (above), but a
+   plan a client PUTs is not: JSON `"\udcff"` escapes decode to a lone surrogate that strict UTF-8 (the file
+   write, the ZIP entry name, the API response) rejects. Run `analyze.clean_text` over each name in the Plan
+   model, or reject such names with 422, and test it with a `"\udcff"` escape in the request body.
 6. **State machine** (Architecture § Job states): `POST /cut` only from `review` or `done` (409 otherwise, including
    while `queued`/`running`). `PUT plan` from `done` returns the job to `review`. Old outputs stay downloadable until
    the next cut replaces them, so the cut must write `result.zip` atomically.
