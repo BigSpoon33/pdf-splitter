@@ -218,3 +218,15 @@ Per-AC ✅/❌ with file:line, the test counts (before 185 / after N), the `ruff
 output (upload → review → PUT plan → cut → `done`, and the zip listing), the commits (on both remotes), and what
 STORY-008 (the SPA) should know: every endpoint's status codes and body shapes, **cited as the tests that pin
 them** (not hand-written JSON), the polling contract for `GET /api/jobs/{id}`, and the error `code` list.
+
+## Orchestrator addendum (binding)
+
+- **Plan validation must reject non-finite numbers**: NaN/±Infinity in any setting or override
+  (`allow_inf_nan=False` / `math.isfinite`) → 422. `profile_from_dict`'s range checks let NaN through
+  (STORY-001 review). Test it.
+- **Page range**: every section `page` must be in `[1, pages]` → else 422 — the engine's `cuts.plan`
+  raises IndexError past the book end (STORY-003 findings). Test page 0, pages+1.
+- **Override cut coordinates** must be finite and within the page height; `startCol`/`endCol` ∈
+  {full,left,right}. Test out-of-range values.
+- The cut task's ZIP + per-section files must leave no partial `result.zip` on failure — test it
+  non-vacuously (fail AFTER the file exists, prove the test fails without cleanup), like STORY-006.
