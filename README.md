@@ -74,3 +74,21 @@ All settings are environment variables with the `PDFSPLIT_` prefix (`src/pdf_spl
 | `PDFSPLIT_ANALYZE_TIMEOUT` | `300` | analyze job wall-clock limit, seconds |
 | `PDFSPLIT_CUT_TIMEOUT` | `600` | cut job wall-clock limit, seconds |
 | `PDFSPLIT_PUBLIC_URL` | `http://localhost:8000` | the site's public base URL |
+
+## Web
+
+The SPA lives in `web/` (Svelte 5 + Vite + TypeScript, [Bun](https://bun.sh) only). In development Vite serves
+it and proxies `/api` to the API on `localhost:$API_PORT` (default 8000), so the browser stays same-origin.
+
+```bash
+cd web
+bun install
+API_PORT=8000 bun run dev    # http://localhost:5173 (run the api + worker above on API_PORT)
+bun run check                # svelte-check (TypeScript strict)
+bun run test                 # vitest run (jsdom; no API or network needed)
+bun run build                # static files in web/dist/
+```
+
+`API_PORT` can also go in `web/.env.local`. `VITE_MAX_BYTES` (build time) changes the client-side size
+precheck; it should match `PDFSPLIT_MAX_BYTES`. Routes are `/` (upload) and `/j/<id>` (a job), so whatever serves
+`web/dist/` in production must answer `index.html` for `/j/*`.
