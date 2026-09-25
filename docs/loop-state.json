@@ -1,7 +1,7 @@
 {
   "mode": "auto",
   "active_story": "STORY-005",
-  "loop_phase": "implement",
+  "loop_phase": "halted",
   "queue": [
     "STORY-005",
     "STORY-006",
@@ -29,7 +29,9 @@
     "STORY-004": 2,
     "STORY-005": 2
   },
-  "failed": {},
+  "failed": {
+    "STORY-005": "gate r2: 1 confirmed regression \u2014 exact-22-char token redaction leaks ids with adjacent id-alphabet chars (see STORY-005-review.md)"
+  },
   "consecutive_failures": 0,
   "branches": {
     "engine": "monograph-splitter feature/web-mode",
@@ -42,7 +44,8 @@
   "run": {
     "started": "2026-09-25",
     "runner": "in-session background subagent (tmux --dangerously-skip-permissions route denied by the auto-mode classifier)",
-    "active": "STORY-005 (retry)"
+    "active": null,
+    "halt_reason": "STORY-005 failed its gate twice"
   },
   "last_updated": "2026-09-25",
   "exceptions": {

@@ -11,3 +11,8 @@ Coverage highlights: 210 MB → 413 in 0.7 s with flat RSS; nested-XObject hang 
 4. [correctness] upload.py:73 — preflight argv has no `--` and `jobs_dir` is never resolved; `PDFSPLIT_JOBS_DIR=.`/empty makes 1-in-64 ids (leading `-`) parse as an option → valid PDF gets 400 `unreadable`. CONFIRMED (dash.py).
 
 Non-finding noted for later: preflight has no memory rlimit (ADR-005 said timeout-only); a 2.5 KB nested-XObject text PDF reaches ~790 MB RSS inside the 10 s window → STORY-006 addendum applies the worker's rlimits to preflight too.
+
+## Round 2 (re-review of 4006eff) — FAILED (1 confirmed regression) → loop HALTED
+Fixes 1/3/4 verified (7 path shapes redacted live; escaping ASCII-clean incl. invalid UTF-8; `--` + resolved jobs_dir; each half mutation-tested).
+
+1. [correctness, regression vs 210e30b] access_log.py:20 (used :25-26; tests/test_upload.py:403-405 locks it in) — redaction matches only runs of EXACTLY 22 id-alphabet chars bounded by non-alphabet chars, so a real id touching any other `[A-Za-z0-9_-]` char is logged raw: `/api/jobs/<id>x`, `x<id>`, `<id><id>`, `<id>-extra`, `<id>_`, `<id>%41`, and a 21-char truncation (last char ∈ {A,Q,g,w} → 4 guesses). The parent hashed the whole segment. CONFIRMED live by skeptic (scratchpad/r005/server3.log).
