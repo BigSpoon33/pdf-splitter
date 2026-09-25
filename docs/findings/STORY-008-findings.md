@@ -2,7 +2,8 @@
 **Date:** 2026-09-25
 **Status:** done
 
-Commit: `a9044de feat: STORY-008 - SPA scaffold with drop zone and live job status` (feature/mvp).
+Commits: `a9044de feat: STORY-008 - SPA scaffold with drop zone and live job status`, gate r1 fix
+`c3bc2e5 fix: STORY-008 - gate r1: first-poll errors are shown; the live region settles on a fatal error` (feature/mvp).
 
 ## AC Verification
 - [x] AC-1: `web/` is Svelte 5 + Vite 8 + TypeScript (strict) — `web/package.json:6-12` (scripts `dev`/`build`/`check`/`test`),
@@ -74,7 +75,8 @@ headless Chromium via playwright-core from a scratch dir — not a repo dependen
   `internal`. A fetch/XHR network failure → client code `network`.
 - **Precheck:** a file passes when its name ends `.pdf` (any case) OR its type is `application/pdf` (some OSes send no
   type); a 0-byte file is `not_pdf` (the API does the same). Only the first dropped file is used.
-- **Transient poll failures** (network, 5xx) keep polling at 1.5 s with a "Retrying…" note; only 404/410 are final.
+- **Transient poll failures** (network, 5xx) keep polling at 1.5 s with a "<message> Retrying…" note — also before the
+  first successful poll (gate r1); only 404/410 are final. `aria-busy` is true exactly while the loop is still polling.
 - **Privacy (ADR-007):** `<meta name="referrer" content="no-referrer">` so `/j/<id>` never leaks through a Referer; the
   title is fixed; nothing is logged or stored. An inline `data:,` favicon avoids a stray `/favicon.ico` request.
 - **Routing without a library:** `route.ts` (`parseRoute`, `jobPath`, `navigate`, `onNavigate`); unknown paths render a
@@ -82,8 +84,25 @@ headless Chromium via playwright-core from a scratch dir — not a repo dependen
 - **Production SPA fallback:** whatever serves `web/dist/` must answer `index.html` for `/j/*` (Vite's dev server does
   this already) — STORY-013's Caddyfile needs `try_files {path} /index.html`. Noted in README § Web.
 
+## Gate r1 fixes (`c3bc2e5`)
+Review: `docs/findings/STORY-008-review.md` (2 confirmed, 1 refuted).
+- **First-poll errors were swallowed** (`JobStatus.svelte`, the `!job` branch): a network/5xx answer before the first
+  successful poll showed a bare "Loading…" forever. Now that branch renders `<message> Retrying…` (`role=status`) and
+  polling continues; the first success replaces it with the job UI. Test: `JobStatus.test.ts` "shows a transient error
+  before the first answer, then the job once a poll succeeds" (network → 500 → running).
+- **`aria-busy` stuck at true after 404/410**: it followed `active` (job non-terminal) and ignored `fatal`. It now
+  follows a `polling` derived (`!fatal && (job === null || non-terminal)`), the loop's own stop conditions. Tests:
+  "clears aria-busy once polling stops on a fatal error" (running → 410 → `aria-busy="false"` + the alert) and "clears
+  aria-busy on a terminal state". Both new tests fail against `a9044de`'s component and pass now.
+- **Copy decision (orchestrator):** `no_text_layer` now says plainly that OCR isn't supported — "This PDF has no text
+  layer (it looks scanned). OCR isn't supported yet — run OCR on it first, then upload it again." — in `web/src/lib/errors.ts`
+  and, as directed, in `src/pdf_splitter/errors.py:MESSAGES` (no Python test pins the text; pytest 332 still pass).
+  Pinned in `errors.test.ts` "says plainly that OCR is not supported (PRD AC-8)".
+- After: `bun run check` 0/0, `bun run test` **68 passed** (5 files), `bun run build` 44.12 kB JS (gzip 17.39),
+  `uv run pytest` 332 passed, `uv run ruff check` clean.
+
 ## Bugs Found
-none (the API behaved exactly as its tests pin it).
+none in the API (it behaved exactly as its tests pin it). Two SPA bugs were found by gate r1 and fixed — see above.
 
 ## Handoff Context for Next Session
 The API client is `web/src/lib/api.ts` (only `getJob`/`createJob` so far; add `getAnalysis`/`getPlan`/`putPlan`

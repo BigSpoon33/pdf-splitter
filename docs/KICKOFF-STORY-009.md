@@ -7,9 +7,10 @@ The product lives in two repos:
 
 - **Web (you write code here):** `~/Documents/Repos/pdf-splitter` (GitHub `BigSpoon33/pdf-splitter` = `origin`,
   Gitea mirror = `gitea`), branch **`feature/mvp`**. Stay on that branch. STORY-008 landed as
-  `a9044de feat: STORY-008 - SPA scaffold with drop zone and live job status` and its docs commit
-  `docs: STORY-008 - findings + KICKOFF-STORY-009`. Anything after those is the orchestrator's gate work; check
-  `git log --oneline -8`. **Baselines:** `cd web && bun run test` → **64 pass** (5 files, ≈ 1.5 s), `bun run check` 0 errors
+  `a9044de feat: STORY-008 - SPA scaffold with drop zone and live job status`, its docs commit
+  `docs: STORY-008 - findings + KICKOFF-STORY-009`, and the gate r1 fix `c3bc2e5 fix: STORY-008 - gate r1: first-poll
+  errors are shown; the live region settles on a fatal error` (+ its docs commit). Anything after those is the orchestrator's gate work; check
+  `git log --oneline -8`. **Baselines:** `cd web && bun run test` → **68 pass** (5 files, ≈ 1.5 s), `bun run check` 0 errors
   0 warnings, `bun run build` ≈ 44 kB JS (17 kB gzip); `uv run pytest` → **332 pass** (≈ 65 s), `uv run ruff check` clean.
   `docs/loop-state.json` belongs to the orchestrator: never stage it.
 - **Engine (read-only, you won't need it):** `~/Documents/Repos/monograph-splitter`, pinned at `v0.4.1`.
@@ -46,7 +47,10 @@ on 8010 and start Vite with `API_PORT=8010 bun run dev` (see gotcha 1).
   `{#key route.id}<JobStatus id=…/>{/key}` on `/j/<id>`. The id lives only in the URL (ADR-007): never log it, never put
   it in `document.title` or storage; `index.html` sets `referrer: no-referrer`.
 - **`web/src/components/JobStatus.svelte`** — props `{id, load = getJob, pollMs = POLL_MS}`; polls while
-  queued/running, stops on review/done/failed/404/410. It owns the `JobStatus` value internally; STORY-009 needs it
+  queued/running, stops on review/done/failed/404/410. A transient error (network/5xx), even before the first
+  successful poll, shows `<message> Retrying…` and keeps polling; `aria-busy` is true exactly while it still polls
+  (pinned by `JobStatus.test.ts`: "shows a transient error before the first answer…", "clears aria-busy once polling
+  stops on a fatal error"). It owns the `JobStatus` value internally; STORY-009 needs it
   outward (see ordering step 1). Injecting the loader as a prop is how its tests avoid the network
   (`JobStatus.test.ts`), and the same pattern suits the new components.
 - **`web/src/components/DropZone.svelte`** — `precheck(file, maxBytes)` exported from its `<script module>`.
@@ -148,7 +152,7 @@ on 8010 and start Vite with `API_PORT=8010 bun run dev` (see gotcha 1).
 
 ## Final report shape
 
-Per-AC ✅/❌ with file:line, the counts (`bun run test` before 64 / after N; `uv run pytest` still 332), `bun run check`
+Per-AC ✅/❌ with file:line, the counts (`bun run test` before 68 / after N; `uv run pytest` still 332), `bun run check`
 and `bun run build` results (bundle size), the manual run's observations (source switch + undo, an edit persisted and
 reloaded, a 422 rendered next to its control), how the manifest-flags question was resolved, the commits (on both
 remotes), and what STORY-010 (PagePreview) should know: the plan store's API, where the selected section lives, and the
