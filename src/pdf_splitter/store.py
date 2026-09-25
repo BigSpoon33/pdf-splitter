@@ -1,0 +1,188 @@
+from __future__ import annotations
+
+import hashlib
+import logging
+import secrets
+import sqlite3
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Any
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS jobs (
+  id          TEXT PRIMARY KEY,
+  state       TEXT NOT NULL,
+  kind        TEXT NOT NULL,
+  created_at  TEXT NOT NULL,
+  updated_at  TEXT NOT NULL,
+  expires_at  TEXT NOT NULL,
+  started_at  TEXT,
+  ip_hash     TEXT NOT NULL,
+  owner       TEXT,
+  filename    TEXT NOT NULL,
+  bytes       INTEGER NOT NULL,
+  pages       INTEGER NOT NULL,
+  progress    INTEGER NOT NULL DEFAULT 0,
+  total       INTEGER NOT NULL DEFAULT 0,
+  message     TEXT,
+  error_code  TEXT
+);
+CREATE INDEX IF NOT EXISTS jobs_queue ON jobs(state, created_at);
+CREATE INDEX IF NOT EXISTS jobs_expiry ON jobs(expires_at);
+CREATE TABLE IF NOT EXISTS rate (ip_hash TEXT, at TEXT);
+"""
+
+STATES = frozenset({"queued", "running", "review", "done", "failed", "deleted"})
+KINDS = frozenset({"analyze", "cut"})
+BUSY_TIMEOUT_S = 5.0
+
+log = logging.getLogger(__name__)
+
+
+def now_ts(now: datetime | None = None) -> str:
+    """One fixed UTC format everywhere, so TEXT comparison and ORDER BY are time order."""
+    return (now or datetime.now(UTC)).astimezone(UTC).isoformat(timespec="seconds")
+
+
+def new_job_id() -> str:
+    return secrets.token_urlsafe(16)
+
+
+def log_id(job_id: str) -> str:
+    """The job id is the only credential (ADR-007), so logs carry this short hash instead."""
+    return hashlib.sha256(job_id.encode()).hexdigest()[:8]
+
+
+class Store:
+    """The jobs table in SQLite WAL mode, shared by api and worker through the jobs volume."""
+
+    def __init__(self, path: Path | str) -> None:
+        self.path = Path(path)
+        self._conn: sqlite3.Connection | None = None
+
+    def connect(self) -> sqlite3.Connection:
+        # isolation_level=None: we issue BEGIN IMMEDIATE ourselves; Python's implicit
+        # transactions would otherwise start a deferred one and defeat the claim lock.
+        conn = sqlite3.connect(self.path, timeout=BUSY_TIMEOUT_S, isolation_level=None)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute(f"PRAGMA busy_timeout={int(BUSY_TIMEOUT_S * 1000)}")
+        return conn
+
+    @property
+    def conn(self) -> sqlite3.Connection:
+        if self._conn is None:
+            self._conn = self.connect()
+        return self._conn
+
+    def close(self) -> None:
+        if self._conn is not None:
+            self._conn.close()
+            self._conn = None
+
+    def init(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.conn.executescript(SCHEMA)
+
+    def journal_mode(self) -> str:
+        return self.conn.execute("PRAGMA journal_mode").fetchone()[0]
+
+    def create_job(
+        self,
+        *,
+        ip_hash: str,
+        filename: str,
+        bytes: int,
+        pages: int,
+        ttl_hours: int,
+        kind: str = "analyze",
+        state: str = "queued",
+        job_id: str | None = None,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        _check(state=state, kind=kind)
+        job_id = job_id or new_job_id()
+        created = now or datetime.now(UTC)
+        ts = now_ts(created)
+        self.conn.execute(
+            "INSERT INTO jobs (id, state, kind, created_at, updated_at, expires_at, ip_hash,"
+            " filename, bytes, pages) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                job_id, state, kind, ts, ts, now_ts(created + timedelta(hours=ttl_hours)),
+                ip_hash, filename, bytes, pages,
+            ),
+        )
+        log.info("job %s created (%s/%s)", log_id(job_id), state, kind)
+        job = self.get_job(job_id)
+        assert job is not None
+        return job
+
+    def get_job(self, job_id: str) -> dict[str, Any] | None:
+        row = self.conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+        return dict(row) if row else None
+
+    def queue_length(self) -> int:
+        return self.conn.execute("SELECT COUNT(*) FROM jobs WHERE state = 'queued'").fetchone()[0]
+
+    def claim_next(self, kind: str, now: datetime | None = None) -> dict[str, Any] | None:
+        """Atomically move the oldest queued job of `kind` to running; None if the queue is empty."""
+        _check(kind=kind)
+        ts = now_ts(now)
+        conn = self.conn
+        # BEGIN IMMEDIATE takes the write lock up front, so two claimers serialize here
+        # instead of both reading the same queued row.
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = conn.execute(
+                "UPDATE jobs SET state = 'running', started_at = ?, updated_at = ?"
+                " WHERE id = (SELECT id FROM jobs WHERE state = 'queued' AND kind = ?"
+                " ORDER BY created_at LIMIT 1) RETURNING *",
+                (ts, ts, kind),
+            ).fetchone()
+            conn.execute("COMMIT")
+        except BaseException:
+            conn.execute("ROLLBACK")
+            raise
+        if row is None:
+            return None
+        log.info("job %s claimed (%s)", log_id(row["id"]), kind)
+        return dict(row)
+
+    def update_progress(
+        self, job_id: str, progress: int, total: int, message: str | None = None, now: datetime | None = None
+    ) -> None:
+        self.conn.execute(
+            "UPDATE jobs SET progress = ?, total = ?, message = ?, updated_at = ? WHERE id = ?",
+            (progress, total, message, now_ts(now), job_id),
+        )
+
+    def set_state(
+        self,
+        job_id: str,
+        state: str,
+        *,
+        kind: str | None = None,
+        error_code: str | None = None,
+        message: str | None = None,
+        now: datetime | None = None,
+    ) -> None:
+        _check(state=state, kind=kind)
+        self.conn.execute(
+            "UPDATE jobs SET state = ?, kind = COALESCE(?, kind), error_code = ?, message = ?,"
+            " updated_at = ? WHERE id = ?",
+            (state, kind, error_code, message, now_ts(now), job_id),
+        )
+        log.info("job %s -> %s%s", log_id(job_id), state, f" ({error_code})" if error_code else "")
+
+    def expired(self, now: datetime | None = None) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            "SELECT * FROM jobs WHERE expires_at < ? ORDER BY expires_at", (now_ts(now),)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def _check(*, state: str | None = None, kind: str | None = None) -> None:
+    if state is not None and state not in STATES:
+        raise ValueError(f"unknown job state {state!r}")
+    if kind is not None and kind not in KINDS:
+        raise ValueError(f"unknown job kind {kind!r}")

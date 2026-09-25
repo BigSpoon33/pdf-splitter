@@ -1,0 +1,42 @@
+[project]
+name = "pdf-splitter"
+version = "0.1.0"
+description = "Web service that splits a large text-layer PDF into one PDF per chapter or section"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi",
+    "uvicorn",
+    "pydantic-settings",
+    "python-multipart",
+    "monograph-splitter @ git+https://github.com/BigSpoon33/pdf-splitter-engine@v0.4.1",
+    # Pinned exactly (Architecture § Dependency Map): MuPDF parses hostile input, so upgrades are deliberate.
+    "pymupdf==1.28.2",
+]
+
+[project.scripts]
+pdf-splitter = "pdf_splitter.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "ruff",
+    "httpx2>=2.13.1",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pdf_splitter"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
