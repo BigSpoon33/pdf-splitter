@@ -8,7 +8,8 @@ The product lives in two repos:
 - **Web (you write code here):** `~/Documents/Repos/pdf-splitter` (GitHub `BigSpoon33/pdf-splitter` = `origin`,
   Gitea mirror = `gitea`), branch **`feature/mvp`**. Stay on that branch; the loop keeps one branch per repo.
   STORY-004 made it a Python project: `20e34fa feat: STORY-004 - scaffold: FastAPI app, settings, SQLite job
-  store, health`, followed by the `docs: STORY-004 - findings + KICKOFF-STORY-005` commit. **Baseline: 20 tests
+  store, health`, its docs commit, the gate r1 fix `3da3255 fix: STORY-004 - gate r1: per-request store
+  connections survive cross-thread teardown`, and that fix's docs commit. **Baseline: 23 tests
   pass (`uv run pytest`), and `uv run ruff check` is clean.** `docs/loop-state.json` belongs to the orchestrator,
   so never stage it.
 - **Engine (read-only):** `~/Documents/Repos/monograph-splitter` (GitHub `BigSpoon33/pdf-splitter-engine`),
@@ -30,7 +31,7 @@ TestClient transport; plain `httpx` triggers a starlette deprecation warning).
 - `src/pdf_splitter/app.py:create_app(settings=None)`: the factory. Settings live on `app.state.settings`.
   The lifespan creates `jobs_dir` and runs `Store.init()`. Routes take dependencies
   `SettingsDep = Annotated[Settings, Depends(get_settings)]` and `StoreDep = Annotated[Store, Depends(get_store)]`
-  (**one fresh Store/connection per request**, because sqlite3 connections are thread-bound). Add your route
+  (**one fresh Store/connection per request**, so requests on different threadpool threads never share one; the connection is opened with `check_same_thread=False` because FastAPI may run the teardown on another thread, but a `Store` must never be used by two threads at once). Add your route
   inside `create_app` (or in `upload.py` as an `APIRouter` included there) using those deps. Never read env at
   import time. Contract: `tests/test_health.py`.
 - `src/pdf_splitter/store.py`:
@@ -135,7 +136,7 @@ TestClient transport; plain `httpx` triggers a starlette deprecation warning).
 
 ## Final report shape
 
-Per-AC ✅/❌ with file:line, the test counts (before 20 / after N), the `ruff check` result, the manual curl
+Per-AC ✅/❌ with file:line, the test counts (before 23 / after N), the `ruff check` result, the manual curl
 output, the commits (on both remotes), and what STORY-006 (worker + analyze) should know: the error-body
 shape, where the source lands, the row a successful upload leaves, and how preflight is invoked (a reusable
 subprocess-runner pattern for the worker). Cite the tests as the contract, not hand-written JSON.
@@ -146,5 +147,7 @@ subprocess-runner pattern for the worker). Cite the tests as the contract, not h
   `/api/jobs…` routes, uvicorn's default access log would print raw ids. Run uvicorn with
   `access_log=False` in `cli.py` and add a small request-logging middleware (or log filter) that logs
   method, status, duration and the path with any job id replaced by `log_id(id)`. Test it.
-- The store fix from STORY-004's retry (`check_same_thread=False`, always-drop-on-close) is in place
-  before you start; keep using `StoreDep`.
+- The store fix from STORY-004's retry (`check_same_thread=False`, always-drop-on-close) landed as
+  `3da3255`; keep using `StoreDep`. Its contracts: `tests/test_store.py::test_connection_survives_cross_thread_close`,
+  `::test_close_always_drops_the_connection` and `tests/test_health.py::test_concurrent_health_requests_all_succeed`
+  (23 tests now). Your upload route should be exercised by a similar concurrent-requests test.
