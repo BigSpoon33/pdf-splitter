@@ -7,9 +7,10 @@ The product lives in two repos:
 
 - **Web (you write code here):** `~/Documents/Repos/pdf-splitter` (GitHub `BigSpoon33/pdf-splitter` = `origin`,
   Gitea mirror = `gitea`), branch **`feature/mvp`**. Stay on that branch. STORY-005 landed as
-  `b84c3c4 feat: STORY-005 - upload with streaming size cap and sandboxed preflight` plus its docs commit.
-  **Baseline: 67 tests pass (`uv run pytest`), and `uv run ruff check` is clean.** `docs/loop-state.json` belongs
-  to the orchestrator, so never stage it.
+  `b84c3c4 feat: STORY-005 - upload with streaming size cap and sandboxed preflight`, its docs commit, the gate
+  r1 fix `4006eff fix: STORY-005 - gate r1: ids redacted in any path shape, log paths escaped, preflight argv
+  hardened`, and that fix's docs commit. **Baseline: 86 tests pass (`uv run pytest`), and `uv run ruff check` is
+  clean.** `docs/loop-state.json` belongs to the orchestrator, so never stage it.
 - **Engine (read-only here):** `~/Documents/Repos/monograph-splitter` (GitHub `BigSpoon33/pdf-splitter-engine`),
   pinned at tag `v0.4.1` in `pyproject.toml`/`uv.lock`. The surface you need:
   - `monograph_splitter.detect`: `outline_levels(doc) -> [{level, count}]`, `outline_entries(doc, level)`, and
@@ -32,10 +33,16 @@ Toolchain: `uv 0.12.10`, Python 3.12. Dev deps: pytest, ruff and `httpx2`.
 
 - `src/pdf_splitter/upload.py`:
   - `run_preflight(path, max_pages, job_id, timeout=None)`: **the subprocess-runner pattern to copy**:
-    `[sys.executable, "-m", "<module>", ...]`, `capture_output=True`, `stdin=DEVNULL`, `timeout=`, and the
-    result read from the **last stdout line** only. `TimeoutExpired`, a non-zero exit or unparseable output
-    collapse to one error code. Only `log_id(job_id)` and the exit code are logged, never stderr, because it can
-    contain the path, and the path contains the id.
+    `[sys.executable, "-m", "<module>", <options>, "--", <positional>]`, `capture_output=True`, `stdin=DEVNULL`,
+    `timeout=`, and the result read from the **last stdout line** only. `TimeoutExpired`, a non-zero exit or
+    unparseable output collapse to one error code. Only `log_id(job_id)` and the exit code are logged, never
+    stderr, because it can contain the path, and the path contains the id. **Always put `--` before a
+    positional that can start with `-`**: 1 in 64 job ids does (`token_urlsafe`), so `python -m pdf_splitter.task
+    analyze -bCd…` without `--` is an argparse error → a spurious failure. Contract:
+    `tests/test_upload.py::test_preflight_uses_a_10s_timeout_and_this_interpreter`,
+    `::test_upload_with_relative_jobs_dir_and_dash_id`.
+  - `Settings.jobs_dir` is **always absolute** (an after-validator `resolve()`s it, `config.py`), so is `db_path`;
+    `Settings(jobs_dir=Path("."))` is `Path.cwd()`. Contract: `tests/test_config.py::test_jobs_dir_is_always_absolute`.
   - A successful upload leaves exactly `<jobs_dir>/<id>/source.pdf` and one row `state='queued'`,
     `kind='analyze'`, with `pages`, `bytes`, a sanitized `filename` and `expires_at = created + ttl_hours`.
     Contract: `tests/test_upload.py::test_upload_creates_queued_analyze_job`.
@@ -45,8 +52,12 @@ Toolchain: `uv 0.12.10`, Python 3.12. Dev deps: pytest, ruff and `httpx2`.
   prints one JSON object, and `check()` testable in-process.
 - `src/pdf_splitter/deps.py`: `get_settings`, `get_store`, `SettingsDep` and `StoreDep` (moved from `app.py`, which
   re-exports them).
-- `src/pdf_splitter/access_log.py`: the request log with job ids hashed. `cli.py` runs uvicorn with
-  `access_log=False`. Contract: `tests/test_upload.py::test_logs_never_contain_a_job_id`.
+- `src/pdf_splitter/access_log.py`: the request log with job ids hashed. `redact_path(s)` replaces **every**
+  token shaped like a job id (`[A-Za-z0-9_-]{22}`, bounded by non-token chars) with `log_id()`, wherever it sits
+  in the string; `loggable_path(s)` percent-encodes the redacted path so ESC/U+2028/`%` can't reach a terminal
+  raw. Reuse `redact_path` on any string the worker logs that could carry an id (a command line, a path).
+  `cli.py` runs uvicorn with `access_log=False`. Contracts: `tests/test_upload.py::test_logs_never_contain_a_job_id`,
+  `::test_redact_path_cannot_be_dodged_by_path_shape`, `::test_logged_path_is_escaped`.
 - From STORY-004: `Settings` (`workers`, `analyze_timeout`, `cut_timeout`, `jobs_dir`, `db_path`),
   `Store.claim_next(kind)` (atomic, `BEGIN IMMEDIATE`), `update_progress(id, progress, total, message)`,
   `set_state(id, state, kind=, error_code=, message=)` (overwrites error_code/message), `get_job`, and
@@ -62,16 +73,21 @@ Toolchain: `uv 0.12.10`, Python 3.12. Dev deps: pytest, ruff and `httpx2`.
    itself does `import fitz` lazily (`detect.py:103`, `render.py`, `verify.py`), so the warning WILL land on the
    task's stdout mid-run: keep the result on the last line (or in a file), never "all of stdout".
 2. **Job ids never reach logs** (ADR-007). The worker logs `log_id(id)` only. The task subprocess's argv
-   contains the id (`python -m pdf_splitter.task analyze <id>`), so never log the command line or the stderr tail
-   verbatim without replacing the id (and the jobs path) first. Add a test like
-   `test_logs_never_contain_a_job_id` for the worker.
+   contains the id (`python -m pdf_splitter.task analyze -- <id>`), so never log the command line or the stderr
+   tail verbatim without passing it through `access_log.redact_path` first (it hashes ids anywhere in a string).
+   Add a test like `test_logs_never_contain_a_job_id` for the worker.
+   **The task's positional id needs `--` before it** (see `run_preflight` above); test it with a forced
+   dash-leading id, the way `test_upload_with_relative_jobs_dir_and_dash_id` does.
 3. **rlimits in `preexec_fn`**: `resource.setrlimit(RLIMIT_AS, 2 GB)`, `RLIMIT_CPU` (timeout + 10), and
    `RLIMIT_FSIZE` (1 GB). `preexec_fn` is not thread-safe with threads in the parent. If you run `WORKERS`
    concurrent jobs from threads, consider wrapping the child in a tiny launcher module that sets its own rlimits
    (`python -m pdf_splitter.worker.sandbox …`), or use `process_group`/`start_new_session` and document why.
    Distinguishing "resources" from "timeout" (AC-4): a wall `TimeoutExpired` → `timeout`, while death by
    SIGXCPU/SIGKILL, a `MemoryError` or an `RLIMIT_AS` failure → `resources`. Pin the mapping in a test with an
-   injected task.
+   injected task. **Addendum from STORY-005's review:** the preflight subprocess has a timeout but no memory
+   rlimit, and a 2.5 KB nested-XObject text PDF reached ~790 MB RSS inside the 10 s window. Once your sandbox
+   launcher exists, apply the same rlimits to `upload.run_preflight`'s launch (keep its shape and its tests
+   green; a `test_preflight_runs_under_rlimits`-style check is enough) and record it in findings.
 4. **Progress at most every 0.5 s** (AC-3): throttle in the task, and write with its own `Store`. The task is a
    separate process, so it opens its own connection to `settings.db_path`.
 5. **Re-queue once (AC-5)**: there's no attempts column in the schema. Architecture § Storage Schema is the
@@ -132,7 +148,7 @@ Toolchain: `uv 0.12.10`, Python 3.12. Dev deps: pytest, ruff and `httpx2`.
 
 ## Final report shape
 
-Per-AC ✅/❌ with file:line, the test counts (before 67 / after N), the `ruff check` result, the manual end-to-end
+Per-AC ✅/❌ with file:line, the test counts (before 86 / after N), the `ruff check` result, the manual end-to-end
 output (the row reaching `review`, and the `analysis.json` keys), the commits (on both remotes), and what STORY-007
 should know: the runner API for adding the `cut` kind, the `plan.json` it will read, and the failure-code mapping.
 Cite the tests as the contract, not hand-written JSON.
