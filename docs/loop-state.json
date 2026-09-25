@@ -1,7 +1,7 @@
 {
   "mode": "auto",
   "active_story": "STORY-002",
-  "loop_phase": "halted",
+  "loop_phase": "implement",
   "queue": [
     "STORY-002",
     "STORY-003",
@@ -24,11 +24,9 @@
   ],
   "attempts": {
     "STORY-001": 1,
-    "STORY-002": 2
+    "STORY-002": 3
   },
-  "failed": {
-    "STORY-002": "gate r2: 2 confirmed findings (0.12\u00b7H edge floor drops page-opening roman-letter headings and digit-masked numbered headings) \u2014 see docs/findings/STORY-002-review.md"
-  },
+  "failed": {},
   "consecutive_failures": 1,
   "branches": {
     "engine": "monograph-splitter feature/web-mode",
@@ -41,8 +39,10 @@
   "run": {
     "started": "2026-09-25",
     "runner": "in-session background subagent (tmux --dangerously-skip-permissions route denied by the auto-mode classifier)",
-    "active": null,
-    "halt_reason": "STORY-002 failed its gate twice; STORY-003..013 depend on it"
+    "active": "STORY-002 (attempt 3, Shuma-approved exception)"
   },
-  "last_updated": "2026-09-25"
+  "last_updated": "2026-09-25",
+  "exceptions": {
+    "STORY-002": "third attempt approved by Shuma 2026-09-25; heuristic edge cases beyond the r2 root cause become follow-ups"
+  }
 }

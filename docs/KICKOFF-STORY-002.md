@@ -163,3 +163,42 @@ forward on the same branch with ONE commit:
 Also: update the STORY-002 findings file (add a "Gate r1 fixes" section; keep Status done),
 and re-check that `KICKOFF-STORY-003.md` is still accurate (edit only if your fix changes an
 API it cites). Full suite must stay green (102 + your new tests).
+
+## Attempt 3 (Shuma approved ONE more targeted fix, 2026-09-25) — READ THIS FIRST
+
+Gate r2 (on 4d8d375) confirmed 2 findings with ONE root cause — see `docs/findings/STORY-002-review.md`
+§ Round 2. `_at_edge` floors the page-edge strip at `EDGE_SHARE·H` (≈95 pt) regardless of the
+caller's bands; page-opening headings (top ≈ 60–70 pt) sit in it, so roman-letter headings
+(C D I L M V X) are dropped as folios and digit-masked numbered headings ("Lesson 1..10" on ≥30%
+of pages) collapse into one "running header".
+
+**Binding rules (implement exactly; fix forward on feature/web-mode, one commit
+`fix: STORY-002 - gate r2: the caller's bands are the only page edge; numbered headings are not running headers`):**
+
+1. **No hidden edge zone.** Delete `EDGE_SHARE` and the floor. "At the edge" = inside the
+   caller's `header_band` (top) or `footer_band` (bottom), nothing else.
+2. **Folios:** digit-only lines ("12", "- 12 -", "Page 12") are page numbers anywhere (unchanged).
+   A well-formed roman numeral is a page number ONLY at the edge per rule 1.
+3. **Running headers, two kinds:**
+   a. *Verbatim*: identical normalized text (case/whitespace-folded, digits NOT masked) at the same
+      size on ≥ max(2, ceil(0.3·pages)) pages → excluded anywhere (a line repeated verbatim on 30% of
+      pages is furniture, not a section start).
+   b. *Digit-varying* (the "Chapter 3 · Title  45" kind): digit-masked key on ≥ 30% of pages →
+      excluded ONLY for lines at the edge per rule 1.
+   Consequence: with `header_band=footer_band=0`, digit-varying running headers are no longer
+   auto-excluded — that is accepted (the user's bands define the edge). Update the AC-6 tests to
+   this rule (verbatim running lines still excluded with bands 0; digit-varying ones excluded with
+   default bands) and record the interpretation in findings.
+4. **Tests that must exist and pass:** the A–Z glossary with letters at baseline 90 (top ≈ 68.6 —
+   the r2 geometry, NOT 120) → 26 candidates; the 30-page "Lesson N" workbook (10×3 pages,
+   baseline 90) → 10 candidates; the "Rare Header 1/2/3" test rewritten to the new rule; folio
+   forms in the default bands still excluded; a verbatim running header still excluded.
+   Repros: scratchpad probe_glossary*.py, probe_numbered*.py (orchestrator scratchpad dir).
+5. Real-book check (read-only): Maciocia default candidates count before/after — report both;
+   chapter 30/31 must still be one candidate each at wrap_gap=30.
+
+**Scope boundary for this attempt (the reviewer is told the same):** only the r2 root cause and
+anything your change breaks. Other heuristic edge cases found later are logged as follow-ups,
+not blockers — the section list is user-editable by design (PRD A-1).
+Update findings (add "Gate r2 fixes"), keep KICKOFF-STORY-003 accurate (its "Orchestrator
+decisions" section is binding for 003 — don't remove it), push both repos to origin + gitea.
