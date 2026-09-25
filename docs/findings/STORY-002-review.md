@@ -31,3 +31,6 @@ Follow-ups (non-blocking, logged for a detection-tuning story):
 - detect.py:231 — a heading wrapped over 4+ lines disappears once wrap_gap joins it (MAX_WRAP_LINES `continue`); keeping its first 3 lines would still locate (ratio 0.877).
 - default wrap_gap 16 (= heading_wrap_gap) < normal leading of ≥14 pt headings → wrapped big titles split by default; a size-scaled web default feeding both belongs with STORY-009 settings.
 - per-line max span size: one inline big glyph (∑ at 14 pt in 9.5 pt text) promotes a body line to a candidate.
+
+## Round 3b — 2026-09-25 — PASSED
+**Reviewed:** engine defb734..8c12b3f. Auto-review trail: r1 3 confirmed → fixed (4d8d375); r2 2 confirmed → loop halted → Shuma approved attempt 3 → fixed (defb734); r3 1 confirmed regression → fixed (8c12b3f); r3b re-review CLEAN. Regression sweep: 79 real outlined PDFs (20,040 rows) identical defb734 vs 8c12b3f, 0 errors.

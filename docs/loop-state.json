@@ -1,9 +1,8 @@
 {
   "mode": "auto",
-  "active_story": "STORY-002",
+  "active_story": "STORY-003",
   "loop_phase": "implement",
   "queue": [
-    "STORY-002",
     "STORY-003",
     "STORY-004",
     "STORY-005",
@@ -20,29 +19,34 @@
     "STORY-014": "costs money + needs Shuma's domain/host/contact decisions (PRD Q-1, Q-2, Q-4) \u2014 not in the autonomous run"
   },
   "completed": [
-    "STORY-001"
+    "STORY-001",
+    "STORY-002"
   ],
   "attempts": {
     "STORY-001": 1,
-    "STORY-002": 3
+    "STORY-002": 3,
+    "STORY-003": 1
   },
   "failed": {},
-  "consecutive_failures": 1,
+  "consecutive_failures": 0,
   "branches": {
     "engine": "monograph-splitter feature/web-mode",
     "web": "pdf-splitter feature/mvp"
   },
   "baseline": {
-    "engine_tests": "72 passed after STORY-001 (742bfbe)",
+    "engine_tests": "133 passed after STORY-002 (8c12b3f)",
     "web_tests": "none yet"
   },
   "run": {
     "started": "2026-09-25",
     "runner": "in-session background subagent (tmux --dangerously-skip-permissions route denied by the auto-mode classifier)",
-    "active": "STORY-002 (attempt 3b: r3 regression fix)"
+    "active": "STORY-003"
   },
   "last_updated": "2026-09-25",
   "exceptions": {
     "STORY-002": "third attempt approved by Shuma 2026-09-25; heuristic edge cases beyond the r2 root cause become follow-ups"
-  }
+  },
+  "followups": [
+    "detection tuning: 4+-line wrapped headings dropped (MAX_WRAP_LINES), size-scaled default wrap_gap feeding heading_wrap_gap (STORY-009 settings), inline big glyph promotes body line \u2014 see STORY-002-review.md r3"
+  ]
 }
