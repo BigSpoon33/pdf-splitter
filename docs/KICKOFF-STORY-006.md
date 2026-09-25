@@ -9,8 +9,9 @@ The product lives in two repos:
   Gitea mirror = `gitea`), branch **`feature/mvp`**. Stay on that branch. STORY-005 landed as
   `b84c3c4 feat: STORY-005 - upload with streaming size cap and sandboxed preflight`, its docs commit, the gate
   r1 fix `4006eff fix: STORY-005 - gate r1: ids redacted in any path shape, log paths escaped, preflight argv
-  hardened`, and that fix's docs commit. **Baseline: 86 tests pass (`uv run pytest`), and `uv run ruff check` is
-  clean.** `docs/loop-state.json` belongs to the orchestrator, so never stage it.
+  hardened`, the gate r2 fix `676dbbf fix: STORY-005 - gate r2: redact any long id-alphabet run, not only exact
+  22-char tokens`, and each fix's docs commit. **Baseline: 118 tests pass (`uv run pytest`), and `uv run ruff
+  check` is clean.** `docs/loop-state.json` belongs to the orchestrator, so never stage it.
 - **Engine (read-only here):** `~/Documents/Repos/monograph-splitter` (GitHub `BigSpoon33/pdf-splitter-engine`),
   pinned at tag `v0.4.1` in `pyproject.toml`/`uv.lock`. The surface you need:
   - `monograph_splitter.detect`: `outline_levels(doc) -> [{level, count}]`, `outline_entries(doc, level)`, and
@@ -52,12 +53,19 @@ Toolchain: `uv 0.12.10`, Python 3.12. Dev deps: pytest, ruff and `httpx2`.
   prints one JSON object, and `check()` testable in-process.
 - `src/pdf_splitter/deps.py`: `get_settings`, `get_store`, `SettingsDep` and `StoreDep` (moved from `app.py`, which
   re-exports them).
-- `src/pdf_splitter/access_log.py`: the request log with job ids hashed. `redact_path(s)` replaces **every**
-  token shaped like a job id (`[A-Za-z0-9_-]{22}`, bounded by non-token chars) with `log_id()`, wherever it sits
-  in the string; `loggable_path(s)` percent-encodes the redacted path so ESC/U+2028/`%` can't reach a terminal
-  raw. Reuse `redact_path` on any string the worker logs that could carry an id (a command line, a path).
-  `cli.py` runs uvicorn with `access_log=False`. Contracts: `tests/test_upload.py::test_logs_never_contain_a_job_id`,
-  `::test_redact_path_cannot_be_dodged_by_path_shape`, `::test_logged_path_is_escaped`.
+- `src/pdf_splitter/access_log.py`: the request log with job ids hashed. `redact_path(s)` applies two rules
+  (gate r2, Shuma-approved): (1) after a case-insensitive `/api/jobs/` with any repeated slashes, the whole next
+  `[^/]+` segment becomes `log_id(segment)` whatever its length; then (2) **every maximal run of
+  `[A-Za-z0-9_-]` that is 16+ chars long, anywhere in the string, becomes `log_id(run)`** (a whole run, never a
+  slice), so `<id>x`, `x<id>`, `<id><id>`, `<id>-extra`, `<id>A` and truncations down to 16 chars are all hashed.
+  Rule 2 is what makes it safe on a command line or a stderr tail, not just a path; rule 1 only fires on
+  `/api/jobs/` paths. `loggable_path(s)` percent-encodes the redacted path so ESC/U+2028/`%` can't reach a
+  terminal raw. **The worker reuses this rule**: pass any string that could carry an id (argv, a path, a stderr
+  tail) through `redact_path` before logging it. Route words shorter than 16 (`sheets`, `sections`, `result.zip`,
+  `plan`, `cut`) stay readable. `cli.py` runs uvicorn with `access_log=False`. Contracts:
+  `tests/test_upload.py::test_redact_path`, `::test_redact_path_hashes_an_id_glued_to_other_alphabet_chars`,
+  `::test_redact_path_cannot_be_dodged_by_path_shape` (exact expected strings; note `/api/jobs/<id>.json` logs
+  `log_id("<id>.json")`), `::test_logged_path_is_escaped`, `::test_logs_never_contain_a_job_id`.
 - From STORY-004: `Settings` (`workers`, `analyze_timeout`, `cut_timeout`, `jobs_dir`, `db_path`),
   `Store.claim_next(kind)` (atomic, `BEGIN IMMEDIATE`), `update_progress(id, progress, total, message)`,
   `set_state(id, state, kind=, error_code=, message=)` (overwrites error_code/message), `get_job`, and
@@ -74,8 +82,10 @@ Toolchain: `uv 0.12.10`, Python 3.12. Dev deps: pytest, ruff and `httpx2`.
    task's stdout mid-run: keep the result on the last line (or in a file), never "all of stdout".
 2. **Job ids never reach logs** (ADR-007). The worker logs `log_id(id)` only. The task subprocess's argv
    contains the id (`python -m pdf_splitter.task analyze -- <id>`), so never log the command line or the stderr
-   tail verbatim without passing it through `access_log.redact_path` first (it hashes ids anywhere in a string).
-   Add a test like `test_logs_never_contain_a_job_id` for the worker.
+   tail verbatim without passing it through `access_log.redact_path` first (its run rule hashes every 16+ run of
+   the id alphabet anywhere in a string, so a glued or truncated id is caught too). Add a test like
+   `test_logs_never_contain_a_job_id` for the worker, and assert no 16-char window of the id survives, the way
+   `tests/test_upload.py::assert_id_gone` does.
    **The task's positional id needs `--` before it** (see `run_preflight` above); test it with a forced
    dash-leading id, the way `test_upload_with_relative_jobs_dir_and_dash_id` does.
 3. **rlimits in `preexec_fn`**: `resource.setrlimit(RLIMIT_AS, 2 GB)`, `RLIMIT_CPU` (timeout + 10), and
@@ -148,7 +158,7 @@ Toolchain: `uv 0.12.10`, Python 3.12. Dev deps: pytest, ruff and `httpx2`.
 
 ## Final report shape
 
-Per-AC ✅/❌ with file:line, the test counts (before 86 / after N), the `ruff check` result, the manual end-to-end
+Per-AC ✅/❌ with file:line, the test counts (before 118 / after N), the `ruff check` result, the manual end-to-end
 output (the row reaching `review`, and the `analysis.json` keys), the commits (on both remotes), and what STORY-007
 should know: the runner API for adding the `cut` kind, the `plan.json` it will read, and the failure-code mapping.
 Cite the tests as the contract, not hand-written JSON.
