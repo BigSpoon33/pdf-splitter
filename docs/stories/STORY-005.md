@@ -4,7 +4,7 @@
 > **Size:** M
 > **Date:** 2026-09-25
 > **Architecture ref:** `docs/Architecture.md#api`
-> **Repo:** `~/Documents/Repos/monograph-splitter-web`
+> **Repo:** `~/Documents/Repos/pdf-splitter`
 
 ---
 
@@ -40,9 +40,9 @@ Entry point of the service; first contact with untrusted input.
 
 | File | Change Type | Notes |
 |------|-------------|-------|
-| `src/mss_web/upload.py` | Create |  |
-| `src/mss_web/preflight.py` | Create | subprocess entry |
-| `src/mss_web/app.py` | Modify | route |
+| `src/pdf_splitter/upload.py` | Create |  |
+| `src/pdf_splitter/preflight.py` | Create | subprocess entry |
+| `src/pdf_splitter/app.py` | Modify | route |
 | `tests/test_upload.py` | Create |  |
 
 ---
@@ -50,7 +50,7 @@ Entry point of the service; first contact with untrusted input.
 ## Implementation Notes
 
 - Use `request.stream()` + manual multipart? Simpler: `UploadFile` spools to disk after 1 MB — acceptable, but enforce size while copying and set Caddy's max body too (STORY-013).
-- Run preflight via `python -m mss_web.preflight <path>` printing JSON.
+- Run preflight via `python -m pdf_splitter.preflight <path>` printing JSON.
 
 ---
 

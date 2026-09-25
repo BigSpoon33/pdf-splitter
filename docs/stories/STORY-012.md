@@ -4,7 +4,7 @@
 > **Size:** S
 > **Date:** 2026-09-25
 > **Architecture ref:** `docs/Architecture.md#janitor`
-> **Repo:** `~/Documents/Repos/monograph-splitter-web`
+> **Repo:** `~/Documents/Repos/pdf-splitter`
 
 ---
 
@@ -40,8 +40,8 @@ PRD AC-10, AC-11.
 
 | File | Change Type | Notes |
 |------|-------------|-------|
-| `src/mss_web/{ratelimit,janitor}.py` | Create |  |
-| `src/mss_web/worker/runner.py` | Modify | janitor loop |
+| `src/pdf_splitter/{ratelimit,janitor}.py` | Create |  |
+| `src/pdf_splitter/worker/runner.py` | Modify | janitor loop |
 | `tests/test_limits.py` | Create |  |
 
 ---

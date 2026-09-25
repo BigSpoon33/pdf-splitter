@@ -4,7 +4,7 @@
 > **Size:** M
 > **Date:** 2026-09-25
 > **Architecture ref:** `docs/Architecture.md#api`
-> **Repo:** `~/Documents/Repos/monograph-splitter-web`
+> **Repo:** `~/Documents/Repos/pdf-splitter`
 
 ---
 
@@ -41,9 +41,9 @@ Completes the backend contract in Architecture › API Interface.
 
 | File | Change Type | Notes |
 |------|-------------|-------|
-| `src/mss_web/routes/{plan,preview,download}.py` | Create |  |
-| `src/mss_web/worker/cut.py` | Create |  |
-| `src/mss_web/models.py` | Create | Pydantic Plan etc. |
+| `src/pdf_splitter/routes/{plan,preview,download}.py` | Create |  |
+| `src/pdf_splitter/worker/cut.py` | Create |  |
+| `src/pdf_splitter/models.py` | Create | Pydantic Plan etc. |
 | `tests/test_api_e2e.py` | Create |  |
 
 ---

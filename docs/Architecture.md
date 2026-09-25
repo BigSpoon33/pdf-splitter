@@ -1,4 +1,4 @@
-# Architecture: monograph-splitter web
+# Architecture: pdf-splitter
 
 > **Status:** Draft
 > **Date:** 2026-09-25
@@ -25,20 +25,20 @@ then zips the excerpts with a manifest for download. A janitor deletes every job
 ## Component Map
 
 ```
-monograph-splitter (engine repo, v0.4.0)          ← library; the ONLY code that cuts PDFs
+monograph-splitter (engine, github.com/BigSpoon33/pdf-splitter-engine, v0.4.0)          ← library; the ONLY code that cuts PDFs
 ├── profile.profile_from_dict / WEB_KEYS          ← build a Profile from JSON settings (whitelisted keys)
 ├── detect.outline_entries / heading_candidates   ← NEW: candidate section lists from a PDF
 ├── session.Book.open(entries=EntryList|list)     ← accepts in-memory entries, no files needed
 └── session.Book.cut_all(progress=…)              ← cut every entry, report progress
 
-monograph-splitter-web (this repo)
+pdf-splitter (this repo, github.com/BigSpoon33/pdf-splitter)
 ├── api/            FastAPI app (uvicorn)         ← HTTP, validation, rate limits, job state, file serving
 │   ├── upload      streaming upload + preflight
 │   ├── jobs        status, plan read/write, trigger cut, delete
 │   ├── preview     sheet PNGs + per-section cut plans (read-only engine calls, short timeout)
 │   └── download    zip / single PDF
 ├── worker/         queue consumer (separate container)  ← analyze + cut jobs in a sandboxed subprocess
-│   ├── runner      claim job → spawn `python -m mss_web.worker.task` with rlimits + timeout
+│   ├── runner      claim job → spawn `python -m pdf_splitter.worker.task` with rlimits + timeout
 │   └── task        the engine calls (analyze.py, cut.py)
 ├── janitor         loop in the worker container   ← delete expired jobs, reap orphans
 ├── store           SQLite (jobs table) + job directory layout
@@ -229,8 +229,9 @@ never appear in logs (logs carry a short hash).
 
 - **Status:** Accepted (Shuma, 2026-09-25)
 - **Context:** The engine is a library that the Inkwell adapters pin by tag.
-- **Decision:** `monograph-splitter-web` depends on `monograph-splitter @ git+…@v0.4.0`. Engine changes go to the engine repo with tests + diff gate, then get a tag bump here.
+- **Decision:** `pdf-splitter` depends on `monograph-splitter @ git+https://github.com/BigSpoon33/pdf-splitter-engine@v0.4.0`. Engine changes go to the engine repo with tests + diff gate, then get a tag bump here.
 - **Consequences:** Two-repo stories, but the engine stays clean, and the web service can't regress Inkwell's books.
+- **Hosting (2026-09-25):** both repos are public on GitHub (`BigSpoon33/pdf-splitter`, `BigSpoon33/pdf-splitter-engine`) as `origin`; Gitea (`gitea` remote) is a LAN mirror. Inkwell's adapters keep pinning the Gitea URL until repointed.
 
 ### ADR-002: Headings mode is the web engine path; labels mode is not exposed
 

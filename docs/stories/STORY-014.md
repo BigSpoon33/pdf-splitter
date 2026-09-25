@@ -4,7 +4,7 @@
 > **Size:** M
 > **Date:** 2026-09-25
 > **Architecture ref:** `docs/Architecture.md#ADR-008`
-> **Repo:** `~/Documents/Repos/monograph-splitter-web`
+> **Repo:** `~/Documents/Repos/pdf-splitter`
 
 ---
 

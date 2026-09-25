@@ -4,7 +4,7 @@
 > **Size:** M
 > **Date:** 2026-09-25
 > **Architecture ref:** `docs/Architecture.md#web (SPA)`
-> **Repo:** `~/Documents/Repos/monograph-splitter-web`
+> **Repo:** `~/Documents/Repos/pdf-splitter`
 
 ---
 

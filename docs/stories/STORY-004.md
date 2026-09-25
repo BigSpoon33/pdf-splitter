@@ -4,7 +4,7 @@
 > **Size:** S
 > **Date:** 2026-09-25
 > **Architecture ref:** `docs/Architecture.md#store`
-> **Repo:** `~/Documents/Repos/monograph-splitter-web`
+> **Repo:** `~/Documents/Repos/pdf-splitter`
 
 ---
 
@@ -28,8 +28,8 @@ The first code in the new repo.
 
 ## Acceptance Criteria
 
-- [ ] AC-1: `uv run mss-web api` serves `GET /api/health` → `{ok, queue, disk_free_gb, engine_version}`
-- [ ] AC-2: Settings via pydantic-settings, env prefix `MSS_`: `JOBS_DIR`, `MAX_BYTES` (200 MB), `MAX_PAGES` (2000), `TTL_HOURS` (24), `WORKERS` (2), `RATE_PER_HOUR` (6), `ANALYZE_TIMEOUT` (300), `CUT_TIMEOUT` (600), `PUBLIC_URL`
+- [ ] AC-1: `uv run pdf-splitter api` serves `GET /api/health` → `{ok, queue, disk_free_gb, engine_version}`
+- [ ] AC-2: Settings via pydantic-settings, env prefix `PDFSPLIT_`: `JOBS_DIR`, `MAX_BYTES` (200 MB), `MAX_PAGES` (2000), `TTL_HOURS` (24), `WORKERS` (2), `RATE_PER_HOUR` (6), `ANALYZE_TIMEOUT` (300), `CUT_TIMEOUT` (600), `PUBLIC_URL`
 - [ ] AC-3: `store.py`: schema per Architecture, WAL mode, `create_job`, `get_job`, `claim_next(kind)` (atomic, `BEGIN IMMEDIATE`), `update_progress`, `set_state`, `expired()`; two concurrent claimers never claim the same job (test with threads)
 - [ ] AC-4: Job ids are 16 random bytes url-safe base64; logs use `sha256(id)[:8]`
 - [ ] AC-5: `uv run pytest` green; ruff clean; README with dev commands
@@ -40,8 +40,8 @@ The first code in the new repo.
 
 | File | Change Type | Notes |
 |------|-------------|-------|
-| `pyproject.toml` | Create | package mss_web, deps, scripts |
-| `src/mss_web/{__init__,config,store,app}.py` | Create |  |
+| `pyproject.toml` | Create | package pdf_splitter, deps, scripts |
+| `src/pdf_splitter/{__init__,config,store,app}.py` | Create |  |
 | `tests/test_store.py` | Create |  |
 | `README.md` | Create |  |
 
@@ -49,7 +49,7 @@ The first code in the new repo.
 
 ## Implementation Notes
 
-- Package name `mss_web`. Python 3.12. Engine dep: `monograph-splitter @ git+https://git.gumshu.duckdns.org/shuma/monograph-splitter@v0.4.0` (NOTE: the deployed VM cannot reach gumshu — Gitea is LAN-only. Vendor via a wheel build in CI or mirror the engine to a public remote before STORY-014; record the choice in Architecture).
+- Package name `pdf_splitter`. Python 3.12. Engine dep: `monograph-splitter @ git+https://github.com/BigSpoon33/pdf-splitter-engine@v0.4.0` (public GitHub, so the VM and CI install it with no token; the package keeps its `monograph_splitter` import name).
 
 ---
 
@@ -62,7 +62,7 @@ The first code in the new repo.
 ## Verification Steps
 
 ```bash
-uv run pytest && uv run ruff check && (uv run mss-web api & sleep 2; curl -s localhost:8000/api/health)
+uv run pytest && uv run ruff check && (uv run pdf-splitter api & sleep 2; curl -s localhost:8000/api/health)
 ```
 
 ---

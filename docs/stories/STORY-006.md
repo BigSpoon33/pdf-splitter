@@ -4,7 +4,7 @@
 > **Size:** M
 > **Date:** 2026-09-25
 > **Architecture ref:** `docs/Architecture.md#worker`
-> **Repo:** `~/Documents/Repos/monograph-splitter-web`
+> **Repo:** `~/Documents/Repos/pdf-splitter`
 
 ---
 
@@ -29,7 +29,7 @@ Wires the engine (STORY-001..003) into the service safely (ADR-005).
 
 ## Acceptance Criteria
 
-- [ ] AC-1: `mss-web worker` loops: claim a queued job, run `python -m mss_web.task analyze <id>` with rlimits (AS 2 GB, CPU timeout+10, FSIZE 1 GB) and wall timeout `ANALYZE_TIMEOUT`, at most `WORKERS` concurrent
+- [ ] AC-1: `pdf-splitter worker` loops: claim a queued job, run `python -m pdf_splitter.task analyze <id>` with rlimits (AS 2 GB, CPU timeout+10, FSIZE 1 GB) and wall timeout `ANALYZE_TIMEOUT`, at most `WORKERS` concurrent
 - [ ] AC-2: Analyze task: index with the default web profile (cache in `work/`), `outline_levels` + `outline_entries` for each level present (≤3), `heading_candidates`, page labels, page sizes → writes `analysis.json` (Architecture shape) incl. `suggested` (outline level 1 if it has ≥2 items, else the heading level whose count is closest to 5–60) → state `review`
 - [ ] AC-3: Progress: the task reports `progress/total` (pages indexed) to the job row at most every 0.5 s
 - [ ] AC-4: A task exceeding its timeout or memory is killed → `failed` with `error_code` `timeout`|`resources`; an exception → `failed/internal`; the loop keeps running (test with an injected slow/crashing task)
@@ -42,7 +42,7 @@ Wires the engine (STORY-001..003) into the service safely (ADR-005).
 
 | File | Change Type | Notes |
 |------|-------------|-------|
-| `src/mss_web/worker/{runner,task,analyze}.py` | Create |  |
+| `src/pdf_splitter/worker/{runner,task,analyze}.py` | Create |  |
 | `tests/test_worker.py` | Create |  |
 | `tests/fixtures/` | Create | synthetic books (import builder from engine tests or port) |
 

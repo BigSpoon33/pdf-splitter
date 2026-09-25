@@ -1,4 +1,4 @@
-# PRD: monograph-splitter web
+# PRD: pdf-splitter
 
 > **Status:** Draft
 > **Date:** 2026-09-25
