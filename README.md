@@ -14,7 +14,10 @@ uv run pytest                # tests
 uv run ruff check            # lint
 uv run pdf-splitter api      # API on http://127.0.0.1:8000 (--host / --port to change)
 curl -s localhost:8000/api/health
+curl -s -F file=@book.pdf localhost:8000/api/jobs   # 201 {id, state} or 4xx {code, message}
 ```
+
+Request logs come from the app (`pdf_splitter.access`), not uvicorn, so job ids appear only as `log_id` hashes.
 
 ### Configuration
 

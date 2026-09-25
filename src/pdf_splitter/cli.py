@@ -19,4 +19,6 @@ def main(argv: list[str] | None = None) -> None:
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     if args.command == "api":
-        uvicorn.run(create_app(Settings()), host=args.host, port=args.port)
+        # uvicorn's access log would print raw job ids from /api/jobs/<id> paths; app.access_log
+        # logs the same line with the id hashed.
+        uvicorn.run(create_app(Settings()), host=args.host, port=args.port, access_log=False)

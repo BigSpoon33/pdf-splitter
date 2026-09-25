@@ -78,3 +78,5 @@ def test_cli_api_serves_the_app_from_env_settings(monkeypatch: pytest.MonkeyPatc
     assert isinstance(calls["app"], FastAPI)
     assert calls["app"].state.settings.jobs_dir == tmp_path / "j"
     assert (calls["host"], calls["port"]) == ("127.0.0.1", 8000)
+    # uvicorn's own access log would print raw job ids; the app's redacting middleware replaces it.
+    assert calls["access_log"] is False

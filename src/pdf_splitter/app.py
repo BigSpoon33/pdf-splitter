@@ -1,33 +1,19 @@
 from __future__ import annotations
 
 import shutil
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Annotated
 
 import monograph_splitter
-from fastapi import Depends, FastAPI, Request
+from fastapi import FastAPI
 
+from .access_log import access_log
 from .config import Settings
+from .deps import SettingsDep, StoreDep, get_settings, get_store
 from .store import Store
+from .upload import router as upload_router
 
-
-def get_settings(request: Request) -> Settings:
-    return request.app.state.settings
-
-
-def get_store(request: Request) -> Iterator[Store]:
-    # One connection per request, so requests on different threadpool threads never share one.
-    # FastAPI may run this teardown on a different thread than the endpoint; Store allows that.
-    store = Store(request.app.state.settings.db_path)
-    try:
-        yield store
-    finally:
-        store.close()
-
-
-SettingsDep = Annotated[Settings, Depends(get_settings)]
-StoreDep = Annotated[Store, Depends(get_store)]
+__all__ = ["SettingsDep", "StoreDep", "create_app", "get_settings", "get_store"]
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -46,6 +32,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app = FastAPI(title="pdf-splitter", lifespan=lifespan)
     app.state.settings = settings
+    app.middleware("http")(access_log)
+    app.include_router(upload_router)
 
     @app.get("/api/health")
     def health(settings: SettingsDep, store: StoreDep) -> dict:
