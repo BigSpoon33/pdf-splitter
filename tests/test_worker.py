@@ -15,6 +15,7 @@ from pathlib import Path
 import pymupdf
 import pytest
 from fixtures.books import headed_book, text_book
+from fixtures.hostile import outline_book, xobj_bomb
 from monograph_splitter.profile import profile_from_dict
 
 from pdf_splitter import cli, upload
@@ -23,7 +24,15 @@ from pdf_splitter.store import Store, log_id
 from pdf_splitter.worker import analyze as analyze_mod
 from pdf_splitter.worker import runner as runner_mod
 from pdf_splitter.worker import sandbox, task
-from pdf_splitter.worker.analyze import DEFAULT_SETTINGS, analyze, default_plan, page_labels, suggest
+from pdf_splitter.worker.analyze import (
+    DEFAULT_SETTINGS,
+    analyze,
+    clean_text,
+    default_plan,
+    json_safe,
+    page_labels,
+    suggest,
+)
 from pdf_splitter.worker.runner import REQUEUED, Runner, classify, loggable_tail, task_args
 from pdf_splitter.worker.task import Throttle
 
@@ -62,7 +71,10 @@ def open_store(settings: Settings) -> Store:
     return s
 
 
-def queue_job(settings: Settings, store: Store, job_id: str, pdf: str = "headed", pages: int = 6) -> Path:
+def queue_job(
+    settings: Settings, store: Store, job_id: str, pdf: str = "headed", pages: int = 6,
+    title_hex: list[str] | None = None,
+) -> Path:
     job_dir = settings.jobs_dir / job_id
     job_dir.mkdir(parents=True)
     src = job_dir / "source.pdf"
@@ -70,6 +82,10 @@ def queue_job(settings: Settings, store: Store, job_id: str, pdf: str = "headed"
         headed_book(src)
     elif pdf == "text":
         text_book(src, pages)
+    elif pdf == "xbomb":
+        xobj_bomb(src)
+    elif pdf == "outline":
+        outline_book(src, title_hex or [])
     else:
         src.write_bytes(b"%PDF-1.7\n" + b"\x00garbage" * 50)
     store.create_job(job_id=job_id, ip_hash="h", filename="book.pdf", bytes=src.stat().st_size, pages=pages,
@@ -172,6 +188,21 @@ def test_page_labels(tmp_path: Path) -> None:
     assert page_labels(doc) == ["", "", ""]
 
 
+def test_json_safe_replaces_every_lone_surrogate_and_nothing_else() -> None:
+    # `surrogateescape` bytes (PyMuPDF's decoding of a bad text string), a lone high, a lone low, and a pair
+    # that is NOT a valid pair in a str either (each code unit is still a lone surrogate to UTF-8).
+    assert clean_text("Chapt\udcffer") == "Chapt�er"
+    assert clean_text("Ch\udced\udca0\udc80") == "Ch���"
+    assert clean_text("\ud800x\udc00") == "�x�"
+    assert clean_text("Zhōngyī 中医 – Kapitel 1 ✓ 😀") == "Zhōngyī 中医 – Kapitel 1 ✓ 😀"
+    nested = {"a\udcff": [("b\ud800", 1.5, None, True), {"c": "d\udfff"}], "n": 3}
+    cleaned = json_safe(nested)
+    assert cleaned == {"a�": [["b�", 1.5, None, True], {"c": "d�"}], "n": 3}
+    json.dumps(cleaned, ensure_ascii=False).encode("utf-8")        # strict: nothing left to reject
+    with pytest.raises(UnicodeEncodeError):
+        json.dumps(nested, ensure_ascii=False).encode("utf-8")
+
+
 # ── AC-3: throttled progress ────────────────────────────────────────────────────────────────────────────
 
 
@@ -250,6 +281,45 @@ def test_task_main_writes_analysis_and_plan_then_review(
     assert (job["progress"], job["total"]) == (6, 6)
 
 
+CHAPTER_2 = "FEFF004300680061007000740065007200200032"          # a well-formed UTF-16BE "Chapter 2"
+
+
+@pytest.mark.parametrize(
+    ("title_hex", "name"),
+    [
+        ("EFBBBF4368617074FF6572", "Chapt�er"),      # UTF-8 BOM, then a byte no UTF-8 sequence allows
+        ("FEFF00430068D800", "Ch���"),      # UTF-16BE ending in a lone high surrogate
+    ],
+)
+def test_task_survives_a_bookmark_title_that_is_not_valid_unicode(
+    settings: Settings, wstore: Store, monkeypatch: pytest.MonkeyPatch, title_hex: str, name: str
+) -> None:
+    """Gate r1 finding 2: PyMuPDF hands these titles over with lone surrogates, which strict UTF-8 rejects; the
+    analysis used to die on the write and leave an empty `.tmp`."""
+    job_dir = queue_job(settings, wstore, DASH_ID, pdf="outline", pages=2, title_hex=[title_hex, CHAPTER_2])
+    wstore.claim_next("analyze")
+    monkeypatch.setenv("PDFSPLIT_JOBS_DIR", str(settings.jobs_dir))
+    assert task.main(["analyze", "--", DASH_ID]) == 0
+    assert wstore.get_job(DASH_ID)["state"] == "review"
+    assert not list(job_dir.glob("*.tmp"))
+    analysis = json.loads((job_dir / "analysis.json").read_bytes().decode("utf-8"))   # strict decode
+    plan = json.loads((job_dir / "plan.json").read_bytes().decode("utf-8"))
+    assert [it["name"] for it in analysis["outline"]["items"]] == [name, "Chapter 2"]
+    assert analysis["suggested"] == {"source": "outline", "level": 1}
+    assert [s["name"] for s in plan["sections"]] == [name, "Chapter 2"]
+    assert plan == default_plan(analysis)
+
+
+def test_write_json_never_fails_on_encoding_and_leaves_no_tmp(tmp_path: Path) -> None:
+    out = tmp_path / "analysis.json"
+    task._write_json(out, {"name": "x\udcffy"})          # a string that dodged `json_safe`
+    assert json.loads(out.read_bytes().decode("utf-8")) == {"name": "x?y"}
+    with pytest.raises(TypeError):
+        task._write_json(out, {"bad": {1, 2}})            # not serialisable: the failure propagates …
+    assert not (tmp_path / "analysis.json.tmp").exists()  # … but the half-written file does not
+    assert json.loads(out.read_text()) == {"name": "x?y"}  # and the previous file is untouched
+
+
 def test_task_main_needs_the_double_dash_for_a_dash_id() -> None:
     with pytest.raises(SystemExit):
         task.main(["analyze", DASH_ID])
@@ -282,6 +352,18 @@ def test_task_refuses_an_id_that_is_not_a_plain_name(bad: str, capsys: pytest.Ca
         (OSError(27, "File too large"), "resources", task.EXIT_RESOURCES),   # EFBIG under RLIMIT_FSIZE
         (OSError(2, "No such file"), "internal", task.EXIT_INTERNAL),
         (RuntimeError("engine bug"), "internal", task.EXIT_INTERNAL),
+        # MuPDF's allocator failing under RLIMIT_AS (gate r1 finding 1): the message PyMuPDF 1.28.2 raises
+        # for the xbomb, MuPDF's other allocator wordings, and a FZ_ERROR_SYSTEM without one.
+        (RuntimeError("code=2: calloc (4104 x 1 bytes) failed"), "resources", task.EXIT_RESOURCES),
+        (RuntimeError("malloc of 262144 bytes failed"), "resources", task.EXIT_RESOURCES),
+        (RuntimeError("realloc (16 x 8 bytes) failed"), "resources", task.EXIT_RESOURCES),
+        (RuntimeError("code=2: out of memory"), "resources", task.EXIT_RESOURCES),
+        (RuntimeError("Out of memory"), "resources", task.EXIT_RESOURCES),
+        # Other MuPDF failures keep their class: a format error, and a message that merely mentions a failure.
+        (RuntimeError("code=7: cannot recognize xref format"), "internal", task.EXIT_INTERNAL),
+        (RuntimeError("code=3: load failed for object 12"), "internal", task.EXIT_INTERNAL),
+        (RuntimeError("cannot open /jobs/x/source.pdf: code=2 is not a file"), "internal", task.EXIT_INTERNAL),
+        (ValueError("code=2: calloc (1 x 1 bytes) failed"), "internal", task.EXIT_INTERNAL),
     ],
 )
 def test_guarded_maps_exceptions(
@@ -448,6 +530,24 @@ def test_real_task_on_an_unreadable_pdf_is_internal(settings: Settings, wstore: 
     queue_job(settings, wstore, DASH_ID, pdf="garbage")
     Runner(settings).run_once(wstore)
     assert (wstore.get_job(DASH_ID)["state"], wstore.get_job(DASH_ID)["error_code"]) == ("failed", "internal")
+
+
+def test_real_task_on_a_mupdf_memory_bomb_is_resources(
+    settings: Settings, wstore: Store, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Gate r1 finding 1, with the reviewer's bomb under the real sandbox: a 4.9 KB PDF whose page 2 expands to
+    10^6 glyph runs, so MuPDF's own allocator (not Python's) hits RLIMIT_AS. ≈ 8 s and 2 GB of RSS."""
+    caplog.set_level(logging.WARNING)
+    job_dir = queue_job(settings, wstore, DASH_ID, pdf="xbomb", pages=2)
+    assert job_dir.joinpath("source.pdf").stat().st_size < 6_000
+    assert Runner(settings).run_once(wstore) is True
+    job = wstore.get_job(DASH_ID)
+    assert (job["state"], job["error_code"], job["message"]) == (
+        "failed", "resources", runner_mod.MESSAGES["resources"]
+    )
+    assert not (job_dir / "analysis.json").exists() and not list(job_dir.glob("*.tmp"))
+    assert "failed: resources" in caplog.text
+    assert_id_gone(caplog.text, DASH_ID)
 
 
 def test_runner_never_resurrects_a_job_deleted_while_running(settings: Settings, wstore: Store) -> None:

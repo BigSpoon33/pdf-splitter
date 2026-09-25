@@ -6,6 +6,7 @@ and the output files. Shapes: Architecture § Data Types (Analysis, Plan). Pages
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
@@ -63,6 +64,29 @@ class _Counted:
                 self._progress(i + 1, total, MSG_INDEXING)
 
 
+# PyMuPDF decodes a malformed text string (a bookmark title, a heading's ToUnicode output, a label) with
+# `surrogateescape`, so bad bytes come back as lone U+DC80..U+DCFF, and a stray UTF-16 surrogate stays one.
+# Python's str holds them, but strict UTF-8 (`analysis.json`, the API's responses) can't.
+_SURROGATES = re.compile("[\ud800-\udfff]")
+
+
+def clean_text(s: str) -> str:
+    """`s` with every lone surrogate replaced by U+FFFD, one per code unit, so the rest of the title survives."""
+    return _SURROGATES.sub("�", s) if _SURROGATES.search(s) else s
+
+
+def json_safe(obj: Any) -> Any:
+    """`obj` with `clean_text` applied to every string in it (values and keys), so anything built from it
+    (the default plan's section names, the API's payloads) is UTF-8-safe without each caller remembering."""
+    if isinstance(obj, str):
+        return clean_text(obj)
+    if isinstance(obj, dict):
+        return {json_safe(k): json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, list | tuple):
+        return [json_safe(v) for v in obj]
+    return obj
+
+
 def page_labels(doc: pymupdf.Document) -> list[str]:
     """Printed page labels, "" where there are none. Only a UI hint (ADR-003), so a label tree PyMuPDF
     can't parse (a real book here has one: `rule_dict` raises on an empty /St) costs the labels, never
@@ -94,13 +118,14 @@ def analyze(pdf_path: Path, work_dir: Path, progress: Progress | None = None) ->
         if progress:
             progress(total, total, MSG_HEADINGS)
         headings = heading_candidates(doc, profile=prof)
-        analysis: dict[str, Any] = {
+        # Every string the engine or PyMuPDF hands over enters the dict here, and only here.
+        analysis: dict[str, Any] = json_safe({
             "pages": total,
             "pageLabels": page_labels(doc),
             "size": [{"W": pg["W"], "H": pg["H"]} for pg in index],
             "outline": {"levels": [counts.get(lvl, 0) for lvl in range(1, depth + 1)], "items": items},
             "headings": headings,
-        }
+        })
     analysis["suggested"] = suggest(analysis)
     return analysis
 

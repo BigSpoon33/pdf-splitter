@@ -12,6 +12,7 @@ import argparse
 import errno
 import json
 import os
+import re
 import sys
 import time
 import traceback
@@ -28,6 +29,11 @@ from .analyze import analyze, default_plan
 PROGRESS_INTERVAL_S = 0.5
 EXIT_INTERNAL = 1
 EXIT_RESOURCES = 3
+# MuPDF allocates outside Python, so under RLIMIT_AS its allocator failing is not a MemoryError but
+# FZ_ERROR_SYSTEM (`code=2: calloc (4104 x 1 bytes) failed`), which PyMuPDF 1.28 raises as a plain RuntimeError.
+MUPDF_ALLOC_FAILED = re.compile(
+    r"^\s*code=2\b|\b(?:calloc|malloc|realloc)\b.*\bfailed\b|\bout of memory\b", re.IGNORECASE
+)
 
 
 class Throttle:
@@ -60,8 +66,14 @@ class Throttle:
 def _write_json(path: Path, data: dict[str, Any]) -> None:
     # Write-then-rename: the api may read these files while the task runs, and must never see half of one.
     tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False))
-    os.replace(tmp, path)
+    try:
+        # `analyze.json_safe` has already replaced lone surrogates; `errors="replace"` is the backstop, so a
+        # string that slipped past it costs a `?`, never the whole analysis.
+        tmp.write_bytes(json.dumps(data, ensure_ascii=False).encode("utf-8", errors="replace"))
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def run_analyze(settings: Settings, job_id: str, store: Store) -> bool:
@@ -92,6 +104,11 @@ def guarded(job: Callable[[], bool]) -> int:
     except OSError as e:
         # RLIMIT_FSIZE: Python ignores SIGXFSZ, so the oversized write fails with EFBIG instead.
         if e.errno == errno.EFBIG:
+            return _result(False, "resources")
+        traceback.print_exc()
+        return _result(False, "internal")
+    except RuntimeError as e:
+        if MUPDF_ALLOC_FAILED.search(str(e)):
             return _result(False, "resources")
         traceback.print_exc()
         return _result(False, "internal")
