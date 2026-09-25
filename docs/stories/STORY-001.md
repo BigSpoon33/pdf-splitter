@@ -1,6 +1,6 @@
 # STORY-001: Engine: settings-dict profiles and in-memory entries
 
-> **Status:** Pending
+> **Status:** Done (2026-09-25, engine 742bfbe on feature/web-mode)
 > **Size:** S
 > **Date:** 2026-09-25
 > **Architecture ref:** `docs/Architecture.md#Engine additions (monograph-splitter 0.4.0)`
@@ -28,12 +28,12 @@ The web service drives the engine with user-chosen settings (ADR-002/003). Today
 
 ## Acceptance Criteria
 
-- [ ] AC-1: `profile_from_dict(d)` returns a Profile built on `WEB_BASE` (headings mode, `sheet_offset=1`, empty `script_regex`, no break patterns, `max_span=200`) overriding only `WEB_KEYS`; any other key raises `ProfileError` naming it
-- [ ] AC-2: `single_column: true` yields a profile where every line is in the left column and every cut is full-width (asserted on the synthetic book)
-- [ ] AC-3: Two dicts with the same values (any key order) produce the same `sha256`; different values produce different ones
-- [ ] AC-4: `entries_from_rows(rows)` is the validation `load_entries_json` now delegates to (same skipped/headings semantics); `load_entries_json` behaviour unchanged
-- [ ] AC-5: `Book.open(entries=[...])` accepts a list of rows or an `EntryList` as well as a Path; `profile=` accepts a Profile instance (already true — keep covered)
-- [ ] AC-6: Existing 51 tests pass; `monograph-splitter-diff` on a before/after manifest of the synthetic book = 0
+- [x] AC-1: `profile_from_dict(d)` returns a Profile built on `WEB_BASE` (headings mode, `sheet_offset=1`, empty `script_regex`, no break patterns, `max_span=200`) overriding only `WEB_KEYS`; any other key raises `ProfileError` naming it
+- [x] AC-2: `single_column: true` yields a profile where every line is in the left column and every cut is full-width (asserted on the synthetic book)
+- [x] AC-3: Two dicts with the same values (any key order) produce the same `sha256`; different values produce different ones
+- [x] AC-4: `entries_from_rows(rows)` is the validation `load_entries_json` now delegates to (same skipped/headings semantics); `load_entries_json` behaviour unchanged
+- [x] AC-5: `Book.open(entries=[...])` accepts a list of rows or an `EntryList` as well as a Path; `profile=` accepts a Profile instance (already true — keep covered)
+- [x] AC-6: Existing 51 tests pass; `monograph-splitter-diff` on a before/after manifest of the synthetic book = 0
 
 ---
 
@@ -101,11 +101,11 @@ feat: STORY-001 - profiles from a settings dict and in-memory entry lists (web m
 
 ## Status
 
-**Pending**
+**Done** — 2026-09-25 (see `docs/findings/STORY-001-findings.md`; WEB_BASE uses engine `sheet_offset=0` = page 1 is the first sheet)
 
-- [ ] AC-1
-- [ ] AC-2
-- [ ] AC-3
-- [ ] AC-4
-- [ ] AC-5
-- [ ] AC-6
+- [x] AC-1
+- [x] AC-2
+- [x] AC-3
+- [x] AC-4
+- [x] AC-5
+- [x] AC-6
