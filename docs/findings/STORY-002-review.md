@@ -1,0 +1,15 @@
+# Review — STORY-002
+**Date:** 2026-09-25
+**Status:** round 1 FAILED (3 confirmed findings) → retry
+**Reviewed:** engine 742bfbe..ef828ab (feature/web-mode)
+
+Round 1: story-reviewer verdict FINDINGS; 3 findings, all 3 CONFIRMED by independent finding-skeptics (repros in the orchestrator scratchpad: probe3.py, real5.py, probe4.py, probe5.py).
+
+## Confirmed findings (verbatim)
+
+1. [correctness] src/monograph_splitter/detect.py:189-192 — the wrap merge only joins lines whose `_col` class is identical, so a wrapped heading whose lines straddle the full-width threshold (one line > full_width_ratio·W = "full", the other narrower = "left"/"right") is never merged, even with the same x0; `locate_heading` (index.py:229) groups by `is_left(x0)` only and would join them. AC-3 "wrapped lines merged" unmet.
+   - Synthetic: 612×792, default geometry, wrap_gap=16, 13 pt heading at x0=72, baselines 15.6 pt apart: "Differential Diagnosis of the Principal Patterns of Disharmony in" (0.70·W) / "Clinical Practice" (0.21·W) → two level-2 candidates (col full / col left) instead of one.
+   - Real: Maciocia, wrap_gap=30: ch. 30 p480 "Identification of Patterns" (0.47·W, left) + "according to the Eight Principles" (0.61·W, full) → Book plans a one-sheet sliver (480–480) + a misnamed chapter (480–497). Same for ch. 31 (p498).
+   - No test covers a wrap straddling full/left or full/right.
+2. [correctness] src/monograph_splitter/detect.py:25 (applied :186) — `_PAGE_NUMBER`'s `[ivxlcdm]+` alternative (re.I) matches any word spelled only with those letters, so real headings are discarded as page numbers. Glossary with one 20 pt letter per page: C D I L M V X missing (B absorbs C, D); 20 pt headings "Dill", "Mild", "Civil", "Mix", "Mid", "Mill", "Vivid", "Ill" never candidates. AC-3 violated; AC-6 only excludes page-number-ONLY lines.
+3. [ac-gap] src/monograph_splitter/detect.py:46-60 — `_dest_top` handles only "array"/"string"/"name" kinds from `xref_get_key`; an indirect destination (`/D n 0 R` or `/Dest n 0 R`, kind "xref") falls through and no y is emitted. `/A <</S/GoTo/D 16 0 R>>` with `16 0 obj [p 0 R /XYZ 0 589.6 null]` → no `y`, while get_toc reports to=Point(0, 200) and the direct array gives y=200.0. AC-1 unmet for this input.

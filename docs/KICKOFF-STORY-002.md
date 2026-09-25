@@ -130,3 +130,36 @@ STORY-003 (`Book.cut_all` + CLI on it, 0.4.0 release) should know.
 - Real-book check available for outline detection: Maciocia *Foundations* (1319 sheets, has a PDF bookmark outline — Inkwell's STORY-219 built its entries from it) is at
   `~/Documents/Vaults/TCM_Knowledge_Base/Books/Maciocia, Giovanni - The foundation of Chinese medicine_ a comprehensive text (2015, Elsevier) - libgen.lc.pdf`.
   READ-ONLY; write any outputs to a temp dir. Optional sanity check, not a test (tests never read real books). Report level counts + a few sample rows in findings.
+
+## Previous attempt (RETRY — read this first)
+
+Attempt 1 built everything (engine `ef828ab` on `feature/web-mode`: `detect.py`, `headed_book`
+fixture, 30 tests, README; docs `434d9f5`) and failed the review gate with **3 confirmed
+findings** — full text in `docs/findings/STORY-002-review.md`. Keep attempt 1's work; fix
+forward on the same branch with ONE commit:
+`fix: STORY-002 - gate r1: straddling wraps merge, roman page numbers only at the page edge, indirect outline destinations carry y`.
+
+1. **Wrap merge across column classes** (`detect.py:184-196`). A wrapped heading whose lines
+   straddle the full-width threshold (0.70·W line + 0.21·W line, same x0) must merge. Match
+   `locate_heading`'s rule (`index.py:229`, grouping by `is_left(x0)`): bucket lines by x0 side,
+   not by the 3-way `_col`; the merged candidate's `col` is "full" if any of its lines is full,
+   else the side. Keep size tolerance + `wrap_gap` + 3-line cap. Tests: the synthetic straddle
+   case (full→left, and left→full), plus a genuinely **1-column synthetic book** with a wrapped
+   chapter title (the Architecture's detector corpus asks for 1-column coverage). Real-book
+   check (read-only, optional): Maciocia p480 ch. 30 "Identification of Patterns / according to
+   the Eight Principles" with `wrap_gap=30` should be ONE candidate.
+2. **Page-number filter** (`detect.py:25`, applied `:186`). Real headings made only of
+   i/v/x/l/c/d/m ("C", "D", "Mild", "Dill", "Civil", "Mix", "Vivid", "Ill") must survive.
+   Rule: digit-only (optionally "page N") lines are page numbers anywhere; a roman token counts
+   only if it is a **well-formed roman numeral** AND sits in the page-edge strip
+   (header/footer strip `_running` already computes). Tests: the A–Z glossary (one 20 pt letter
+   per page → 26 candidates), the "Dill/Mild/…" words, and the existing page-number forms
+   ("xiv" in the footer is still excluded).
+3. **Indirect outline destinations** (`detect.py:46-60`, `_dest_top`). `xref_get_key` returns
+   kind `"xref"` for `/D n 0 R` / `/Dest n 0 R`; resolve the referenced object (it holds the
+   destination array, or a dict with `/D`) and continue through the existing array path. Test:
+   an outline item `/A <</S/GoTo/D n 0 R>>` → y equals the direct-array control.
+
+Also: update the STORY-002 findings file (add a "Gate r1 fixes" section; keep Status done),
+and re-check that `KICKOFF-STORY-003.md` is still accurate (edit only if your fix changes an
+API it cites). Full suite must stay green (102 + your new tests).
