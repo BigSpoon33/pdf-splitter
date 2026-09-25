@@ -103,3 +103,5 @@ feat: STORY-012 - rate limit, disk guard, 24 h janitor and queue position
 - [ ] AC-5
 
 > **Orchestrator addendum (from STORY-007 review):** the janitor must also remove the directory of any row in state `deleted` (defence in depth against a late write recreating it), not only expired rows and row-less dirs. Test it.
+
+> **Orchestrator addendum (from STORY-007 r3):** `routes/common.py` `saved_plan` (exists() → read_json) and any other read of job files after `load_job` must map a vanished file for a deleted/expired job to 410, not 500 `internal`. Test with a DELETE hooked between the check and the read.

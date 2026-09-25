@@ -11,3 +11,7 @@ Coverage highlights: Plan validation airtight (NaN/Inf/1e999, page 0/pages+1, 20
 Verified live on Maciocia: 162 deletes across sheet renders, bursts, cached and re-indexing section plans → only 200/410, 0 × 500, 0 surviving dirs, 0 raw ids; `settled`'s rmtree only fires on terminal `deleted` (never a live/expired job); 4 new tests fail on 6fcf848.
 
 1. [ac-gap] routes/preview.py:101-104 — `get_sheet` calls `settled` BEFORE reading the rendered PNG, so a DELETE between them → `_cached` None → 500 `preview_failed` instead of 410 (spec item 2). Deterministic via a settled-then-delete hook; live 3/3 with a widened window; nothing recreated. CONFIRMED.
+
+## Round 3 (re-review of 6ff7d01, standing-policy auto-fix) — PASSED
+Auto-review trail: r1 1 confirmed → fixed 3058d91; r2 1 confirmed (incomplete) → auto-fixed 6ff7d01; r3 CLEAN. Live: 65 trials / 1,320 sheet GETs racing real DELETEs on Maciocia → 278×200, 1,042×410, 0×500, 0 surviving dirs; widened windows 0×500 (old route: 75×500). Deviation (settled-then-delete → 200) judged correct/linearizable.
+Residual (outside this diff, scheduled into STORY-012): `common.saved_plan` exists()→read race → a DELETE there gives 500 internal.
