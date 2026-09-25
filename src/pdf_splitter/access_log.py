@@ -1,15 +1,20 @@
-"""Request logging that never prints a job id (ADR-007: the id is the only credential)."""
+"""Request logging that never prints a job id (ADR-007: the id is the only credential), request ids, and the
+500 that carries one."""
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import time
+import traceback
+import uuid
 from collections.abc import Awaitable, Callable
 from urllib.parse import quote
 
 from fastapi import Request, Response
 
+from .errors import error_response
 from .store import log_id
 
 log = logging.getLogger("pdf_splitter.access")
@@ -24,6 +29,9 @@ _ID_RUN = re.compile(r"[A-Za-z0-9_-]{16,}")
 _JOBS_SLOT = re.compile(r"(/api/+jobs/+)([^/]+)", re.IGNORECASE)
 # RFC 3986 path characters; everything else (controls, `%`, non-ASCII separators) is percent-encoded.
 _PATH_SAFE = "/:@!$&'()*+,;=-._~"
+# An inbound X-Request-ID is client input that goes straight into a log line, so only this shape is kept.
+REQUEST_ID = re.compile(r"[A-Za-z0-9-]{8,64}")
+STDERR_TAIL = 800
 
 
 def redact_path(path: str) -> str:
@@ -39,19 +47,37 @@ def loggable_path(path: str) -> str:
     return quote(redact_path(path), safe=_PATH_SAFE)
 
 
+def loggable_tail(stderr: bytes) -> str:
+    """A stderr tail or traceback, safe for a log line: ids hashed (a traceback names `<jobs_dir>/<id>/…`)
+    BEFORE truncating, so the cut can't leave a short id fragment the run rule would miss, then escaped so
+    MuPDF text or control bytes can't reach a terminal raw."""
+    text = redact_path(stderr.decode("utf-8", errors="replace"))
+    return json.dumps(text[-STDERR_TAIL:])
+
+
+def request_id_of(request: Request) -> str:
+    given = request.headers.get("x-request-id", "")
+    return given if REQUEST_ID.fullmatch(given) else uuid.uuid4().hex
+
+
 async def access_log(request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
+    request_id = request_id_of(request)
+    request.state.request_id = request_id
     start = time.perf_counter()
-    status = 500
     try:
         response = await call_next(request)
-        status = response.status_code
-        return response
-    finally:
-        # The query string is dropped too: it is free-form client input we never need in logs.
-        log.info(
-            "%s %s %d %.1fms",
-            request.method,
-            loggable_path(request.scope.get("path", "")),
-            status,
-            (time.perf_counter() - start) * 1000,
-        )
+    except Exception:  # noqa: BLE001 - every unexpected failure becomes the one 500 shape, with its id logged
+        # Not log.exception: a traceback can quote an id-bearing path, so it is redacted first.
+        log.error("request %s failed: %s", request_id, loggable_tail(traceback.format_exc().encode()))
+        response = error_response(500, "internal", request_id=request_id)
+    response.headers["X-Request-ID"] = request_id
+    # The query string is dropped too: it is free-form client input we never need in logs.
+    log.info(
+        "%s %s %d %.1fms %s",
+        request.method,
+        loggable_path(request.scope.get("path", "")),
+        response.status_code,
+        (time.perf_counter() - start) * 1000,
+        request_id,
+    )
+    return response

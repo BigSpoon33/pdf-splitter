@@ -18,6 +18,7 @@ from fastapi.responses import JSONResponse
 
 from .config import Settings
 from .deps import SettingsDep, StoreDep
+from .errors import MESSAGES
 from .preflight import MAGIC
 from .store import Store, log_id, new_job_id
 from .worker import sandbox
@@ -27,14 +28,8 @@ PREFLIGHT_TIMEOUT = 10.0
 MAX_FILENAME = 120
 DEFAULT_FILENAME = "document.pdf"
 
-MESSAGES = {
-    "too_large": "The file is larger than the upload limit.",
-    "not_pdf": "The file is not a PDF.",
-    "encrypted": "The PDF is password-protected.",
-    "too_many_pages": "The PDF has more pages than the limit.",
-    "no_text_layer": "The PDF has no text layer (it looks scanned); run OCR on it first.",
-    "unreadable": "The PDF could not be read.",
-}
+# The preflight's own codes; anything else it prints is `unreadable`.
+PREFLIGHT_CODES = frozenset({"not_pdf", "encrypted", "too_many_pages", "no_text_layer", "unreadable"})
 STATUS = {"too_large": 413, "too_many_pages": 413}
 
 log = logging.getLogger(__name__)
@@ -97,7 +92,7 @@ def run_preflight(path: Path, max_pages: int, job_id: str, timeout: float | None
         return {"ok": False, "code": "unreadable"}
     if result["ok"] is True and not (isinstance(result.get("pages"), int) and result["pages"] > 0):
         return {"ok": False, "code": "unreadable"}
-    if result["ok"] is not True and result.get("code") not in MESSAGES:
+    if result["ok"] is not True and result.get("code") not in PREFLIGHT_CODES:
         return {"ok": False, "code": "unreadable"}
     return result
 

@@ -21,7 +21,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from ..access_log import redact_path
+from ..access_log import loggable_tail
 from ..config import Settings
 from ..store import Store, log_id
 from . import sandbox
@@ -33,7 +33,6 @@ TaskArgs = Callable[[str, str], list[str]]
 
 POLL_S = 1.0
 SWEEP_EVERY_S = 30.0
-STDERR_TAIL = 800
 REQUEUED = "requeued"          # error_code marker on a row the sweep has already re-queued once
 # RLIMIT_CPU ends a process with SIGXCPU (soft) or SIGKILL (hard; also the kernel OOM killer). Python
 # ignores SIGXFSZ, but a task that re-enables it dies by it.
@@ -48,14 +47,6 @@ MESSAGES = {
 def task_args(kind: str, job_id: str) -> list[str]:
     # `--`: 1 in 64 ids starts with `-`, and must never parse as an option.
     return ["-m", "pdf_splitter.task", kind, "--", job_id]
-
-
-def loggable_tail(stderr: bytes) -> str:
-    """The stderr tail, safe for a log line: ids hashed (a traceback names `<jobs_dir>/<id>/…`) BEFORE
-    truncating, so the cut can't leave a short id fragment the run rule would miss, then escaped so MuPDF
-    text or control bytes can't reach a terminal raw."""
-    text = redact_path(stderr.decode("utf-8", errors="replace"))
-    return json.dumps(text[-STDERR_TAIL:])
 
 
 def classify(returncode: int, stdout: bytes) -> str | None:

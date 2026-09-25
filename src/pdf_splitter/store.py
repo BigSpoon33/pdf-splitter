@@ -188,21 +188,29 @@ class Store:
     def transition(
         self,
         job_id: str,
-        expect: str,
+        expect: str | tuple[str, ...],
         state: str,
         *,
+        kind: str | None = None,
         error_code: str | None = None,
         message: str | None = None,
         now: datetime | None = None,
     ) -> bool:
-        """`set_state` only if the row is still in `expect`; False otherwise. The worker finishes jobs with
-        this, so a job deleted (or already finished) while its subprocess ran is never resurrected."""
-        _check(state=state)
-        _check(state=expect)
+        """`set_state` only if the row is still in `expect` (one state or several); False otherwise. The
+        worker finishes jobs with this, so a job deleted (or already finished) while its subprocess ran is
+        never resurrected, and the api queues a cut with it, so two clients can't queue the same job twice
+        or re-queue one a worker has already claimed."""
+        expected = (expect,) if isinstance(expect, str) else tuple(expect)
+        _check(state=state, kind=kind)
+        for e in expected:
+            _check(state=e)
+        # A queued cut starts from a clean progress bar, not the analyze's final count.
         cur = self.conn.execute(
-            "UPDATE jobs SET state = ?, error_code = ?, message = ?, updated_at = ?"
-            " WHERE id = ? AND state = ?",
-            (state, error_code, message, now_ts(now), job_id, expect),
+            "UPDATE jobs SET state = ?, kind = COALESCE(?, kind), error_code = ?, message = ?, updated_at = ?,"
+            " progress = CASE WHEN ? = 'queued' THEN 0 ELSE progress END,"
+            " total = CASE WHEN ? = 'queued' THEN 0 ELSE total END"
+            f" WHERE id = ? AND state IN ({','.join('?' * len(expected))})",
+            (state, kind, error_code, message, now_ts(now), state, state, job_id, *expected),
         )
         if cur.rowcount:
             log.info("job %s -> %s%s", log_id(job_id), state, f" ({error_code})" if error_code else "")

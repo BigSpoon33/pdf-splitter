@@ -1,0 +1,106 @@
+"""The cut job's engine calls: the saved Plan → one PDF per section in `<id>/work/`, then `<id>/result.zip`.
+
+The engine never sees a display name. Each section goes in as `NNN-<ascii-slug>` (unique and filename-safe,
+so a name with `/` or one that repeats can't be refused or collide), overrides are re-keyed from the Plan's
+section index to that name, and the ZIP carries `NNN - <display name>.pdf` plus a `manifest.json` whose rows
+are the engine's with the Plan's `index`, `name` and the ZIP `file`. The task (`worker/task.py`) owns the row.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import unicodedata
+import zipfile
+from pathlib import Path
+from typing import Any
+
+from monograph_splitter.profile import profile_from_dict
+from monograph_splitter.session import MANIFEST_NAME, OVERRIDES_NAME, Book
+
+from .analyze import Progress
+
+ENGINE_NAME_BYTES = 80
+ZIP_NAME_CHARS = 120
+MANIFEST = "manifest.json"
+MSG_PREPARING = "Preparing the book"
+MSG_CUTTING = "Cutting sections"
+MSG_PACKAGING = "Packaging the sections"
+
+_NOT_SLUG = re.compile(r"[^a-z0-9]+")
+# `/` and `\` are separators in every unzip tool; the rest are refused by Windows file names.
+_NOT_FILENAME = re.compile(r'[/\\:*?"<>|]')
+
+
+def _silent(*_: object) -> None:
+    """The engine logs to stdout by default; the task's result must stay the last stdout line."""
+
+
+def engine_name(index: int, name: str) -> str:
+    slug = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode().lower()
+    slug = _NOT_SLUG.sub("-", slug).strip("-")
+    prefix = f"{index + 1:03d}-"
+    return prefix + (slug[: ENGINE_NAME_BYTES - len(prefix)].rstrip("-") or "section")
+
+
+def engine_entries(sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {"name": engine_name(i, s["name"]), "page": s["page"], "heading": s.get("heading") or ""}
+        for i, s in enumerate(sections)
+    ]
+
+
+def zip_entry(index: int, name: str) -> str:
+    """`NNN - <display name>.pdf`: the index keeps book order and makes the entry unique whatever the name."""
+    clean = "".join(c for c in _NOT_FILENAME.sub("-", name) if unicodedata.category(c)[0] != "C")
+    clean = " ".join(clean.split()) or "section"
+    prefix = f"{index + 1:03d} - "
+    return prefix + clean[: ZIP_NAME_CHARS - len(prefix) - 4].rstrip() + ".pdf"
+
+
+def _reset_outputs(work: Path) -> None:
+    # `Book.open` reads a manifest and overrides left by an earlier cut of this job and keeps their rows, so a
+    # section dropped from the plan (or an override removed) would come back; only the index cache is reused.
+    work.mkdir(parents=True, exist_ok=True)
+    for stale in (work / MANIFEST_NAME, work / OVERRIDES_NAME, *work.glob("*.pdf")):
+        stale.unlink(missing_ok=True)
+
+
+def cut_book(job_dir: Path, plan: dict[str, Any], progress: Progress) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Cut every section of `plan`; returns (manifest rows in plan order, the engine's `cut_all` summary)."""
+    prof = profile_from_dict(plan["settings"])
+    work = job_dir / "work"
+    _reset_outputs(work)
+    entries = engine_entries(plan["sections"])
+    progress(0, len(entries), MSG_PREPARING)
+    book = Book.open(pdf=job_dir / "source.pdf", out=work, profile=prof, entries=entries, log=_silent)
+    try:
+        for key, override in plan.get("overrides", {}).items():
+            book.set_override(entries[int(key)]["name"], override)
+        result = book.cut_all(progress=lambda done, total, _name: progress(done, total, MSG_CUTTING), verify=True)
+    finally:
+        book.close()
+    written = {row["formula"]: row for row in result["written"]}
+    rows = []
+    for i, section in enumerate(plan["sections"]):
+        row = written.get(entries[i]["name"])
+        if row is not None:
+            rows.append({**row, "index": i, "name": section["name"], "file": zip_entry(i, section["name"])})
+    return rows, result
+
+
+def write_zip(path: Path, work: Path, rows: list[dict[str, Any]]) -> None:
+    """`result.zip`, replaced whole: the previous one stays downloadable until this one is complete, and a
+    failure part-way (a hit RLIMIT_FSIZE, a full disk) leaves no `.tmp` behind."""
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        with zipfile.ZipFile(tmp, "w") as zf:
+            for row in rows:
+                # The excerpts are already deflated inside (PyMuPDF `deflate=True`); storing skips a second pass.
+                zf.write(work / f"{row['formula']}.pdf", row["file"], compress_type=zipfile.ZIP_STORED)
+            zf.writestr(MANIFEST, json.dumps(rows, ensure_ascii=False, indent=1), compress_type=zipfile.ZIP_DEFLATED)
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise

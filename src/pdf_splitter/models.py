@@ -1,0 +1,170 @@
+"""The Plan a client PUTs (Architecture § Data Types), validated before anything touches a path or the engine.
+
+Every number must be finite: `profile_from_dict`'s range checks let NaN through, and the engine's `cuts.plan`
+raises IndexError for a page past the book, so pages are checked against the job here (validation context
+`pages` and `sizes`, from the job row and `analysis.json`).
+"""
+
+from __future__ import annotations
+
+from typing import Annotated, Any, Literal
+
+from monograph_splitter.profile import ProfileError, profile_from_dict
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
+
+from .worker.analyze import DEFAULT_SETTINGS, MAX_HEADING, MAX_SECTION_NAME, clean_text
+
+MAX_SECTIONS = 2000
+Source = Literal["outline", "headings", "manual"]
+Col = Literal["full", "left", "right"]
+Cut = Annotated[float, Field(ge=0)]
+
+
+class _Strict(BaseModel):
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+
+
+class PlanSettings(_Strict):
+    column_split: float = Field(default=DEFAULT_SETTINGS["column_split"], ge=0.2, le=0.8)
+    single_column: bool = DEFAULT_SETTINGS["single_column"]
+    header_band: float = Field(default=DEFAULT_SETTINGS["header_band"], ge=0, le=200)
+    footer_band: float = Field(default=DEFAULT_SETTINGS["footer_band"], ge=0, le=200)
+    heading_min_size: float = Field(default=DEFAULT_SETTINGS["heading_min_size"], ge=4, le=72)
+
+    @model_validator(mode="after")
+    def _engine_accepts(self) -> PlanSettings:
+        # The ranges above sit inside the engine's own, so this only catches drift between the two.
+        try:
+            profile_from_dict(self.model_dump())
+        except ProfileError as e:
+            raise ValueError(str(e)) from e
+        return self
+
+
+class Section(_Strict):
+    name: str = Field(min_length=1, max_length=MAX_SECTION_NAME)
+    page: int = Field(ge=1)
+    heading: str = Field(default="", max_length=MAX_HEADING)
+
+    @field_validator("name", "heading", mode="before")
+    @classmethod
+    def _clean(cls, v: Any) -> Any:
+        # A JSON `"\udcff"` escape decodes to a lone surrogate that strict UTF-8 (the plan file, the ZIP entry
+        # name, the response) rejects; the same U+FFFD rule as the analysis.
+        return clean_text(v).strip() if isinstance(v, str) else v
+
+    @field_validator("page")
+    @classmethod
+    def _in_book(cls, v: int, info: ValidationInfo) -> int:
+        pages = (info.context or {}).get("pages")
+        if pages is not None and v > pages:
+            raise ValueError(f"page must be at most {pages}, the last page of the book")
+        return v
+
+
+class Override(_Strict):
+    """Only the keys a client sends are applied (the engine's `apply_overrides` sets present keys), so a
+    `startCut: null` removes the start cut while an absent one keeps the engine's."""
+
+    startCut: Cut | None = None
+    startCol: Col = "full"
+    endCut: Cut | None = None
+    endCol: Col = "full"
+
+    def dump(self) -> dict[str, Any]:
+        return {k: getattr(self, k) for k in ("startCut", "startCol", "endCut", "endCol") if k in self.model_fields_set}
+
+
+def check_override(ov: Override, height: float, max_height: float) -> str | None:
+    """Why `ov` can't apply to a section whose first sheet is `height` tall (the last sheet is only known
+    after planning, so the end cut is bounded by the tallest sheet in the book), or None."""
+    if ov.startCut is not None and ov.startCut > height:
+        return f"startCut must be at most the page height ({height})"
+    if ov.endCut is not None and ov.endCut > max_height:
+        return f"endCut must be at most the page height ({max_height})"
+    return None
+
+
+def _heights(info: ValidationInfo) -> list[float] | None:
+    sizes = (info.context or {}).get("sizes")
+    return [float(s["H"]) for s in sizes] if sizes else None
+
+
+class Plan(_Strict):
+    source: Source
+    settings: PlanSettings = Field(default_factory=PlanSettings)
+    sections: list[Section] = Field(max_length=MAX_SECTIONS)
+    overrides: dict[str, Override] = Field(default_factory=dict)
+
+    @field_validator("overrides")
+    @classmethod
+    def _keyed_by_section(cls, v: dict[str, Override], info: ValidationInfo) -> dict[str, Override]:
+        sections: list[Section] | None = info.data.get("sections")
+        if sections is None:
+            return v          # sections already failed; their error is the one to report
+        heights = _heights(info)
+        for key, ov in v.items():
+            if not key.isdecimal() or str(int(key)) != key or int(key) >= len(sections):
+                raise ValueError(f"override {key!r} does not name a section index (0..{len(sections) - 1})")
+            if heights:
+                why = check_override(ov, heights[sections[int(key)].page - 1], max(heights))
+                if why:
+                    raise ValueError(f"override {key}: {why}")
+        return v
+
+    @model_validator(mode="after")
+    def _dedupe_names(self) -> Plan:
+        # Duplicates are allowed in the UI (Architecture); the saved plan makes them distinct with a counter,
+        # so every display name maps to one section.
+        used: set[str] = set()
+        for s in self.sections:
+            name, k = s.name, 2
+            while name in used:
+                suffix = f" ({k})"
+                name = s.name[: MAX_SECTION_NAME - len(suffix)].rstrip() + suffix
+                k += 1
+            used.add(name)
+            s.name = name
+        return self
+
+    def dump(self) -> dict[str, Any]:
+        """The normalized Plan as `plan.json` and the API carry it."""
+        return {
+            "source": self.source,
+            "settings": self.settings.model_dump(),
+            "sections": [s.model_dump() for s in self.sections],
+            "overrides": {k: v.dump() for k, v in self.overrides.items()},
+        }
+
+
+class PreviewRequest(_Strict):
+    """`POST /sections/{i}/plan`: settings default to the saved plan's; an absent `override` means the saved
+    one, an explicit `null` the engine's own plan."""
+
+    settings: PlanSettings | None = None
+    override: Override | None = None
+
+    @model_validator(mode="after")
+    def _bounded(self, info: ValidationInfo) -> PreviewRequest:
+        ctx = info.context or {}
+        if self.override is not None and "height" in ctx:
+            why = check_override(self.override, ctx["height"], ctx["max_height"])
+            if why:
+                raise ValueError(f"override: {why}")
+        return self
+
+
+def validate_plan(raw: Any, *, pages: int, sizes: list[dict[str, float]]) -> Plan:
+    """Raises `pydantic.ValidationError` (the route turns it into the 422)."""
+    return Plan.model_validate(raw, context={"pages": pages, "sizes": sizes})
+
+
+__all__ = ["Override", "Plan", "PlanSettings", "PreviewRequest", "Section", "ValidationError", "validate_plan"]

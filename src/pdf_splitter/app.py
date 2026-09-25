@@ -7,9 +7,11 @@ from contextlib import asynccontextmanager
 import monograph_splitter
 from fastapi import FastAPI
 
+from . import errors
 from .access_log import access_log
 from .config import Settings
 from .deps import SettingsDep, StoreDep, get_settings, get_store
+from .routes import download, plan, preview
 from .store import Store
 from .upload import router as upload_router
 
@@ -33,7 +35,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app = FastAPI(title="pdf-splitter", lifespan=lifespan)
     app.state.settings = settings
     app.middleware("http")(access_log)
-    app.include_router(upload_router)
+    errors.install(app)
+    for router in (upload_router, plan.router, preview.router, download.router):
+        app.include_router(router)
 
     @app.get("/api/health")
     def health(settings: SettingsDep, store: StoreDep) -> dict:

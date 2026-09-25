@@ -510,6 +510,6 @@ def test_logs_never_contain_a_job_id(settings: Settings, caplog: pytest.LogCaptu
     assert server and all(job_id not in line for line in server)
     access = [r.getMessage() for r in caplog.records if r.name == "pdf_splitter.access"]
     assert any(line.startswith("POST /api/jobs 201 ") for line in access)
-    assert any(line.startswith(f"GET /api/jobs/{log_id(job_id)} 404 ") for line in access)
-    assert any(f"/api/jobs/{log_id(job_id)}/sheets/1.png 404" in line for line in access)
+    assert any(line.startswith(f"GET /api/jobs/{log_id(job_id)} 200 ") for line in access)
+    assert any(f"/api/jobs/{log_id(job_id)}/sheets/1.png 409" in line for line in access)
     assert all("dpi" not in line for line in access)

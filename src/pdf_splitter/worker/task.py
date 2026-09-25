@@ -1,7 +1,8 @@
-"""One job in its own sandboxed process: `python -m pdf_splitter.task analyze -- <id>`.
+"""One job in its own sandboxed process: `python -m pdf_splitter.task analyze|cut -- <id>`.
 
 The runner starts it through `worker.sandbox` (rlimits) under a wall timeout and passes `PDFSPLIT_JOBS_DIR`.
-The task writes its outputs and moves the row `running → review` itself; any failure is left to the runner,
+The task writes its outputs and moves the row `running → review` (`→ done` for a cut) itself; any failure is
+left to the runner,
 which reads the result from the LAST stdout line (the engine's lazy `import fitz` prints a deprecation notice
 to stdout mid-run): `{"ok": true}` or `{"ok": false, "code": "resources"|"internal"}`.
 """
@@ -11,20 +12,19 @@ from __future__ import annotations
 import argparse
 import errno
 import json
-import os
 import re
 import sys
 import time
 import traceback
 from collections.abc import Callable
-from pathlib import Path
-from typing import Any
 
 import pymupdf
 
 from ..config import Settings
+from ..files import read_json, write_json
 from ..store import Store
 from .analyze import MUPDF_ERRORS, analyze, default_plan
+from .cut import MSG_PACKAGING, cut_book, write_zip
 
 PROGRESS_INTERVAL_S = 0.5
 EXIT_INTERNAL = 1
@@ -71,19 +71,6 @@ class Throttle:
         self._last, self._message = now, message
 
 
-def _write_json(path: Path, data: dict[str, Any]) -> None:
-    # Write-then-rename: the api may read these files while the task runs, and must never see half of one.
-    tmp = path.with_name(path.name + ".tmp")
-    try:
-        # `analyze.json_safe` has already replaced lone surrogates; `errors="replace"` is the backstop, so a
-        # string that slipped past it costs a `?`, never the whole analysis.
-        tmp.write_bytes(json.dumps(data, ensure_ascii=False).encode("utf-8", errors="replace"))
-        os.replace(tmp, path)
-    except BaseException:
-        tmp.unlink(missing_ok=True)
-        raise
-
-
 def run_analyze(settings: Settings, job_id: str, store: Store) -> bool:
     """Analyze one job; False if its row is gone or no longer running (nothing is written then)."""
     job = store.get_job(job_id)
@@ -92,9 +79,27 @@ def run_analyze(settings: Settings, job_id: str, store: Store) -> bool:
     job_dir = settings.jobs_dir / job_id
     throttle = Throttle(lambda done, total, msg: store.update_progress(job_id, done, total, msg))
     analysis = analyze(job_dir / "source.pdf", job_dir / "work", throttle)
-    _write_json(job_dir / "analysis.json", analysis)
-    _write_json(job_dir / "plan.json", default_plan(analysis))
+    write_json(job_dir / "analysis.json", analysis)
+    write_json(job_dir / "plan.json", default_plan(analysis))
     return store.transition(job_id, "running", "review")
+
+
+def run_cut(settings: Settings, job_id: str, store: Store) -> bool:
+    """Cut one job from its saved plan into `result.zip`; False if its row is gone or no longer running."""
+    job = store.get_job(job_id)
+    if job is None or job["state"] != "running" or job["kind"] != "cut":
+        return False
+    job_dir = settings.jobs_dir / job_id
+    throttle = Throttle(lambda done, total, msg: store.update_progress(job_id, done, total, msg))
+    rows, _ = cut_book(job_dir, read_json(job_dir / "plan.json"), throttle)
+    # A job deleted while the engine ran must not get its directory back: the check sits right before the
+    # only write the api serves (the engine's work files are already on disk and go with the row's TTL).
+    row = store.get_job(job_id)
+    if row is None or row["state"] != "running":
+        return False
+    throttle(len(rows), len(rows), MSG_PACKAGING)
+    write_zip(job_dir / "result.zip", job_dir / "work", rows)
+    return store.transition(job_id, "running", "done")
 
 
 def _result(ok: bool, code: str | None = None) -> int:
@@ -125,7 +130,7 @@ def guarded(job: Callable[[], bool]) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m pdf_splitter.task")
-    parser.add_argument("kind", choices=["analyze"])
+    parser.add_argument("kind", choices=["analyze", "cut"])
     parser.add_argument("job_id")
     args = parser.parse_args(argv)
     # The id comes from the jobs table, but it is also a path component: refuse anything that isn't one.
@@ -135,8 +140,9 @@ def main(argv: list[str] | None = None) -> int:
     pymupdf.TOOLS.mupdf_display_errors(False)
     settings = Settings()
     store = Store(settings.db_path)
+    run = run_analyze if args.kind == "analyze" else run_cut
     try:
-        return guarded(lambda: run_analyze(settings, args.job_id, store))
+        return guarded(lambda: run(settings, args.job_id, store))
     finally:
         store.close()
 

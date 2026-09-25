@@ -22,10 +22,42 @@ The worker claims queued jobs, at most `PDFSPLIT_WORKERS` at a time, and runs ea
 `python -m pdf_splitter.task <kind> -- <id>` through `pdf_splitter.worker.sandbox` (RLIMIT_AS 2 GB, RLIMIT_CPU
 timeout + 10 s, RLIMIT_FSIZE 1 GB) under the kind's wall-clock timeout. An analyze job writes
 `<id>/analysis.json`, `<id>/plan.json` and the engine index `<id>/work/.book-index.json`, then moves the row to
-`review`; a failure leaves `failed` with `error_code` `timeout`, `resources` or `internal`. SIGTERM stops
-claiming and lets running jobs finish.
+`review`. A cut job reads `<id>/plan.json`, writes one PDF per section into `<id>/work/` and then
+`<id>/result.zip` (`NNN - <section name>.pdf` × n + `manifest.json`), replaced whole, and moves the row to `done`.
+A failure leaves `failed` with `error_code` `timeout`, `resources` or `internal`. SIGTERM stops claiming and
+lets running jobs finish.
 
 Request logs come from the app (`pdf_splitter.access`), not uvicorn, so job ids appear only as `log_id` hashes.
+Every response carries an `X-Request-ID` (an inbound one is kept when it matches `[A-Za-z0-9-]{8,64}`); the same
+id ends the access-log line, and an unexpected error is a 500 `{code: "internal", message, request_id}` whose
+redacted traceback is logged under that id.
+
+### API
+
+Job ids are the only credential (capability URLs); errors are `{code, message}` (`src/pdf_splitter/errors.py`
+has every code), 422s add `errors: [{loc, msg, type}]`.
+
+```
+POST   /api/jobs                             multipart file → 201 {id, state}
+GET    /api/jobs/{id}                        {id, state, kind, progress, total, queue_position, message,
+                                              error_code (failed only), expires_at, filename, pages}
+                                              404 not_found · 410 expired (deleted or past its TTL)
+GET    /api/jobs/{id}/analysis               the Analysis (409 not_ready before review)
+GET    /api/jobs/{id}/plan                   the saved Plan
+PUT    /api/jobs/{id}/plan                   Plan → 200 normalized Plan · 422 invalid · 409 busy while a job runs;
+                                              from done the job returns to review
+POST   /api/jobs/{id}/cut                    202 {id, state: "queued"} · 409 busy/not_ready · 422 empty plan
+GET    /api/jobs/{id}/sheets/{n}.png?dpi=72  PNG of sheet n (dpi 48|72|110), cached per (sheet, dpi, settings)
+POST   /api/jobs/{id}/sections/{i}/plan      {settings?, override?} → the Section plan (rects on 1-based sheets)
+GET    /api/jobs/{id}/result.zip             attachment (409 not_ready before the first cut)
+GET    /api/jobs/{id}/sections/{i}.pdf       attachment, straight out of result.zip
+DELETE /api/jobs/{id}                        204 (the row is marked deleted, then the directory removed)
+GET    /api/health                           {ok, queue, disk_free_gb, engine_version}
+```
+
+Previews run the engine read-only in a `python -m pdf_splitter.preview` subprocess under the worker's rlimits
+with a 20 s timeout. A Plan whose `settings` differ from the index's re-indexes the book inside that window
+(≈ 12–14 s for 1300 pages), so the first preview after a layout change is slow and the ones after it are not.
 
 ### Configuration
 

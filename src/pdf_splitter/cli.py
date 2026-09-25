@@ -32,4 +32,4 @@ def main(argv: list[str] | None = None) -> None:
         # container's final kill is re-queued by the next start's sweep.
         for sig in (signal.SIGTERM, signal.SIGINT):
             signal.signal(sig, lambda *_: stop.set())
-        Runner(Settings()).serve(stop)
+        Runner(Settings(), kinds=("analyze", "cut")).serve(stop)

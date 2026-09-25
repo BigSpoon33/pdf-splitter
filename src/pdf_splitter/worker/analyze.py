@@ -32,6 +32,9 @@ Progress = Callable[[int, int, str], None]
 
 INDEX_CACHE = ".book-index.json"   # the name Book.open uses in its out dir, so the cut job finds it
 MAX_OUTLINE_LEVEL = 3
+# The Plan's limits (Architecture § Data Types); the default plan keeps to them so a client can PUT it back.
+MAX_SECTION_NAME = 120
+MAX_HEADING = 500
 SUGGEST_RANGE = (5, 60)            # a heading level with this many items reads as a table of contents
 MSG_INDEXING = "Indexing pages"
 MSG_OUTLINE = "Reading the outline"
@@ -171,6 +174,9 @@ def default_plan(analysis: dict[str, Any]) -> dict[str, Any]:
     return {
         "source": source,
         "settings": dict(DEFAULT_SETTINGS),
-        "sections": [{"name": r["name"], "page": r["page"], "heading": r["heading"]} for r in rows],
+        "sections": [
+            {"name": r["name"][:MAX_SECTION_NAME], "page": r["page"], "heading": r["heading"][:MAX_HEADING]}
+            for r in rows
+        ],
         "overrides": {},
     }

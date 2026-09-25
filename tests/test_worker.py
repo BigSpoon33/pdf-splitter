@@ -17,9 +17,10 @@ import pymupdf
 import pytest
 from fixtures.books import headed_book, text_book
 from fixtures.hostile import link_uri_bomb, outline_book, xobj_bomb
+from helpers import DASH_ID, OTHER_ID, assert_id_gone
 from monograph_splitter.profile import profile_from_dict
 
-from pdf_splitter import cli, upload
+from pdf_splitter import access_log, cli, files, upload
 from pdf_splitter.config import Settings
 from pdf_splitter.store import Store, log_id
 from pdf_splitter.worker import analyze as analyze_mod
@@ -37,8 +38,6 @@ from pdf_splitter.worker.analyze import (
 from pdf_splitter.worker.runner import REQUEUED, Runner, classify, loggable_tail, task_args
 from pdf_splitter.worker.task import Throttle
 
-DASH_ID = "-bCdEfGhIjKlMnOpQrSt00"  # the token_urlsafe(16) shape with the awkward leading `-` (1 in 64)
-OTHER_ID = "xYzAbCdEfGhIjKlMnOpQ01"
 ANALYSIS_KEYS = {"pages", "pageLabels", "size", "outline", "headings", "suggested"}
 PLAN_KEYS = {"source", "settings", "sections", "overrides"}
 
@@ -57,12 +56,6 @@ FAKE_EXIT0_NO_STATE = "print('{\"ok\": true}')"
 
 def fake(code: str):
     return lambda kind, job_id: ["-c", code, job_id]
-
-
-def assert_id_gone(out: str, job_id: str) -> None:
-    """Neither the id nor any 16-char window of it survives (tests/test_upload.py's rule)."""
-    assert job_id not in out
-    assert not any(job_id[i : i + 16] in out for i in range(len(job_id) - 15))
 
 
 def open_store(settings: Settings) -> Store:
@@ -328,7 +321,7 @@ def test_task_survives_a_bookmark_title_that_is_not_valid_unicode(
 
 def test_write_json_never_fails_on_encoding(tmp_path: Path) -> None:
     out = tmp_path / "analysis.json"
-    task._write_json(out, {"name": "x\udcffy"})          # a string that dodged `json_safe`
+    files.write_json(out, {"name": "x\udcffy"})          # a string that dodged `json_safe`
     assert json.loads(out.read_bytes().decode("utf-8")) == {"name": "x?y"}
 
 
@@ -345,9 +338,9 @@ def test_write_json_removes_the_tmp_when_the_rename_fails(
         seen["tmp"] = Path(src).read_bytes()             # proof the failure happens with the .tmp on disk
         raise OSError(errno.EIO, "Input/output error")
 
-    monkeypatch.setattr(task.os, "replace", refuse)
+    monkeypatch.setattr(files.os, "replace", refuse)
     with pytest.raises(OSError, match="Input/output"):
-        task._write_json(out, {"pages": 3})
+        files.write_json(out, {"pages": 3})
     assert seen["tmp"] == b'{"pages": 3}'
     assert not tmp.exists()
     assert json.loads(out.read_text()) == {"previous": True}
@@ -360,8 +353,8 @@ def test_write_json_removes_a_tmp_cut_short_by_rlimit_fsize(tmp_path: Path) -> N
     out, tmp = tmp_path / "analysis.json", tmp_path / "analysis.json.tmp"
     out.write_text('{"previous": true}')
     code = (
-        GUARDED + "from pathlib import Path; from pdf_splitter.worker.task import _write_json; "
-        f"sys.exit(guarded(lambda: (_write_json(Path({str(out)!r}), {{'pad': 'x' * 100_000}}), True)[1]))"
+        GUARDED + "from pathlib import Path; from pdf_splitter.files import write_json; "
+        f"sys.exit(guarded(lambda: (write_json(Path({str(out)!r}), {{'pad': 'x' * 100_000}}), True)[1]))"
     )
     proc = run_sandboxed({**sandbox.limits(10), "fsize": 4096}, code)
     assert proc.returncode == task.EXIT_RESOURCES, proc.stderr
@@ -790,7 +783,7 @@ def test_loggable_tail_redacts_then_escapes() -> None:
     tail = loggable_tail(raw * 50)
     assert_id_gone(tail, DASH_ID)
     assert "\x1b" not in tail and " " not in tail and tail.isascii()
-    assert len(json.loads(tail)) <= runner_mod.STDERR_TAIL
+    assert len(json.loads(tail)) <= access_log.STDERR_TAIL
 
 
 # ── STORY-005 addendum: the preflight runs under the same rlimits ───────────────────────────────────────
@@ -834,8 +827,8 @@ def test_cli_worker_serves_a_runner_from_env_settings(
     seen = {}
 
     class FakeRunner:
-        def __init__(self, settings: Settings) -> None:
-            seen["settings"] = settings
+        def __init__(self, settings: Settings, kinds: tuple[str, ...]) -> None:
+            seen["settings"], seen["kinds"] = settings, kinds
 
         def serve(self, stop: threading.Event) -> None:
             seen["stop"] = stop
@@ -845,4 +838,5 @@ def test_cli_worker_serves_a_runner_from_env_settings(
     monkeypatch.setattr(cli.signal, "signal", lambda *a: None)
     cli.main(["worker"])
     assert seen["settings"].jobs_dir == tmp_path / "j"
+    assert seen["kinds"] == ("analyze", "cut")
     assert isinstance(seen["stop"], threading.Event)
