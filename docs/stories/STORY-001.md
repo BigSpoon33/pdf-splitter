@@ -28,7 +28,7 @@ The web service drives the engine with user-chosen settings (ADR-002/003). Today
 
 ## Acceptance Criteria
 
-- [x] AC-1: `profile_from_dict(d)` returns a Profile built on `WEB_BASE` (headings mode, `sheet_offset=1`, empty `script_regex`, no break patterns, `max_span=200`) overriding only `WEB_KEYS`; any other key raises `ProfileError` naming it
+- [x] AC-1: `profile_from_dict(d)` returns a Profile built on `WEB_BASE` (headings mode, `sheet_offset=0` (spec said 1 — corrected, see findings), empty `script_regex`, no break patterns, `max_span=200`) overriding only `WEB_KEYS`; any other key raises `ProfileError` naming it
 - [x] AC-2: `single_column: true` yields a profile where every line is in the left column and every cut is full-width (asserted on the synthetic book)
 - [x] AC-3: Two dicts with the same values (any key order) produce the same `sha256`; different values produce different ones
 - [x] AC-4: `entries_from_rows(rows)` is the validation `load_entries_json` now delegates to (same skipped/headings semantics); `load_entries_json` behaviour unchanged

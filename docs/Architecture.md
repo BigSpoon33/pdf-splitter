@@ -64,7 +64,7 @@ deploy/
   - `profile_from_dict(d: dict, base: Profile = WEB_BASE) -> Profile`. It accepts only `WEB_KEYS`
     (`column_split`, `header_band`, `footer_band`, `redact_top`, `heading_min_size`,
     `heading_match`, `heading_wrap_gap`, `max_span`, `single_column`), and an unknown key is a
-    `ProfileError`. `WEB_BASE` = `anchor_source="headings"`, `sheet_offset=1`,
+    `ProfileError`. `WEB_BASE` = `anchor_source="headings"`, `sheet_offset=0` (page 1 = sheet index 0),
     `script_regex=""`, `break_patterns=()`, `max_span=200`. `sha256` = the hash of the canonical
     JSON, so the index cache stays keyed correctly.
   - `single_column: bool` → sets `column_split` so that every line is "left" (e.g. 0.999) and
@@ -243,7 +243,7 @@ never appear in logs (logs carry a short hash).
 ### ADR-003: Sheet numbers, not printed pages
 
 - **Status:** Accepted
-- **Decision:** `sheet_offset = 1` everywhere in web mode. The UI shows the PDF page label (`page.get_label()`) as a secondary hint.
+- **Decision:** Pages are 1-based sheet numbers everywhere in web mode — engine `sheet_offset = 0` (the engine maps page N to 0-based sheet index `N + sheet_offset − 1`; corrected in STORY-001 from a spec error of 1). The UI shows the PDF page label (`page.get_label()`) as a secondary hint.
 - **Rationale:** An unknown book has no calibrated offset, and outline destinations are sheets.
 
 ### ADR-004: Job queue on SQLite, not Redis

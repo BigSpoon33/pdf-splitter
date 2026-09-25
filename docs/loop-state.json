@@ -1,15 +1,45 @@
 {
   "mode": "auto",
-  "active_story": "STORY-001",
+  "active_story": "STORY-002",
   "loop_phase": "implement",
-  "queue": ["STORY-001","STORY-002","STORY-003","STORY-004","STORY-005","STORY-006","STORY-007","STORY-008","STORY-009","STORY-010","STORY-011","STORY-012","STORY-013"],
-  "held": {"STORY-014": "costs money + needs Shuma's domain/host/contact decisions (PRD Q-1, Q-2, Q-4) — not in the autonomous run"},
-  "completed": [],
-  "attempts": {},
+  "queue": [
+    "STORY-002",
+    "STORY-003",
+    "STORY-004",
+    "STORY-005",
+    "STORY-006",
+    "STORY-007",
+    "STORY-008",
+    "STORY-009",
+    "STORY-010",
+    "STORY-011",
+    "STORY-012",
+    "STORY-013"
+  ],
+  "held": {
+    "STORY-014": "costs money + needs Shuma's domain/host/contact decisions (PRD Q-1, Q-2, Q-4) \u2014 not in the autonomous run"
+  },
+  "completed": [
+    "STORY-001"
+  ],
+  "attempts": {
+    "STORY-001": 1,
+    "STORY-002": 1
+  },
   "failed": {},
   "consecutive_failures": 0,
-  "branches": {"engine": "monograph-splitter feature/web-mode", "web": "pdf-splitter feature/mvp"},
-  "baseline": {"engine_tests": "51 passed (v0.3.1, 6fd22fc)", "web_tests": "none yet"},
-  "run": {},
+  "branches": {
+    "engine": "monograph-splitter feature/web-mode",
+    "web": "pdf-splitter feature/mvp"
+  },
+  "baseline": {
+    "engine_tests": "72 passed after STORY-001 (742bfbe)",
+    "web_tests": "none yet"
+  },
+  "run": {
+    "started": "2026-09-25",
+    "runner": "in-session background subagent (tmux --dangerously-skip-permissions route denied by the auto-mode classifier)",
+    "active": "STORY-002"
+  },
   "last_updated": "2026-09-25"
 }

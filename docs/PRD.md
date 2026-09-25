@@ -89,7 +89,7 @@ someone who can write a TOML layout profile and a JSON entry list and run a Pyth
 | A-2 | Most "large PDFs" users bring have either an outline or visibly larger heading type | If neither, users must paste a list (still supported, just slower) |
 | A-3 | Indexing ≤ 2,000 pages of a digital-text PDF takes ≤ 2 min on 2 vCPU. The 5-min figure is the OCR'd Chen & Chen scan | If slower: lower the page cap or add workers |
 | A-4 | Users upload books they have the right to process. Output is private and deleted in 24 h, so the service is a tool, not a distributor | A takedown/abuse complaint. Mitigation: terms, takedown contact, no public links, short retention |
-| A-5 | Page-number semantics: the web mode uses **sheet numbers** (PDF page 1 = first page, `sheet_offset = 1`). Printed page labels are shown alongside when the PDF has them | Users think in printed page numbers. The UI shows both |
+| A-5 | Page-number semantics: the web mode uses **sheet numbers** (PDF page 1 = first page; engine `sheet_offset = 0`, because the engine maps page N to sheet index `N + sheet_offset − 1`). Printed page labels are shown alongside when the PDF has them | Users think in printed page numbers. The UI shows both |
 
 ## Open Questions
 

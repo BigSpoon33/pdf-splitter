@@ -122,3 +122,11 @@ test like `test_book_opens_from_rows_an_entry_list_or_a_path_with_the_same_plans
 
 Per-AC ✅/❌ with file:line, test counts (before 72 / after N), commits (both repos), anything
 STORY-003 (`Book.cut_all` + CLI on it, 0.4.0 release) should know.
+
+## Orchestrator addendum (after STORY-001 review)
+
+- STORY-001 passed review clean. The docs now say `sheet_offset=0` (PRD A-5, Architecture, ADR-003).
+- One-line cleanup to fold into your commit: the comment at `src/monograph_splitter/profile.py:218-219` still claims the pdf-splitter docs write "sheet_offset = 1"; reword it (the docs are fixed).
+- Real-book check available for outline detection: Maciocia *Foundations* (1319 sheets, has a PDF bookmark outline — Inkwell's STORY-219 built its entries from it) is at
+  `~/Documents/Vaults/TCM_Knowledge_Base/Books/Maciocia, Giovanni - The foundation of Chinese medicine_ a comprehensive text (2015, Elsevier) - libgen.lc.pdf`.
+  READ-ONLY; write any outputs to a temp dir. Optional sanity check, not a test (tests never read real books). Report level counts + a few sample rows in findings.
