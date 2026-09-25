@@ -1,7 +1,7 @@
 {
   "mode": "auto",
   "active_story": "STORY-006",
-  "loop_phase": "implement",
+  "loop_phase": "halted",
   "queue": [
     "STORY-006",
     "STORY-007",
@@ -30,7 +30,9 @@
     "STORY-005": 3,
     "STORY-006": 2
   },
-  "failed": {},
+  "failed": {
+    "STORY-006": "gate r2: incomplete fix (FzErrorSystem not mapped to resources) + vacuous .tmp test \u2014 see STORY-006-review.md"
+  },
   "consecutive_failures": 0,
   "branches": {
     "engine": "monograph-splitter feature/web-mode",
@@ -43,7 +45,8 @@
   "run": {
     "started": "2026-09-25",
     "runner": "in-session background subagent (tmux --dangerously-skip-permissions route denied by the auto-mode classifier)",
-    "active": "STORY-006 (retry)"
+    "active": null,
+    "halt_reason": "STORY-006 failed its gate twice (not a fix-regression)"
   },
   "last_updated": "2026-09-25",
   "exceptions": {
