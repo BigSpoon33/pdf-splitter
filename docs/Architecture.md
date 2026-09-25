@@ -25,7 +25,7 @@ then zips the excerpts with a manifest for download. A janitor deletes every job
 ## Component Map
 
 ```
-monograph-splitter (engine, github.com/BigSpoon33/pdf-splitter-engine, v0.4.0)          ← library; the ONLY code that cuts PDFs
+monograph-splitter (engine, github.com/BigSpoon33/pdf-splitter-engine, v0.4.1)          ← library; the ONLY code that cuts PDFs
 ├── profile.profile_from_dict / WEB_KEYS          ← build a Profile from JSON settings (whitelisted keys)
 ├── detect.outline_entries / heading_candidates   ← NEW: candidate section lists from a PDF
 ├── session.Book.open(entries=EntryList|list)     ← accepts in-memory entries, no files needed
@@ -238,7 +238,7 @@ never appear in logs (logs carry a short hash).
 
 - **Status:** Accepted (Shuma, 2026-09-25)
 - **Context:** The engine is a library that the Inkwell adapters pin by tag.
-- **Decision:** `pdf-splitter` depends on `monograph-splitter @ git+https://github.com/BigSpoon33/pdf-splitter-engine@v0.4.0`. Engine changes go to the engine repo with tests + diff gate, then get a tag bump here.
+- **Decision:** `pdf-splitter` depends on `monograph-splitter @ git+https://github.com/BigSpoon33/pdf-splitter-engine@v0.4.1`. Engine changes go to the engine repo with tests + diff gate, then get a tag bump here.
 - **Consequences:** Two-repo stories, but the engine stays clean, and the web service can't regress Inkwell's books.
 - **Hosting (2026-09-25):** both repos are public on GitHub (`BigSpoon33/pdf-splitter`, `BigSpoon33/pdf-splitter-engine`) as `origin`; Gitea (`gitea` remote) is a LAN mirror. Inkwell's adapters keep pinning the Gitea URL until repointed.
 
@@ -317,7 +317,7 @@ CREATE TABLE rate (ip_hash TEXT, at TEXT);   -- sliding window; pruned by the ja
 
 | Dependency | Type | Version | Why Needed | Fallback |
 |------------|------|---------|------------|----------|
-| monograph-splitter | git dep | v0.4.0 | the engine | — |
+| monograph-splitter | git dep | v0.4.1 | the engine | — |
 | pymupdf | PyPI | ≥1.24 (pin exact, track CVEs) | PDF parse/render/redact | — |
 | fastapi, uvicorn, pydantic-settings, python-multipart | PyPI | current | API | — |
 | svelte, vite, typescript | npm via Bun | current | SPA | — |

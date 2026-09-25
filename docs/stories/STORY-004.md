@@ -49,7 +49,7 @@ The first code in the new repo.
 
 ## Implementation Notes
 
-- Package name `pdf_splitter`. Python 3.12. Engine dep: `monograph-splitter @ git+https://github.com/BigSpoon33/pdf-splitter-engine@v0.4.0` (public GitHub, so the VM and CI install it with no token; the package keeps its `monograph_splitter` import name).
+- Package name `pdf_splitter`. Python 3.12. Engine dep: `monograph-splitter @ git+https://github.com/BigSpoon33/pdf-splitter-engine@v0.4.1` (public GitHub, so the VM and CI install it with no token; the package keeps its `monograph_splitter` import name).
 
 ---
 
