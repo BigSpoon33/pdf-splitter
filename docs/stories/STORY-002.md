@@ -98,7 +98,7 @@ feat: STORY-002 - detect: outline entries and big-heading candidates for arbitra
 
 ## Status
 
-**Done** — 2026-09-25 (engine `ef828ab` + gate r1 fix `4d8d375` on `feature/web-mode`; findings `docs/findings/STORY-002-findings.md`)
+**Done** — 2026-09-25 (engine `ef828ab` + gate r1 fix `4d8d375` + gate r2 fix `defb734` on `feature/web-mode`; findings `docs/findings/STORY-002-findings.md`)
 
 - [x] AC-1
 - [x] AC-2
