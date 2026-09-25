@@ -16,3 +16,6 @@ Non-finding noted for later: preflight has no memory rlimit (ADR-005 said timeou
 Fixes 1/3/4 verified (7 path shapes redacted live; escaping ASCII-clean incl. invalid UTF-8; `--` + resolved jobs_dir; each half mutation-tested).
 
 1. [correctness, regression vs 210e30b] access_log.py:20 (used :25-26; tests/test_upload.py:403-405 locks it in) — redaction matches only runs of EXACTLY 22 id-alphabet chars bounded by non-alphabet chars, so a real id touching any other `[A-Za-z0-9_-]` char is logged raw: `/api/jobs/<id>x`, `x<id>`, `<id><id>`, `<id>-extra`, `<id>_`, `<id>%41`, and a 21-char truncation (last char ∈ {A,Q,g,w} → 4 guesses). The parent hashed the whole segment. CONFIRMED live by skeptic (scratchpad/r005/server3.log).
+
+## Round 3 (re-review of 676dbbf, Shuma-approved attempt 3) — PASSED
+Auto-review trail: r1 3 confirmed (+1 rescheduled to STORY-007 AC-7) → fixed 4006eff; r2 1 confirmed regression → halted → Shuma approved attempt 3 → fixed 676dbbf; r3 CLEAN. Offline 4.89M checks + 73 live access lines: 0 raw ids, 0 16-char windows, ASCII-only; mutation-tested thresholds; no ReDoS (1 MB paths linear, ≤120 ms).
