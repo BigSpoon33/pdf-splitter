@@ -1,7 +1,7 @@
 {
   "mode": "auto",
   "active_story": "STORY-002",
-  "loop_phase": "implement",
+  "loop_phase": "halted",
   "queue": [
     "STORY-002",
     "STORY-003",
@@ -26,8 +26,10 @@
     "STORY-001": 1,
     "STORY-002": 2
   },
-  "failed": {},
-  "consecutive_failures": 0,
+  "failed": {
+    "STORY-002": "gate r2: 2 confirmed findings (0.12\u00b7H edge floor drops page-opening roman-letter headings and digit-masked numbered headings) \u2014 see docs/findings/STORY-002-review.md"
+  },
+  "consecutive_failures": 1,
   "branches": {
     "engine": "monograph-splitter feature/web-mode",
     "web": "pdf-splitter feature/mvp"
@@ -39,7 +41,8 @@
   "run": {
     "started": "2026-09-25",
     "runner": "in-session background subagent (tmux --dangerously-skip-permissions route denied by the auto-mode classifier)",
-    "active": "STORY-002 (retry)"
+    "active": null,
+    "halt_reason": "STORY-002 failed its gate twice; STORY-003..013 depend on it"
   },
   "last_updated": "2026-09-25"
 }

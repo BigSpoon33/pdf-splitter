@@ -136,3 +136,20 @@ real book, and it should stay that way.
 Per-AC ✅/❌ with file:line, test counts (before 126 / after N), both diff-gate results (synthetic
 labels + headings, and Maciocia), commits and tag (both repos), and anything STORY-004+ (the web
 worker) should know, especially the `cut_all` summary shape and the name/filename issue.
+
+## Orchestrator decisions (binding — added after STORY-002's gate)
+
+- **Filenames (your gotcha 2):** do the web-only guard, CLI-neutral: `Book.cut`/`excerpt_path` must
+  REFUSE (raise `ValueError` naming the entry) any entry name containing `/`, `\`, a NUL, or equal to
+  `.`/`..` — a path can never escape `out/`. Existing Inkwell names never contain these, so the diff
+  gate stays 0 (prove it). Uniqueness + safe display names are the web job layer's job (STORY-007
+  passes `NNN-<slug>` style unique names and keeps display names in its Plan) — note it in findings.
+- **WEB_BASE defaults:** set `chapter_only = ""` (arbitrary books must not treat a bare "Chapter N"
+  line as a break — the user's section list is the only authority in web mode; make sure an empty
+  pattern disables the rule rather than matching everything) and `long_span` = `max_span` (200) so
+  long web sections aren't flagged `long-span` by default. Keep `title_min_y` as is. Test each.
+- **One wrap-gap setting:** detection's `wrap_gap` and the profile's `heading_wrap_gap` must agree.
+  Give `heading_candidates` a way to take its geometry from a `Profile` (e.g. `profile=` kwarg that
+  supplies header/footer bands, column_split, full_width_ratio and heading_wrap_gap) so the web
+  worker passes ONE profile to both detection and cutting. Explicit kwargs still override.
+- STORY-002 status: see `docs/findings/STORY-002-review.md` (round 2 result will be appended).
