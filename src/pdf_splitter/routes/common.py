@@ -17,12 +17,17 @@ EDITABLE = ("review", "done")      # the states a Plan may change in, and a cut 
 BUSY = ("queued", "running")
 
 
+def gone(job: dict[str, Any]) -> bool:
+    """Deleted, or past its TTL and waiting for the janitor: 410 on every job route."""
+    return job["state"] == "deleted" or job["expires_at"] < now_ts()
+
+
 def load_job(store: Store, job_id: str) -> dict[str, Any]:
-    """The row, or 404 (unknown) / 410 (deleted, or past its TTL and waiting for the janitor)."""
+    """The row, or 404 (unknown) / 410 (`gone`)."""
     job = store.get_job(job_id)
     if job is None:
         raise ApiError(404, "not_found")
-    if job["state"] == "deleted" or job["expires_at"] < now_ts():
+    if gone(job):
         raise ApiError(410, "expired")
     return job
 

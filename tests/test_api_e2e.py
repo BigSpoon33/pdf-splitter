@@ -3,14 +3,19 @@ end-to-end flow on the synthetic book. Every payload the SPA relies on is pinned
 
 from __future__ import annotations
 
+import contextlib
 import io
 import json
 import logging
 import subprocess
+import sys
 import zipfile
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import fitz
+import pymupdf
 import pytest
 from fastapi.testclient import TestClient
 from fixtures.books import headed_book
@@ -18,10 +23,11 @@ from helpers import DASH_ID, OTHER_ID, assert_id_gone, row, seed_job
 from monograph_splitter.profile import profile_from_dict
 from monograph_splitter.session import OVERRIDES_NAME
 
-from pdf_splitter import errors
+from pdf_splitter import errors, preview
 from pdf_splitter.app import create_app
 from pdf_splitter.config import Settings
 from pdf_splitter.files import read_json
+from pdf_splitter.routes import download as download_routes
 from pdf_splitter.routes import preview as preview_routes
 from pdf_splitter.store import Store, log_id
 from pdf_splitter.worker.analyze import DEFAULT_SETTINGS
@@ -439,6 +445,98 @@ def test_preview_failures_are_500_preview_failed_and_logged_without_the_id(
     server = "\n".join(r.getMessage() for r in caplog.records if not r.name.startswith("httpx"))
     assert log_id(DASH_ID) in server
     assert_id_gone(server, DASH_ID)
+
+
+# ── Gate r1: a preview never resurrects a deleted job ─────────────────────────────────────────────────
+
+
+def delete_now(settings: Settings) -> None:
+    """The real DELETE (row first, then the directory), from wherever the test needs the race to happen."""
+    store = Store(settings.db_path)
+    try:
+        download_routes.delete_job(DASH_ID, settings, store)
+    finally:
+        store.close()
+
+
+def preview_in_process(monkeypatch: pytest.MonkeyPatch, once_open: Callable[[], None]) -> None:
+    """Run the preview's `main` inside this process instead of the sandboxed subprocess (whose argv is pinned
+    by `test_sheet_png_renders_…`), with `once_open` called as soon as the document is open: the only way to
+    put a DELETE between the engine opening the PDF and it writing under the job directory."""
+    real_open = pymupdf.open
+
+    def hooked_open(*args, **kwargs):
+        doc = real_open(*args, **kwargs)
+        once_open()
+        return doc
+
+    def fake_run(cmd, *, input, **kw):
+        args = cmd[cmd.index("--") + 1 :]
+        assert args[:2] == ["-m", "pdf_splitter.preview"]
+        out = io.StringIO()
+        monkeypatch.setattr(sys, "stdin", io.StringIO(input.decode()))
+        with contextlib.redirect_stdout(out):
+            rc = preview.main(args[2:])
+        return subprocess.CompletedProcess(cmd, rc, stdout=out.getvalue().encode(), stderr=b"")
+
+    monkeypatch.setattr(pymupdf, "open", hooked_open)
+    monkeypatch.setattr(fitz, "open", hooked_open)             # the engine's `Book.open` goes through `fitz`
+    monkeypatch.setattr(preview_routes.subprocess, "run", fake_run)
+
+
+def test_a_sheet_render_that_outlives_a_delete_is_410_and_leaves_no_directory(
+    settings: Settings, seeded: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    preview_in_process(monkeypatch, lambda: delete_now(settings))
+    with api(settings) as client:
+        assert_error(client.get(f"/api/jobs/{DASH_ID}/sheets/2.png?dpi=48"), 410, "expired")
+    assert not seeded.exists()                                 # `<jobs>/<id>/png/48/` was never recreated
+    assert row(settings, DASH_ID)["state"] == "deleted"
+    server = "\n".join(r.getMessage() for r in caplog.records if not r.name.startswith("httpx"))
+    assert_id_gone(server, DASH_ID)
+
+
+def test_a_section_plan_whose_engine_outlives_a_delete_is_410_and_leaves_no_directory(
+    settings: Settings, seeded: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    preview_in_process(monkeypatch, lambda: delete_now(settings))
+    with api(settings) as client:
+        assert_error(client.post(f"/api/jobs/{DASH_ID}/sections/1/plan"), 410, "expired")
+    assert not seeded.exists()                                 # nor `<jobs>/<id>/work/` with a fresh index
+    assert row(settings, DASH_ID)["state"] == "deleted"
+
+
+def test_a_sheet_deleted_after_its_render_is_410_not_500(
+    settings: Settings, seeded: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_run = subprocess.run
+
+    def run_then_delete(cmd, **kw):
+        proc = real_run(cmd, **kw)                             # the real subprocess wrote the PNG …
+        delete_now(settings)                                   # … and the DELETE landed before it was served
+        return proc
+
+    monkeypatch.setattr(preview_routes.subprocess, "run", run_then_delete)
+    with api(settings) as client:
+        assert_error(client.get(f"/api/jobs/{DASH_ID}/sheets/1.png?dpi=48"), 410, "expired")
+    assert not seeded.exists()
+
+
+def test_a_section_plan_after_a_delete_is_410_not_500(
+    settings: Settings, seeded: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_run = subprocess.run
+
+    def delete_then_run(cmd, **kw):
+        delete_now(settings)                                   # the row and the directory go while we launch
+        return real_run(cmd, **kw)
+
+    monkeypatch.setattr(preview_routes.subprocess, "run", delete_then_run)
+    with api(settings) as client:
+        assert_error(client.post(f"/api/jobs/{DASH_ID}/sections/0/plan"), 410, "expired")
+        assert_error(client.get(f"/api/jobs/{DASH_ID}/sheets/1.png?dpi=48"), 410, "expired")
+    assert not seeded.exists()
 
 
 # ── AC-3: section plans ────────────────────────────────────────────────────────────────────────────────
