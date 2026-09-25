@@ -20,6 +20,7 @@ from .config import Settings
 from .deps import SettingsDep, StoreDep
 from .preflight import MAGIC
 from .store import Store, log_id, new_job_id
+from .worker import sandbox
 
 CHUNK = 1024 * 1024
 PREFLIGHT_TIMEOUT = 10.0
@@ -70,11 +71,16 @@ def reject(code: str) -> JSONResponse:
 
 def run_preflight(path: Path, max_pages: int, job_id: str, timeout: float | None = None) -> dict[str, Any]:
     """Run the preflight subprocess; a crash, timeout or garbage output is `unreadable`."""
+    timeout = timeout or PREFLIGHT_TIMEOUT
+    cpu_limit = sandbox.limits(timeout)["cpu"]
     # `--` ends option parsing: a job id can start with `-`, and the path must never read as an option.
-    cmd = [sys.executable, "-m", "pdf_splitter.preflight", "--max-pages", str(max_pages), "--", str(path)]
+    cmd = [
+        sys.executable, "-m", "pdf_splitter.preflight",
+        "--max-pages", str(max_pages), "--cpu-limit", str(cpu_limit), "--", str(path),
+    ]
     try:
         proc = subprocess.run(
-            cmd, capture_output=True, timeout=timeout or PREFLIGHT_TIMEOUT, check=False, stdin=subprocess.DEVNULL
+            cmd, capture_output=True, timeout=timeout, check=False, stdin=subprocess.DEVNULL
         )
     except subprocess.TimeoutExpired:
         log.warning("job %s preflight timed out", log_id(job_id))

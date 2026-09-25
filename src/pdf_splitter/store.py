@@ -185,6 +185,38 @@ class Store:
         )
         log.info("job %s -> %s%s", log_id(job_id), state, f" ({error_code})" if error_code else "")
 
+    def transition(
+        self,
+        job_id: str,
+        expect: str,
+        state: str,
+        *,
+        error_code: str | None = None,
+        message: str | None = None,
+        now: datetime | None = None,
+    ) -> bool:
+        """`set_state` only if the row is still in `expect`; False otherwise. The worker finishes jobs with
+        this, so a job deleted (or already finished) while its subprocess ran is never resurrected."""
+        _check(state=state)
+        _check(state=expect)
+        cur = self.conn.execute(
+            "UPDATE jobs SET state = ?, error_code = ?, message = ?, updated_at = ?"
+            " WHERE id = ? AND state = ?",
+            (state, error_code, message, now_ts(now), job_id, expect),
+        )
+        if cur.rowcount:
+            log.info("job %s -> %s%s", log_id(job_id), state, f" ({error_code})" if error_code else "")
+        return cur.rowcount > 0
+
+    def running_since(self, kind: str, before: datetime) -> list[dict[str, Any]]:
+        """Jobs of `kind` that have been `running` since before `before` (oldest first)."""
+        _check(kind=kind)
+        rows = self.conn.execute(
+            "SELECT * FROM jobs WHERE state = 'running' AND kind = ? AND started_at < ? ORDER BY started_at",
+            (kind, now_ts(before)),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
     def expired(self, now: datetime | None = None) -> list[dict[str, Any]]:
         rows = self.conn.execute(
             "SELECT * FROM jobs WHERE expires_at < ? ORDER BY expires_at", (now_ts(now),)

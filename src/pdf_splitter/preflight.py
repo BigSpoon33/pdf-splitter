@@ -1,4 +1,5 @@
-"""Preflight an uploaded PDF in a throwaway subprocess: `python -m pdf_splitter.preflight [--max-pages N] PATH`.
+"""Preflight an uploaded PDF in a throwaway subprocess:
+`python -m pdf_splitter.preflight [--max-pages N] [--cpu-limit S] -- PATH`.
 
 Prints one JSON object on stdout: `{"ok": true, "pages": N}` or `{"ok": false, "code": "<code>"}`.
 It runs out of process (ADR-005) because MuPDF parses hostile input; the API enforces the timeout.
@@ -13,6 +14,8 @@ from pathlib import Path
 from typing import Any
 
 import pymupdf
+
+from .worker import sandbox
 
 MAGIC = b"%PDF-"
 PROBE_PAGES = 12
@@ -54,8 +57,15 @@ def check(path: Path, max_pages: int) -> dict[str, Any]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m pdf_splitter.preflight")
     parser.add_argument("--max-pages", type=int, default=2000)
+    # Opt-in so tests can call main() in-process without limiting the test runner itself.
+    parser.add_argument("--cpu-limit", type=int, help="apply the worker's rlimits, with this RLIMIT_CPU")
     parser.add_argument("path", type=Path)
     args = parser.parse_args(argv)
+    if args.cpu_limit is not None:
+        # Before the file is opened: a tiny nested-XObject PDF can balloon MuPDF past 700 MB inside the
+        # API's 10 s window (STORY-005 review). Self-applied rather than `preexec_fn`, because the API
+        # spawns this from threadpool threads.
+        sandbox.apply({**sandbox.limits(0), "cpu": args.cpu_limit})
     # MuPDF's warnings on hostile files can quote file content; the API never needs them.
     pymupdf.TOOLS.mupdf_display_errors(False)
     # Last line of stdout by contract: PyMuPDF itself may print notices to stdout before it.

@@ -15,7 +15,15 @@ uv run ruff check            # lint
 uv run pdf-splitter api      # API on http://127.0.0.1:8000 (--host / --port to change)
 curl -s localhost:8000/api/health
 curl -s -F file=@book.pdf localhost:8000/api/jobs   # 201 {id, state} or 4xx {code, message}
+uv run pdf-splitter worker   # run queued jobs (same PDFSPLIT_JOBS_DIR as the api)
 ```
+
+The worker claims queued jobs, at most `PDFSPLIT_WORKERS` at a time, and runs each as
+`python -m pdf_splitter.task <kind> -- <id>` through `pdf_splitter.worker.sandbox` (RLIMIT_AS 2 GB, RLIMIT_CPU
+timeout + 10 s, RLIMIT_FSIZE 1 GB) under the kind's wall-clock timeout. An analyze job writes
+`<id>/analysis.json`, `<id>/plan.json` and the engine index `<id>/work/.book-index.json`, then moves the row to
+`review`; a failure leaves `failed` with `error_code` `timeout`, `resources` or `internal`. SIGTERM stops
+claiming and lets running jobs finish.
 
 Request logs come from the app (`pdf_splitter.access`), not uvicorn, so job ids appear only as `log_id` hashes.
 
