@@ -17,8 +17,8 @@ def get_settings(request: Request) -> Settings:
 
 
 def get_store(request: Request) -> Iterator[Store]:
-    # One connection per request: sqlite3 connections are bound to their creating thread, and
-    # sync endpoints run on a threadpool.
+    # One connection per request, so requests on different threadpool threads never share one.
+    # FastAPI may run this teardown on a different thread than the endpoint; Store allows that.
     store = Store(request.app.state.settings.db_path)
     try:
         yield store

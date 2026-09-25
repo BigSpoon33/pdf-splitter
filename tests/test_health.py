@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 
 import monograph_splitter
@@ -35,6 +36,38 @@ def test_health_queue_counts_only_queued_jobs(settings: Settings) -> None:
         store.claim_next("analyze")
         store.close()
         assert client.get("/api/health").json()["queue"] == 2
+
+
+def test_concurrent_health_requests_all_succeed(settings: Settings) -> None:
+    # Sync endpoints and their dependency teardowns run on threadpool threads; many requests
+    # at once is what exposed the cross-thread sqlite close (STORY-004 gate r1).
+    n_threads, per_thread = 16, 25
+    barrier = threading.Barrier(n_threads)
+    statuses: list[int] = []
+    errors: list[BaseException] = []
+    lock = threading.Lock()
+
+    with TestClient(create_app(settings), raise_server_exceptions=True) as client:
+
+        def hammer() -> None:
+            try:
+                barrier.wait()
+                for _ in range(per_thread):
+                    r = client.get("/api/health")
+                    with lock:
+                        statuses.append(r.status_code)
+            except BaseException as e:  # noqa: BLE001 - surfaced on the main thread
+                errors.append(e)
+
+        threads = [threading.Thread(target=hammer) for _ in range(n_threads)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+    assert not errors
+    assert len(statuses) == n_threads * per_thread
+    assert set(statuses) == {200}
 
 
 def test_cli_api_serves_the_app_from_env_settings(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

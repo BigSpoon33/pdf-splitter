@@ -143,6 +143,61 @@ def test_concurrent_claimers_never_share_a_job(tmp_path: Path) -> None:
     assert set(claimed) == queued
 
 
+def test_connection_survives_cross_thread_close(tmp_path: Path) -> None:
+    # FastAPI enters the per-request Store on one threadpool thread and tears it down on another.
+    store = Store(tmp_path / "jobs.db")
+    errors: list[BaseException] = []
+    opened, closed = threading.Event(), threading.Event()
+
+    def guarded(fn) -> None:
+        try:
+            fn()
+        except BaseException as e:  # noqa: BLE001 - surfaced on the main thread
+            errors.append(e)
+
+    def open_and_use() -> None:
+        store.init()
+        make(store)
+        opened.set()
+        # Stay alive until the other thread has closed: a finished thread's id can be reused by
+        # the next one, which would let sqlite's same-thread check pass by accident.
+        closed.wait(timeout=10)
+
+    def close_elsewhere() -> None:
+        opened.wait(timeout=10)
+        try:
+            store.close()
+        finally:
+            closed.set()
+
+    threads = [threading.Thread(target=guarded, args=(fn,)) for fn in (open_and_use, close_elsewhere)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert not errors
+    assert store._conn is None
+    check = Store(tmp_path / "jobs.db")
+    assert check.queue_length() == 1
+    check.close()
+
+
+def test_close_always_drops_the_connection(tmp_path: Path) -> None:
+    class Boom(RuntimeError):
+        pass
+
+    class FailingConn:
+        def close(self) -> None:
+            raise Boom
+
+    store = Store(tmp_path / "jobs.db")
+    store._conn = FailingConn()  # type: ignore[assignment]
+    with pytest.raises(Boom):
+        store.close()
+    assert store._conn is None
+    store.close()  # a second close is a no-op, not another Boom
+
+
 def test_update_progress(store: Store) -> None:
     job = make(store)
     later = T0 + timedelta(seconds=30)

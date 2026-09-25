@@ -63,7 +63,13 @@ class Store:
     def connect(self) -> sqlite3.Connection:
         # isolation_level=None: we issue BEGIN IMMEDIATE ourselves; Python's implicit
         # transactions would otherwise start a deferred one and defeat the claim lock.
-        conn = sqlite3.connect(self.path, timeout=BUSY_TIMEOUT_S, isolation_level=None)
+        # check_same_thread=False: FastAPI opens the per-request Store in the endpoint's worker
+        # thread but runs the dependency teardown (close) as a separate threadpool call, often on
+        # another thread. A Store is still used by ONE request/worker at a time, never shared
+        # concurrently, so dropping the thread check is safe.
+        conn = sqlite3.connect(
+            self.path, timeout=BUSY_TIMEOUT_S, isolation_level=None, check_same_thread=False
+        )
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute(f"PRAGMA busy_timeout={int(BUSY_TIMEOUT_S * 1000)}")
@@ -76,8 +82,13 @@ class Store:
         return self._conn
 
     def close(self) -> None:
-        if self._conn is not None:
+        if self._conn is None:
+            return
+        # Always drop the reference: a close that raises must not leave a leaked, half-dead
+        # connection (and its WAL/shm fds) attached to this Store.
+        try:
             self._conn.close()
+        finally:
             self._conn = None
 
     def init(self) -> None:
