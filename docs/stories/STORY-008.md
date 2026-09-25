@@ -28,11 +28,11 @@ First visible product.
 
 ## Acceptance Criteria
 
-- [ ] AC-1: `web/` is a Vite + Svelte + TS app; `bun install && bun run dev` proxies `/api` to :8000; `bun run build` emits static files; `bun run check` (svelte-check) clean
-- [ ] AC-2: DropZone accepts drag-drop and click-to-pick, prechecks `.pdf`/type and `MAX_BYTES` client-side, shows upload % (XHR progress)
-- [ ] AC-3: After upload the URL becomes `/j/<id>`; JobStatus polls every 1.5 s while queued/running and shows state, queue position, and `progress/total`; reloading `/j/<id>` resumes
-- [ ] AC-4: API error codes map to human messages (a single `errors.ts` table covering every code in Architecture)
-- [ ] AC-5: Component tests (vitest + @testing-library/svelte) for DropZone precheck and the error table
+- [x] AC-1: `web/` is a Vite + Svelte + TS app; `bun install && bun run dev` proxies `/api` to :8000; `bun run build` emits static files; `bun run check` (svelte-check) clean
+- [x] AC-2: DropZone accepts drag-drop and click-to-pick, prechecks `.pdf`/type and `MAX_BYTES` client-side, shows upload % (XHR progress)
+- [x] AC-3: After upload the URL becomes `/j/<id>`; JobStatus polls every 1.5 s while queued/running and shows state, queue position, and `progress/total`; reloading `/j/<id>` resumes
+- [x] AC-4: API error codes map to human messages (a single `errors.ts` table covering every code in Architecture)
+- [x] AC-5: Component tests (vitest + @testing-library/svelte) for DropZone precheck and the error table
 
 ---
 
