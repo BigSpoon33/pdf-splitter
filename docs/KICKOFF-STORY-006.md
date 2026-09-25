@@ -162,3 +162,20 @@ Per-AC ✅/❌ with file:line, the test counts (before 118 / after N), the `ruff
 output (the row reaching `review`, and the `analysis.json` keys), the commits (on both remotes), and what STORY-007
 should know: the runner API for adding the `cut` kind, the `plan.json` it will read, and the failure-code mapping.
 Cite the tests as the contract, not hand-written JSON.
+
+## Previous attempt (RETRY — read this first)
+
+Attempt 1 (`12b4e9b`, docs `9dce66e`) passed everything except 2 CONFIRMED findings — see
+`docs/findings/STORY-006-review.md`. Fix forward, one commit on the feature/mvp tip:
+`fix: STORY-006 - gate r1: MuPDF allocation failures are resources; analysis JSON survives bad text`
+1. `guarded`: also map MuPDF allocation failures to `resources` — a `RuntimeError` whose message
+   matches MuPDF's allocator failure (`code=2` / `calloc|malloc|realloc … failed` / "out of memory"),
+   keep everything else `internal`. Test with the reviewer's real bomb
+   (scratchpad/rv006/mkbombs.py → xbomb6.pdf, copy the builder into a test fixture) under the real
+   sandbox + Runner → row `failed/resources`; plus a unit case for the message match.
+2. Make every string that reaches `analysis.json`/`plan.json` JSON-safe: replace lone surrogates
+   (e.g. `s.encode("utf-8", "replace").decode()` or `errors="surrogatepass"`→replace) at the point
+   titles/headings/labels/filenames enter the dict, so plan section names are clean too; write the
+   file so it can't fail on encoding; clean up the `.tmp` on any write failure. Tests: the two
+   bookmark byte sequences from the review → row reaches `review`, analysis.json parses, no `.tmp`.
+Update findings ("Gate r1 fixes") and KICKOFF-STORY-007 (names from analysis are already clean).
