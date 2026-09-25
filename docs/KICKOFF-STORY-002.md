@@ -202,3 +202,21 @@ anything your change breaks. Other heuristic edge cases found later are logged a
 not blockers — the section list is user-editable by design (PRD A-1).
 Update findings (add "Gate r2 fixes"), keep KICKOFF-STORY-003 accurate (its "Orchestrator
 decisions" section is binding for 003 — don't remove it), push both repos to origin + gitea.
+
+## Attempt 3b — round-3 regression fix (tiny, in approved scope)
+
+Round 3 confirmed ONE regression introduced by 4d8d375 (see STORY-002-review.md § Round 3):
+`_dest_value` (detect.py:54-55) follows an out-of-range/zero `N 0 R` into `doc.xref_object(N)` →
+`RuntimeError: bad xref`, uncaught, killing every row of that outline level.
+
+Do exactly this, one commit on top of defb734:
+`fix: STORY-002 - gate r3: a dangling outline reference falls through instead of raising`
+- Guard: a reference is followed only if `1 <= N < doc.xref_length()`; otherwise (and on any
+  exception from resolving it) treat that key as absent so `_dest_top` tries the next key
+  (`Dest`) — the ef828ab behaviour. Also make `outline_entries`/`outline_levels` robust per item:
+  a failure resolving ONE item's y drops only that item's `y`, never the level (the page still
+  comes from get_toc).
+- Tests: the repro (valid `/Dest` + dangling `/A/D 115 0 R` → both rows, Chapter Two y 250.0),
+  `/D 0 0 R`, and a dangling ref with no `/Dest` fallback → row kept without `y`.
+- Nothing else changes. Append a "Gate r3 fix" line to STORY-002-findings.md; update
+  KICKOFF-STORY-003's cited tip sha/test count only. Push both repos to origin + gitea.

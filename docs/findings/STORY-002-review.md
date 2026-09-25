@@ -21,3 +21,13 @@ Round 1: story-reviewer verdict FINDINGS; 3 findings, all 3 CONFIRMED by indepen
 2. [correctness] detect.py:153-154 (+ :163-171, :220) — `_running_key` masks digits, so distinct page-opening headings "Lesson 1..10" (≥30% of pages, inside the 0.12·H strip) collapse into one "running header" and are removed everywhere → `candidates=[]` for a 30-page workbook of 3-page lessons; no setting recovers them. `test_a_header_repeated_on_30_percent_of_pages_is_running_and_below_that_is_not` bakes this in ("Rare Header 1/2/3"). Repro: scratchpad/probe_numbered.py, probe_numbered2.py.
 
 Per AutoLoop policy (2 failed gates) the loop is HALTED pending Shuma's decision.
+
+## Round 3 — 2026-09-25 — 1 confirmed regression (within the approved attempt-3 scope)
+**Reviewed:** engine 742bfbe..defb734. All 5 prior findings verified fixed; Maciocia candidates identical r1→r2; AC-1..7 hold under the Attempt-3 rules.
+
+1. [correctness, regression from 4d8d375] detect.py:54-55 (`_dest_value`; reached from `_dest_top` :69-70, "A/D" tried before "Dest") — an out-of-range `N 0 R` goes straight to `doc.xref_object(N)` → `RuntimeError: bad xref`, uncaught in `outline_entries` (:118-133), so the WHOLE level's rows are lost (ef828ab fell through to the valid `/Dest`). Repro: scratchpad/r3/repro_dangling_A.py (also `/D 0 0 R`). CONFIRMED by skeptic (ef828ab vs defb734 side by side).
+
+Follow-ups (non-blocking, logged for a detection-tuning story):
+- detect.py:231 — a heading wrapped over 4+ lines disappears once wrap_gap joins it (MAX_WRAP_LINES `continue`); keeping its first 3 lines would still locate (ratio 0.877).
+- default wrap_gap 16 (= heading_wrap_gap) < normal leading of ≥14 pt headings → wrapped big titles split by default; a size-scaled web default feeding both belongs with STORY-009 settings.
+- per-line max span size: one inline big glyph (∑ at 14 pt in 9.5 pt text) promotes a body line to a candidate.
