@@ -1,7 +1,7 @@
 {
   "mode": "auto",
   "active_story": "STORY-005",
-  "loop_phase": "halted",
+  "loop_phase": "implement",
   "queue": [
     "STORY-005",
     "STORY-006",
@@ -27,11 +27,9 @@
     "STORY-002": 3,
     "STORY-003": 2,
     "STORY-004": 2,
-    "STORY-005": 2
+    "STORY-005": 3
   },
-  "failed": {
-    "STORY-005": "gate r2: 1 confirmed regression \u2014 exact-22-char token redaction leaks ids with adjacent id-alphabet chars (see STORY-005-review.md)"
-  },
+  "failed": {},
   "consecutive_failures": 0,
   "branches": {
     "engine": "monograph-splitter feature/web-mode",
@@ -44,15 +42,18 @@
   "run": {
     "started": "2026-09-25",
     "runner": "in-session background subagent (tmux --dangerously-skip-permissions route denied by the auto-mode classifier)",
-    "active": null,
-    "halt_reason": "STORY-005 failed its gate twice"
+    "active": "STORY-005 (attempt 3, Shuma-approved)"
   },
   "last_updated": "2026-09-25",
   "exceptions": {
-    "STORY-002": "third attempt approved by Shuma 2026-09-25; heuristic edge cases beyond the r2 root cause become follow-ups"
+    "STORY-002": "third attempt approved by Shuma 2026-09-25; heuristic edge cases beyond the r2 root cause become follow-ups",
+    "STORY-005": "third attempt approved by Shuma 2026-09-25"
   },
   "followups": [
     "detection tuning: 4+-line wrapped headings dropped (MAX_WRAP_LINES), size-scaled default wrap_gap feeding heading_wrap_gap (STORY-009 settings), inline big glyph promotes body line \u2014 see STORY-002-review.md r3"
   ],
-  "engine_release": "v0.4.1 (8e52cc3) on origin+gitea; engine main still 6fd22fc \u2014 ff-merge feature/web-mode at sprint end"
+  "engine_release": "v0.4.1 (8e52cc3) on origin+gitea; engine main still 6fd22fc \u2014 ff-merge feature/web-mode at sprint end",
+  "policy": {
+    "fix_regressions": "Shuma 2026-09-25: for the rest of this run, a retry that fails ONLY on a confirmed regression introduced by its own fix gets one more narrow fix + re-review without asking. Halt and ask if a story fails twice on anything else, or if the spec/architecture looks wrong."
+  }
 }

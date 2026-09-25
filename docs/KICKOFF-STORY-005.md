@@ -172,3 +172,22 @@ Fix forward, one commit on feature/mvp:
    id starting with `-` → 201.
 Keep `run_preflight`'s shape (STORY-006 copies it) and mention the `--` rule in the findings'
 "pattern for STORY-006" note. Update STORY-005 findings ("Gate r1 fixes") and KICKOFF-STORY-006.
+
+## Attempt 3 (Shuma approved, 2026-09-25) — READ THIS FIRST
+
+Round 2 (on 4006eff) confirmed ONE regression — `docs/findings/STORY-005-review.md` § Round 2:
+exact-22-char bounded-token redaction leaks a real id that touches any other id-alphabet char.
+One commit on the feature/mvp tip:
+`fix: STORY-005 - gate r2: redact any long id-alphabet run, not only exact 22-char tokens`
+
+Binding rule for `redact_path` (access_log.py) — apply BOTH, then escape as now:
+1. Every maximal run of `[A-Za-z0-9_-]` of length **≥ 16** anywhere in the path is replaced by
+   `log_id(run)` (a whole run — never a slice of it). Covers `<id>x`, `x<id>`, `<id><id>`,
+   `<id>-extra`, `<id>_`, `<id>A` (from `%41`), and truncations down to 16 chars.
+2. Additionally, after a case-insensitive `/api/jobs/` (with any repeated slashes), the entire next
+   segment is hashed whatever its length (the parent's rule — defence in depth for short garbage).
+Rewrite `tests/test_upload.py:403-405` (it currently asserts the leak): every variant above with a
+REAL `new_job_id()` must not contain the id or any ≥16-char substring of it; plain route words
+(`health`, `sheets`, `sections`, `result.zip`, `plan`, `cut`) must be left untouched. Keep the 7
+path-shape tests and the escaping tests green. Re-run the live check (another port; stop by PID).
+Update findings ("Gate r2 fix") and KICKOFF-STORY-006 (the worker reuses this rule).
