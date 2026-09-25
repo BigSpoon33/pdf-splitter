@@ -61,14 +61,20 @@
   }
 
   const active = $derived(job !== null && !TERMINAL_STATES.has(job.state))
+  // Mirrors the loop's stop conditions, so assistive tech is never told to wait for an update that won't come.
+  const polling = $derived(!fatal && (job === null || !TERMINAL_STATES.has(job.state)))
   const fraction = $derived(job && job.total > 0 ? Math.min(job.progress / job.total, 1) : null)
 </script>
 
-<section class="card" aria-live="polite" aria-busy={active}>
+<section class="card" aria-live="polite" aria-busy={polling}>
   {#if fatal}
     <p class="error" role="alert">{fatal}</p>
   {:else if !job}
-    <p class="muted">Loading…</p>
+    {#if hiccup}
+      <p class="muted" role="status">{hiccup} Retrying…</p>
+    {:else}
+      <p class="muted">Loading…</p>
+    {/if}
   {:else}
     <p class="file">{job.pages ? `${job.filename} · ${job.pages} pages` : job.filename}</p>
     <h1 class="state state-{job.state}" data-state={job.state}>{label(job)}</h1>

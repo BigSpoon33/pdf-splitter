@@ -34,6 +34,12 @@ describe('errors.ts', () => {
     expect(messageFor('expired')).toBe('This job was deleted (files are kept 24 h).')
   })
 
+  it('says plainly that OCR is not supported (PRD AC-8)', () => {
+    expect(messageFor('no_text_layer')).toBe(
+      "This PDF has no text layer (it looks scanned). OCR isn't supported yet — run OCR on it first, then upload it again.",
+    )
+  })
+
   it.each(['no_such_code', '', null, undefined, 'toString', '__proto__'])('falls back for %s', (code) => {
     expect(messageFor(code)).toBe(FALLBACK_MESSAGE)
   })

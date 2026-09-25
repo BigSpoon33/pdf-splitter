@@ -9,7 +9,7 @@ export const MESSAGES = {
   not_pdf: 'This file is not a PDF.',
   encrypted: 'This PDF is password-protected. Remove the password and try again.',
   too_many_pages: 'This PDF has more pages than the limit.',
-  no_text_layer: 'This PDF has no text layer (it looks scanned). Run OCR on it first.',
+  no_text_layer: "This PDF has no text layer (it looks scanned). OCR isn't supported yet — run OCR on it first, then upload it again.",
   unreadable: 'This PDF could not be read.',
   // STORY-012 adds these two (Architecture § API Interface)
   rate_limited: 'Too many uploads from your network. Wait a few minutes and try again.',

@@ -119,6 +119,40 @@ describe('JobStatus', () => {
     expect(screen.queryByRole('status')).toBeNull()
   })
 
+  it('shows a transient error before the first answer, then the job once a poll succeeds', async () => {
+    const load = sequence(
+      new ApiError(0, 'network'),
+      new ApiError(500, 'internal'),
+      status({ state: 'running', progress: 1, total: 6 }),
+    )
+    render(JobStatus, { id: ID, load })
+    await vi.waitFor(() => expect(screen.getByRole('status').textContent).toBe(`${MESSAGES.network} Retrying…`))
+    expect(screen.queryByText('Loading…')).toBeNull()
+    await vi.advanceTimersByTimeAsync(1500)
+    await vi.waitFor(() => expect(screen.getByRole('status').textContent).toBe(`${MESSAGES.internal} Retrying…`))
+    await vi.advanceTimersByTimeAsync(1500)
+    await vi.waitFor(() => expect(stateShown()).toBe('running'))
+    expect(screen.queryByRole('status')).toBeNull()
+    expect(load).toHaveBeenCalledTimes(3)
+  })
+
+  it('clears aria-busy once polling stops on a fatal error', async () => {
+    const load = sequence(status({ state: 'running' }), new ApiError(410, 'expired'))
+    const { container } = render(JobStatus, { id: ID, load })
+    const card = () => container.querySelector('section')!.getAttribute('aria-busy')
+    await vi.waitFor(() => expect(stateShown()).toBe('running'))
+    expect(card()).toBe('true')
+    await vi.advanceTimersByTimeAsync(1500)
+    await vi.waitFor(() => expect(screen.getByRole('alert').textContent).toBe(MESSAGES.expired))
+    expect(card()).toBe('false')
+  })
+
+  it('clears aria-busy on a terminal state', async () => {
+    const { container } = render(JobStatus, { id: ID, load: sequence(status({ state: 'review' })) })
+    await vi.waitFor(() => expect(stateShown()).toBe('review'))
+    expect(container.querySelector('section')!.getAttribute('aria-busy')).toBe('false')
+  })
+
   it('stops polling when unmounted', async () => {
     const load = sequence(status({ state: 'running' }))
     const { unmount } = render(JobStatus, { id: ID, load })

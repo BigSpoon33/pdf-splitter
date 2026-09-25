@@ -19,7 +19,7 @@ MESSAGES = {
     "not_pdf": "The file is not a PDF.",
     "encrypted": "The PDF is password-protected.",
     "too_many_pages": "The PDF has more pages than the limit.",
-    "no_text_layer": "The PDF has no text layer (it looks scanned); run OCR on it first.",
+    "no_text_layer": "This PDF has no text layer (it looks scanned). OCR isn't supported yet — run OCR on it first, then upload it again.",
     "unreadable": "The PDF could not be read.",
     # jobs
     "not_found": "There is no such job.",
