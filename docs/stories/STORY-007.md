@@ -1,6 +1,6 @@
 # STORY-007: Web: plan, preview, cut and download API
 
-> **Status:** Pending
+> **Status:** Done (2026-09-25)
 > **Size:** M
 > **Date:** 2026-09-25
 > **Architecture ref:** `docs/Architecture.md#api`
@@ -28,13 +28,13 @@ Completes the backend contract in Architecture › API Interface.
 
 ## Acceptance Criteria
 
-- [ ] AC-1: `GET/PUT /api/jobs/{id}/plan`: PUT validates with Pydantic (sources enum, settings within ranges: column_split 0.2–0.8, bands 0–200 pt, heading_min_size 4–72; ≤ 2,000 sections; names deduped + ≤120 chars; pages within 1..pages) → 422 with field errors
-- [ ] AC-2: `GET /sheets/{n}.png?dpi=` renders via a preview subprocess (20 s timeout), cached per (sheet, dpi, settings-hash); dpi outside {48,72,110} → 422
-- [ ] AC-3: `POST /sections/{i}/plan` returns the engine's plan view incl. redaction `rects` for the section under the given settings/override, without persisting
-- [ ] AC-4: `POST /cut` queues a cut; the cut task builds the profile with `profile_from_dict`, opens the Book with the plan's sections, applies overrides, runs `cut_all(verify=True)` with progress, writes `result.zip` (`NNN - <slug>.pdf` + manifest.json) → `done`
-- [ ] AC-5: `GET /result.zip` and `/sections/{i}.pdf` stream as attachments; `DELETE` removes dir + marks row `deleted`; expired → 410
-- [ ] AC-7: Unexpected errors (any route) return 500 JSON `{code:"internal", message, request_id}` with an `X-Request-ID` header; the same request id appears in the access-log line and the logged traceback (no raw job id anywhere — reuse the STORY-005 redaction). Every request gets an id (inbound `X-Request-ID` ignored unless it matches `[A-Za-z0-9-]{8,64}`). Test with a route forced to raise. (Scheduled by the orchestrator from STORY-005 review finding 2.)
-- [ ] AC-6: End-to-end API test on the synthetic book: upload → analyze → PUT plan (headings source) → cut → zip has 3 PDFs + manifest, 0 leaks
+- [x] AC-1: `GET/PUT /api/jobs/{id}/plan`: PUT validates with Pydantic (sources enum, settings within ranges: column_split 0.2–0.8, bands 0–200 pt, heading_min_size 4–72; ≤ 2,000 sections; names deduped + ≤120 chars; pages within 1..pages) → 422 with field errors
+- [x] AC-2: `GET /sheets/{n}.png?dpi=` renders via a preview subprocess (20 s timeout), cached per (sheet, dpi, settings-hash); dpi outside {48,72,110} → 422
+- [x] AC-3: `POST /sections/{i}/plan` returns the engine's plan view incl. redaction `rects` for the section under the given settings/override, without persisting
+- [x] AC-4: `POST /cut` queues a cut; the cut task builds the profile with `profile_from_dict`, opens the Book with the plan's sections, applies overrides, runs `cut_all(verify=True)` with progress, writes `result.zip` (`NNN - <slug>.pdf` + manifest.json) → `done`
+- [x] AC-5: `GET /result.zip` and `/sections/{i}.pdf` stream as attachments; `DELETE` removes dir + marks row `deleted`; expired → 410
+- [x] AC-7: Unexpected errors (any route) return 500 JSON `{code:"internal", message, request_id}` with an `X-Request-ID` header; the same request id appears in the access-log line and the logged traceback (no raw job id anywhere — reuse the STORY-005 redaction). Every request gets an id (inbound `X-Request-ID` ignored unless it matches `[A-Za-z0-9-]{8,64}`). Test with a route forced to raise. (Scheduled by the orchestrator from STORY-005 review finding 2.)
+- [x] AC-6: End-to-end API test on the synthetic book: upload → analyze → PUT plan (headings source) → cut → zip has 3 PDFs + manifest, 0 leaks
 
 ---
 
@@ -98,11 +98,12 @@ feat: STORY-007 - plan/preview/cut/download API and the cut task
 
 ## Status
 
-**Pending**
+**Done** — 2026-09-25, `6fcf848` on `feature/mvp` (326 tests, ruff clean; findings: `docs/findings/STORY-007-findings.md`)
 
-- [ ] AC-1
-- [ ] AC-2
-- [ ] AC-3
-- [ ] AC-4
-- [ ] AC-5
-- [ ] AC-6
+- [x] AC-1
+- [x] AC-2
+- [x] AC-3
+- [x] AC-4
+- [x] AC-5
+- [x] AC-6
+- [x] AC-7
