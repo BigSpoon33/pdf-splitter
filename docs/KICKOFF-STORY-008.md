@@ -160,3 +160,19 @@ and what STORY-009 (the review UI) should know: the `api.ts` surface (function n
 the vitest tests that pin them), how routing is done, and which endpoints of STORY-007 it will call first
 (`GET /analysis`, `GET/PUT /plan`, `GET /sheets/{n}.png`, `POST /sections/{i}/plan`), citing
 `tests/test_api_e2e.py` for their shapes.
+
+## Previous attempt (RETRY — read this first)
+
+Attempt 1 (`a9044de`) passed everything except 2 CONFIRMED findings — `docs/findings/STORY-008-review.md`.
+Fix forward, one commit on the feature/mvp tip:
+`fix: STORY-008 - gate r1: first-poll errors are shown; the live region settles on a fatal error`
+1. JobStatus: a transient error before the first successful poll must render the code's message +
+   "Retrying…" (not bare "Loading…"); keep polling. Test: first answers ApiError(0,'network') and
+   500 → message visible, then a success replaces it with the job UI.
+2. `aria-busy` must be false whenever polling has stopped (fatal set, or terminal state). Test: running →
+   410 → aria-busy="false" with the alert shown.
+3. Copy decision (orchestrator, not a finding): `no_text_layer` in errors.ts (and the matching
+   errors.py MESSAGES text) must say plainly that OCR isn't supported, e.g. "This PDF has no text
+   layer (it looks scanned). OCR isn't supported yet — run OCR on it first, then upload it again."
+   Pin this wording in errors.test.ts like `expired` (PRD AC-8).
+Update findings ("Gate r1 fixes") and KICKOFF-STORY-009 if it cites JobStatus behaviour.
