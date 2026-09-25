@@ -9,8 +9,9 @@ The product lives in two repos:
   Gitea mirror = `gitea`), branch **`feature/mvp`**. Stay on that branch. STORY-007 landed as
   `6fcf848 feat: STORY-007 - plan/preview/cut/download API and the cut task`, its docs commit `8f07e87`, the
   gate r1 fix `3058d91 fix: STORY-007 - gate r1: previews never resurrect a deleted job` (a DELETE during a
-  preview render → 410, nothing recreated) and that fix's docs commit. Anything after those is the
-  orchestrator's gate work. Check `git log --oneline -8`. **Baseline: 330 tests pass (`uv run pytest`, ≈ 70 s:
+  preview render → 410, nothing recreated), the gate r2 fix `fix: STORY-007 - gate r2: a sheet deleted after its
+  render is 410, never 500` and each fix's docs commit. Anything after those is the
+  orchestrator's gate work. Check `git log --oneline -8`. **Baseline: 332 tests pass (`uv run pytest`, ≈ 70 s:
   real sandboxed subprocesses and deliberate timeouts), `uv run ruff check` is clean.** There is NO `web/` directory yet and NO Bun project: you
   create it. `docs/loop-state.json` belongs to the orchestrator, so never stage it.
 - **Engine (read-only, you won't need it):** `~/Documents/Repos/monograph-splitter`, pinned at `v0.4.1`.
@@ -57,7 +58,10 @@ you write the client.
   before `review`; PUT 422 `invalid` with field errors, 409 `busy` while a job runs, from `done` the job returns
   to `review`), `GET /sheets/{n}.png?dpi=48|72|110`, `POST /sections/{i}/plan` (the Section plan with `rects` on
   1-based sheets; both previews are 500 `preview_failed` when the render fails and 410 `expired` when a DELETE
-  landed while it ran — `::test_a_sheet_deleted_after_its_render_is_410_not_500`,
+  landed while it ran (never 500 for a deleted job; a DELETE after the PNG was read still gets the 200) —
+  `::test_a_sheet_deleted_after_its_render_is_410_not_500`,
+  `::test_a_sheet_deleted_between_its_render_and_the_read_is_410_not_500`,
+  `::test_a_sheet_deleted_after_the_row_check_is_served_not_500`,
   `::test_a_section_plan_after_a_delete_is_410_not_500`), `POST /cut` (202; 409 `busy`/`not_ready`; 422 for an
   empty plan), `GET /result.zip` and `/sections/{i}.pdf` (attachments; 409 `not_ready` before the first cut),
   `DELETE` (204). Contracts: the rest of `tests/test_api_e2e.py` (test names are listed per AC in
@@ -149,7 +153,7 @@ you write the client.
 
 ## Final report shape
 
-Per-AC ✅/❌ with file:line, the counts (`bun run test` before 0 / after N; `uv run pytest` still 330), the
+Per-AC ✅/❌ with file:line, the counts (`bun run test` before 0 / after N; `uv run pytest` still 332), the
 `bun run check` and `bun run build` results (bundle size), the manual run's observed states (drop → `/j/<id>`
 → queued → running `n/total` → review, a reload, a rejected upload's message), the commits (on both remotes),
 and what STORY-009 (the review UI) should know: the `api.ts` surface (function names and the types, cited as

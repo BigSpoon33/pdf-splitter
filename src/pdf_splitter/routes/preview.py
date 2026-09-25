@@ -98,8 +98,10 @@ def get_sheet(job_id: str, n: int, settings: SettingsDep, store: StoreDep, dpi: 
     if data is None:
         request = {"sheet": n, "dpi": dpi, "out": str(cache)}
         result = run_preview("sheet", job_dir(settings, job), request)
-        settled(store, settings, job)
+        # Bytes first, then the row: a DELETE before the read shows up in `settled` as 410 (not a missing file
+        # → 500), and one after it can no longer take away what is being served.
         data = _cached(cache) if result is not None else None
+        settled(store, settings, job)
         if data is None:
             raise ApiError(500, "preview_failed")
     return Response(data, media_type="image/png", headers={"Cache-Control": "private, max-age=86400"})

@@ -98,7 +98,7 @@ feat: STORY-007 - plan/preview/cut/download API and the cut task
 
 ## Status
 
-**Done** — 2026-09-25, `6fcf848` + gate r1 fix `3058d91` on `feature/mvp` (330 tests, ruff clean; findings: `docs/findings/STORY-007-findings.md`)
+**Done** — 2026-09-25, `6fcf848` + gate r1 fix `3058d91` + gate r2 fix on `feature/mvp` (332 tests, ruff clean; findings: `docs/findings/STORY-007-findings.md`)
 
 - [x] AC-1
 - [x] AC-2

@@ -523,6 +523,45 @@ def test_a_sheet_deleted_after_its_render_is_410_not_500(
     assert not seeded.exists()
 
 
+def test_a_sheet_deleted_between_its_render_and_the_read_is_410_not_500(
+    settings: Settings, seeded: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Gate r2: the DELETE lands after the real subprocess rendered and before the route reads the PNG."""
+    real_cached = preview_routes._cached
+    calls = []
+
+    def delete_then_read(path: Path) -> bytes | None:
+        calls.append(path)
+        if len(calls) == 2:                                    # the first call is the cache lookup
+            assert path.exists()
+            delete_now(settings)
+        return real_cached(path)
+
+    monkeypatch.setattr(preview_routes, "_cached", delete_then_read)
+    with api(settings) as client:
+        assert_error(client.get(f"/api/jobs/{DASH_ID}/sheets/1.png?dpi=48"), 410, "expired")
+    assert len(calls) == 2 and not seeded.exists()
+
+
+def test_a_sheet_deleted_after_the_row_check_is_served_not_500(
+    settings: Settings, seeded: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Gate r2, the reviewer's hook: the DELETE lands right after `settled` found the row live. The bytes are
+    already in hand, so the render is served whole and nothing is left on disk."""
+    real_settled = preview_routes.settled
+
+    def settled_then_delete(store: Store, s: Settings, job: dict) -> None:
+        real_settled(store, s, job)
+        delete_now(settings)
+
+    monkeypatch.setattr(preview_routes, "settled", settled_then_delete)
+    with api(settings) as client:
+        r = client.get(f"/api/jobs/{DASH_ID}/sheets/1.png?dpi=48")
+    assert r.status_code == 200, r.text
+    assert r.headers["content-type"] == "image/png" and r.content.startswith(b"\x89PNG")
+    assert not seeded.exists() and row(settings, DASH_ID)["state"] == "deleted"
+
+
 def test_a_section_plan_after_a_delete_is_410_not_500(
     settings: Settings, seeded: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
