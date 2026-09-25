@@ -179,3 +179,22 @@ Attempt 1 (`12b4e9b`, docs `9dce66e`) passed everything except 2 CONFIRMED findi
    file so it can't fail on encoding; clean up the `.tmp` on any write failure. Tests: the two
    bookmark byte sequences from the review → row reaches `review`, analysis.json parses, no `.tmp`.
 Update findings ("Gate r1 fixes") and KICKOFF-STORY-007 (names from analysis are already clean).
+
+## Attempt 3 (Shuma approved, 2026-09-25) — READ THIS FIRST
+
+Round 2 (on e15e7f0) confirmed 2 findings — `docs/findings/STORY-006-review.md` § Round 2. One
+commit on the feature/mvp tip:
+`fix: STORY-006 - gate r2: MuPDF allocator failures are resources whatever the exception type; a real mid-write failure test`
+1. `guarded`: classify by MESSAGE, not type — any exception that is a `RuntimeError` OR a
+   `pymupdf.mupdf.FzErrorBase` subclass (import lazily/defensively) whose `str()` matches
+   `MUPDF_ALLOC_FAILED` → `resources`; everything else stays `internal`. Fix the false comment
+   ("raised as a plain RuntimeError"). Also make `analyze.page_labels()`' fallback catch `FzErrorBase`
+   (a label failure must never fail the job). Tests: unit — `FzErrorSystem("code=2: malloc (65537 bytes) failed")`
+   → resources, a non-alloc `FzErrorFormat` → internal; real — the reviewer's
+   `scratchpad/rv006r2/mk_raw.py` link_uri_40k builder as a fixture (via `hostile.build`) under the real
+   sandbox + `Runner.run_once` → `failed/resources` (mark slow if needed, but it must run in the suite).
+2. Replace the vacuous `.tmp` test with one that fails AFTER the `.tmp` exists — e.g. a subprocess with
+   `RLIMIT_FSIZE` small enough that `write_bytes` raises EFBIG mid-write, or monkeypatch `os.replace`
+   to raise — asserting the previous file is intact and no `.tmp` remains. Prove it: it must FAIL if
+   the try/except/unlink is removed (state that you checked this in findings).
+Update findings ("Gate r2 fixes") and KICKOFF-STORY-007 (the cut task inherits the message-based rule).
