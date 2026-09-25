@@ -1,6 +1,6 @@
 # STORY-005: Web: upload endpoint with preflight
 
-> **Status:** Pending
+> **Status:** Done (2026-09-25)
 > **Size:** M
 > **Date:** 2026-09-25
 > **Architecture ref:** `docs/Architecture.md#api`
@@ -96,10 +96,10 @@ feat: STORY-005 - upload with streaming size cap and sandboxed preflight
 
 ## Status
 
-**Pending**
+**Done** (2026-09-25)
 
-- [ ] AC-1
-- [ ] AC-2
-- [ ] AC-3
-- [ ] AC-4
-- [ ] AC-5
+- [x] AC-1
+- [x] AC-2
+- [x] AC-3
+- [x] AC-4
+- [x] AC-5
