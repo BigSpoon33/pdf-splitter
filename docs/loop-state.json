@@ -1,3 +1,15 @@
-{ "active_story": "STORY-001", "loop_phase": "implement",
-  "queue": ["STORY-001","STORY-002","STORY-003","STORY-004","STORY-005","STORY-006","STORY-007","STORY-008","STORY-009","STORY-010","STORY-011","STORY-012","STORY-013","STORY-014"],
-  "completed": [], "last_updated": "2026-09-25" }
+{
+  "mode": "auto",
+  "active_story": "STORY-001",
+  "loop_phase": "implement",
+  "queue": ["STORY-001","STORY-002","STORY-003","STORY-004","STORY-005","STORY-006","STORY-007","STORY-008","STORY-009","STORY-010","STORY-011","STORY-012","STORY-013"],
+  "held": {"STORY-014": "costs money + needs Shuma's domain/host/contact decisions (PRD Q-1, Q-2, Q-4) — not in the autonomous run"},
+  "completed": [],
+  "attempts": {},
+  "failed": {},
+  "consecutive_failures": 0,
+  "branches": {"engine": "monograph-splitter feature/web-mode", "web": "pdf-splitter feature/mvp"},
+  "baseline": {"engine_tests": "51 passed (v0.3.1, 6fd22fc)", "web_tests": "none yet"},
+  "run": {},
+  "last_updated": "2026-09-25"
+}
