@@ -60,6 +60,28 @@ def xobj_bomb(path: Path, depth: int = 6, fan: int = 10, chars: int = 60) -> Pat
     return build(path, objs)
 
 
+def link_uri_bomb(path: Path, links: int = 40_000, uri_len: int = 65_536) -> Path:
+    """309 KB, 2 pages: page 2's /Annots lists the same Link annotation `links` times, and its URI is one
+    `uri_len`-byte string that MuPDF copies once per link while LOADING the page (`fz_load_page`, a raw
+    binding, before any text extraction). Under RLIMIT_AS 2 GB the allocator fails there, and PyMuPDF raises
+    `pymupdf.mupdf.FzErrorSystem`, not a RuntimeError (the STORY-006 gate r2 repro)."""
+    uri = "http://e/" + "A" * (uri_len - 9)
+    objs = [
+        b"<</Type/Catalog/Pages 2 0 R>>",
+        b"<</Type/Pages/Kids[4 0 R 6 0 R]/Count 2>>",
+        b"<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>",
+        PAGE % 5,
+        stream("", text_content()),
+        (b"<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Resources<</Font<</F1 3 0 R>>>>"
+         b"/Contents 7 0 R/Annots 8 0 R>>"),
+        stream("", text_content()),
+        b"[" + " ".join(["9 0 R"] * links).encode() + b"]",
+        b"<</Type/Annot/Subtype/Link/Rect[0 0 10 10]/Border[0 0 0]/A<</S/URI/URI 10 0 R>>>>",
+        b"(" + uri.encode() + b")",
+    ]
+    return build(path, objs)
+
+
 def outline_book(path: Path, title_hex: list[str]) -> Path:
     """2 text pages and a flat outline whose titles are the given hex strings, byte for byte (a PDF text string:
     a UTF-16BE BOM `FEFF…`, a UTF-8 BOM `EFBBBF…`, or PDFDocEncoding). Items alternate between the two pages."""

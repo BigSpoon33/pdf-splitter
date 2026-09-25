@@ -24,16 +24,24 @@ import pymupdf
 
 from ..config import Settings
 from ..store import Store
-from .analyze import analyze, default_plan
+from .analyze import MUPDF_ERRORS, analyze, default_plan
 
 PROGRESS_INTERVAL_S = 0.5
 EXIT_INTERNAL = 1
 EXIT_RESOURCES = 3
 # MuPDF allocates outside Python, so under RLIMIT_AS its allocator failing is not a MemoryError but
-# FZ_ERROR_SYSTEM (`code=2: calloc (4104 x 1 bytes) failed`), which PyMuPDF 1.28 raises as a plain RuntimeError.
+# FZ_ERROR_SYSTEM (`code=2: calloc (4104 x 1 bytes) failed`). PyMuPDF 1.28 surfaces it as a plain
+# RuntimeError from its `_extra` helpers and as `pymupdf.mupdf.FzErrorSystem` from the raw bindings, so the
+# exception TYPE says nothing about the cause: only the message does.
 MUPDF_ALLOC_FAILED = re.compile(
     r"^\s*code=2\b|\b(?:calloc|malloc|realloc)\b.*\bfailed\b|\bout of memory\b", re.IGNORECASE
 )
+
+
+def is_mupdf_alloc_failure(e: BaseException) -> bool:
+    """A MuPDF error (either raise path) whose message is the allocator's; a `ValueError` or an `OSError`
+    carrying the same words is not, because those come from Python code, not from MuPDF's allocator."""
+    return isinstance(e, MUPDF_ERRORS) and MUPDF_ALLOC_FAILED.search(str(e)) is not None
 
 
 class Throttle:
@@ -107,12 +115,9 @@ def guarded(job: Callable[[], bool]) -> int:
             return _result(False, "resources")
         traceback.print_exc()
         return _result(False, "internal")
-    except RuntimeError as e:
-        if MUPDF_ALLOC_FAILED.search(str(e)):
+    except Exception as e:  # noqa: BLE001 - any other failure is `internal`; the runner logs the redacted tail
+        if is_mupdf_alloc_failure(e):
             return _result(False, "resources")
-        traceback.print_exc()
-        return _result(False, "internal")
-    except Exception:  # noqa: BLE001 - any other failure is `internal`; the runner logs the redacted tail
         traceback.print_exc()
         return _result(False, "internal")
     return _result(True) if ok else _result(False, "internal")

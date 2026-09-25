@@ -16,6 +16,17 @@ from monograph_splitter.detect import heading_candidates, outline_entries, outli
 from monograph_splitter.index import index_book
 from monograph_splitter.profile import WEB_BASE, profile_from_dict
 
+# PyMuPDF 1.28 raises the same MuPDF error two ways: its `_extra` helpers (text extraction, `get_text`)
+# re-raise as a plain RuntimeError, while its raw bindings (`fz_load_page`, xref lookups, page labels)
+# raise `pymupdf.mupdf.FzErrorSystem`/`FzErrorFormat`/… — Exception subclasses under `FzErrorBase`, NOT
+# RuntimeErrors. Anything that must treat "a MuPDF failure" uniformly catches this tuple.
+try:
+    from pymupdf.mupdf import FzErrorBase
+
+    MUPDF_ERRORS: tuple[type[Exception], ...] = (RuntimeError, FzErrorBase)
+except ImportError:  # pragma: no cover - a PyMuPDF build without the raw bindings only raises RuntimeError
+    MUPDF_ERRORS = (RuntimeError,)
+
 # (done, total, message): pages indexed so far, the page count, and what the job is doing.
 Progress = Callable[[int, int, str], None]
 
@@ -89,13 +100,13 @@ def json_safe(obj: Any) -> Any:
 
 def page_labels(doc: pymupdf.Document) -> list[str]:
     """Printed page labels, "" where there are none. Only a UI hint (ADR-003), so a label tree PyMuPDF
-    can't parse (a real book here has one: `rule_dict` raises on an empty /St) costs the labels, never
-    the analysis."""
+    can't parse (a real book here has one: `rule_dict` raises on an empty /St) or that MuPDF itself
+    refuses (a raw-binding `FzError*`) costs the labels, never the analysis."""
     try:
         if not doc.get_page_labels():
             return [""] * doc.page_count
         return [doc[i].get_label() for i in range(doc.page_count)]
-    except (ValueError, RuntimeError, IndexError, KeyError):
+    except (ValueError, IndexError, KeyError, *MUPDF_ERRORS):
         return [""] * doc.page_count
 
 

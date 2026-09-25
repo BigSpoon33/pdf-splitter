@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import json
 import logging
 import resource
@@ -15,7 +16,7 @@ from pathlib import Path
 import pymupdf
 import pytest
 from fixtures.books import headed_book, text_book
-from fixtures.hostile import outline_book, xobj_bomb
+from fixtures.hostile import link_uri_bomb, outline_book, xobj_bomb
 from monograph_splitter.profile import profile_from_dict
 
 from pdf_splitter import cli, upload
@@ -84,6 +85,8 @@ def queue_job(
         text_book(src, pages)
     elif pdf == "xbomb":
         xobj_bomb(src)
+    elif pdf == "linkbomb":
+        link_uri_bomb(src)
     elif pdf == "outline":
         outline_book(src, title_hex or [])
     else:
@@ -186,6 +189,19 @@ def test_page_labels(tmp_path: Path) -> None:
     doc.update_object(xref, "<</Nums[0<</S/D/Stx 1>>]>>")
     doc.xref_set_key(doc.pdf_catalog(), "PageLabels", f"{xref} 0 R")
     assert page_labels(doc) == ["", "", ""]
+
+
+def test_page_labels_survive_a_raw_mupdf_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Gate r2: the raw bindings raise `FzError*` (not RuntimeError) when MuPDF refuses the label tree."""
+    doc = pymupdf.open()
+    doc.new_page()
+    doc.set_page_labels([{"startpage": 0, "prefix": "A-", "style": "r", "firstpagenum": 1}])
+
+    def refuse(*_: object) -> None:
+        raise pymupdf.mupdf.FzErrorFormat("cannot parse page label tree")
+
+    monkeypatch.setattr(pymupdf.Page, "get_label", refuse)
+    assert page_labels(doc) == [""]
 
 
 def test_json_safe_replaces_every_lone_surrogate_and_nothing_else() -> None:
@@ -310,14 +326,48 @@ def test_task_survives_a_bookmark_title_that_is_not_valid_unicode(
     assert plan == default_plan(analysis)
 
 
-def test_write_json_never_fails_on_encoding_and_leaves_no_tmp(tmp_path: Path) -> None:
+def test_write_json_never_fails_on_encoding(tmp_path: Path) -> None:
     out = tmp_path / "analysis.json"
     task._write_json(out, {"name": "x\udcffy"})          # a string that dodged `json_safe`
     assert json.loads(out.read_bytes().decode("utf-8")) == {"name": "x?y"}
-    with pytest.raises(TypeError):
-        task._write_json(out, {"bad": {1, 2}})            # not serialisable: the failure propagates …
-    assert not (tmp_path / "analysis.json.tmp").exists()  # … but the half-written file does not
-    assert json.loads(out.read_text()) == {"name": "x?y"}  # and the previous file is untouched
+
+
+def test_write_json_removes_the_tmp_when_the_rename_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Gate r2 finding 2: a failure AFTER the `.tmp` is fully written (the rename) must still leave the
+    directory as it was. (The old test failed inside `json.dumps`, before any file existed.)"""
+    out, tmp = tmp_path / "analysis.json", tmp_path / "analysis.json.tmp"
+    out.write_text('{"previous": true}')
+    seen: dict[str, bytes] = {}
+
+    def refuse(src: str | Path, dst: str | Path) -> None:
+        seen["tmp"] = Path(src).read_bytes()             # proof the failure happens with the .tmp on disk
+        raise OSError(errno.EIO, "Input/output error")
+
+    monkeypatch.setattr(task.os, "replace", refuse)
+    with pytest.raises(OSError, match="Input/output"):
+        task._write_json(out, {"pages": 3})
+    assert seen["tmp"] == b'{"pages": 3}'
+    assert not tmp.exists()
+    assert json.loads(out.read_text()) == {"previous": True}
+
+
+def test_write_json_removes_a_tmp_cut_short_by_rlimit_fsize(tmp_path: Path) -> None:
+    """Gate r2 finding 2, the real failure: under the sandbox's RLIMIT_FSIZE the write itself fails with
+    EFBIG part-way through, leaving a truncated `.tmp` that the cleanup must remove; the task reports it as
+    `resources` like any other rlimit, and the previous analysis survives."""
+    out, tmp = tmp_path / "analysis.json", tmp_path / "analysis.json.tmp"
+    out.write_text('{"previous": true}')
+    code = (
+        GUARDED + "from pathlib import Path; from pdf_splitter.worker.task import _write_json; "
+        f"sys.exit(guarded(lambda: (_write_json(Path({str(out)!r}), {{'pad': 'x' * 100_000}}), True)[1]))"
+    )
+    proc = run_sandboxed({**sandbox.limits(10), "fsize": 4096}, code)
+    assert proc.returncode == task.EXIT_RESOURCES, proc.stderr
+    assert classify(proc.returncode, proc.stdout) == "resources"
+    assert not tmp.exists()
+    assert json.loads(out.read_text()) == {"previous": True}
 
 
 def test_task_main_needs_the_double_dash_for_a_dash_id() -> None:
@@ -364,6 +414,12 @@ def test_task_refuses_an_id_that_is_not_a_plain_name(bad: str, capsys: pytest.Ca
         (RuntimeError("code=3: load failed for object 12"), "internal", task.EXIT_INTERNAL),
         (RuntimeError("cannot open /jobs/x/source.pdf: code=2 is not a file"), "internal", task.EXIT_INTERNAL),
         (ValueError("code=2: calloc (1 x 1 bytes) failed"), "internal", task.EXIT_INTERNAL),
+        # Gate r2 finding 1: the raw bindings raise the same allocator failure as `FzErrorSystem`, an
+        # Exception (not RuntimeError) subclass; the message decides, so a non-allocator FzError stays internal.
+        (pymupdf.mupdf.FzErrorSystem("code=2: malloc (65537 bytes) failed"), "resources", task.EXIT_RESOURCES),
+        (pymupdf.mupdf.FzErrorLibrary("out of memory"), "resources", task.EXIT_RESOURCES),
+        (pymupdf.mupdf.FzErrorFormat("cannot recognize xref format"), "internal", task.EXIT_INTERNAL),
+        (pymupdf.mupdf.FzErrorSyntax("expected 'obj' keyword"), "internal", task.EXIT_INTERNAL),
     ],
 )
 def test_guarded_maps_exceptions(
@@ -540,6 +596,25 @@ def test_real_task_on_a_mupdf_memory_bomb_is_resources(
     caplog.set_level(logging.WARNING)
     job_dir = queue_job(settings, wstore, DASH_ID, pdf="xbomb", pages=2)
     assert job_dir.joinpath("source.pdf").stat().st_size < 6_000
+    assert Runner(settings).run_once(wstore) is True
+    job = wstore.get_job(DASH_ID)
+    assert (job["state"], job["error_code"], job["message"]) == (
+        "failed", "resources", runner_mod.MESSAGES["resources"]
+    )
+    assert not (job_dir / "analysis.json").exists() and not list(job_dir.glob("*.tmp"))
+    assert "failed: resources" in caplog.text
+    assert_id_gone(caplog.text, DASH_ID)
+
+
+def test_real_task_on_a_link_uri_bomb_is_resources(
+    settings: Settings, wstore: Store, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Gate r2 finding 1, with the reviewer's second bomb under the real sandbox: 40k links sharing a 64 KB URI
+    make MuPDF's allocator fail inside `fz_load_page`, a raw binding, which raises `FzErrorSystem` rather than
+    the RuntimeError the xbomb's text extraction raises. ≈ 2 s."""
+    caplog.set_level(logging.WARNING)
+    job_dir = queue_job(settings, wstore, DASH_ID, pdf="linkbomb", pages=2)
+    assert job_dir.joinpath("source.pdf").stat().st_size < 320_000
     assert Runner(settings).run_once(wstore) is True
     job = wstore.get_job(DASH_ID)
     assert (job["state"], job["error_code"], job["message"]) == (
