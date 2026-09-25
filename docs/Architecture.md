@@ -202,6 +202,7 @@ PUT    /api/jobs/{id}/plan             Plan → 200 normalized Plan | 422 with f
 GET    /api/jobs/{id}/sheets/{n}.png?dpi=72   PNG (dpi ∈ {48, 72, 110})
 POST   /api/jobs/{id}/sections/{i}/plan       {settings?, override?} → Section plan (not persisted)
 POST   /api/jobs/{id}/cut              202 {state:"queued"} (uses the saved Plan) · 409 if running
+GET    /api/jobs/{id}/manifest         the last cut's manifest rows as JSON [{index, name, file, pages, flags, notes, leaks, bytes}] (409 before any cut; kept until the next cut replaces it)
 GET    /api/jobs/{id}/result.zip       attachment
 GET    /api/jobs/{id}/sections/{i}.pdf attachment (after cut)
 DELETE /api/jobs/{id}                  204
