@@ -101,3 +101,5 @@ feat: STORY-012 - rate limit, disk guard, 24 h janitor and queue position
 - [ ] AC-3
 - [ ] AC-4
 - [ ] AC-5
+
+> **Orchestrator addendum (from STORY-007 review):** the janitor must also remove the directory of any row in state `deleted` (defence in depth against a late write recreating it), not only expired rows and row-less dirs. Test it.

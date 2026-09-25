@@ -230,3 +230,20 @@ them** (not hand-written JSON), the polling contract for `GET /api/jobs/{id}`, a
   {full,left,right}. Test out-of-range values.
 - The cut task's ZIP + per-section files must leave no partial `result.zip` on failure — test it
   non-vacuously (fail AFTER the file exists, prove the test fails without cleanup), like STORY-006.
+
+## Previous attempt (RETRY — read this first)
+
+Attempt 1 (`6fcf848`, docs `8f07e87`) passed everything except ONE confirmed finding — see
+`docs/findings/STORY-007-review.md`. Fix forward, one commit on the feature/mvp tip:
+`fix: STORY-007 - gate r1: previews never resurrect a deleted job`
+1. The preview subprocess must never create the job directory: only create `png/<dpi>/` when
+   `<job>/` still exists (e.g. `os.makedirs` of the png subtree guarded by `job_dir.is_dir()`, or
+   write via a path whose parent must already exist) — if the job dir is gone, exit with a
+   distinct "gone" result, write nothing.
+2. `get_sheet` and `post_section_plan` re-check the row AFTER the subprocess returns: deleted/expired
+   (or subprocess reported "gone") → 410 `expired`, and remove any PNG that raced in. A
+   FileResponse on a file removed after the check must also map to 410, never 500.
+3. Tests (non-vacuous — prove each fails on 6fcf848): a render that blocks until the test deletes
+   the job (e.g. a hook/monkeypatched render or a slow fixture) → 410 and NO `<jobs>/<id>` dir
+   afterwards; section-plan after DELETE → 410 not 500.
+Update findings ("Gate r1 fix") and KICKOFF-STORY-008 if it cites these routes' error codes.
