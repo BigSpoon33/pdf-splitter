@@ -8,14 +8,16 @@ PDF per chapter or section.
 - **Web (you write code here)**: `~/Documents/Repos/pdf-splitter` (GitHub `BigSpoon33/pdf-splitter` =
   `origin`, Gitea mirror = `gitea`), branch **`feature/mvp`**. So far it holds only docs: `README.md` (3 lines)
   and `docs/` (PRD, Architecture, stories, findings, kickoffs, and `docs/loop-state.json`, which belongs
-  to the orchestrator, so never stage it). The tip is the STORY-003 docs commit
-  (`docs: STORY-003 - findings + KICKOFF-STORY-004`). **There is no `pyproject.toml`, no `src/`, no
+  to the orchestrator, so never stage it). The tip is the latest STORY-003 docs commit
+  (`docs: STORY-003 - findings + KICKOFF-STORY-004`, the retry's; the earlier one with the same subject
+  is `639fd22`). **There is no `pyproject.toml`, no `src/`, no
   tests, so there's no test baseline: 0 tests.** STORY-004 is the first code in this repo. Stay on
   `feature/mvp`. The loop keeps one branch per repo, even though other stories' files say otherwise.
 - **Engine (read-only for you)**: `~/Documents/Repos/monograph-splitter` (GitHub
-  `BigSpoon33/pdf-splitter-engine`), branch `feature/web-mode`, tip **`c8935d2`** (STORY-003), with annotated
-  tag **`v0.4.0`** pushed to GitHub and Gitea. `main` is still `6fd22fc` (0.3.1). Pin the tag, not
-  `main`. Engine tests: 149 passed.
+  `BigSpoon33/pdf-splitter-engine`), branch `feature/web-mode`, tip **`8e52cc3`** (STORY-003 + its gate r1
+  fix), with annotated tag **`v0.4.1`** pushed to GitHub and Gitea. `v0.4.0` (on `c8935d2`) also exists but is
+  superseded: its review server turned a malformed `overrides.json` into a 404. `main` is still `6fd22fc`
+  (0.3.1). Pin `v0.4.1`, not `v0.4.0` and not `main`. Engine tests: 150 passed.
 - Read, in order: `docs/stories/STORY-004.md` (its ACs are authoritative), `docs/Architecture.md` §
   "store", § "Storage Schema", § "Interfaces" (`GET /api/health`, job id rules), § ADR-001/004/007,
   then `docs/findings/STORY-003-findings.md` (Handoff section).
@@ -26,11 +28,13 @@ default, so pin 3.12 explicitly with `requires-python = ">=3.12"` plus a `.pytho
 
 ## What STORY-003 established (use these, don't re-invent)
 
-- The engine dependency line is known to work anonymously:
-  `monograph-splitter @ git+https://github.com/BigSpoon33/pdf-splitter-engine@v0.4.0`.
-  `uv run --no-project --with "<that>" python -c "import monograph_splitter"` resolves and imports it
-  (PyMuPDF 1.28.2 comes with it). The import name is `monograph_splitter`.
-- **`engine_version` for `/api/health` = `monograph_splitter.__version__`** (`"0.4.0"`, new in
+- The engine dependency line:
+  `monograph-splitter @ git+https://github.com/BigSpoon33/pdf-splitter-engine@v0.4.1`.
+  The same line with `@v0.4.0` was verified anonymously (`uv run --no-project --with "<that>" python -c
+  "import monograph_splitter"` resolved and imported it, PyMuPDF 1.28.2 included); `v0.4.1` is one commit
+  later on the same public repo and was seen with `git ls-remote`, but your `uv sync` is its first real
+  install. The import name is `monograph_splitter`.
+- **`engine_version` for `/api/health` = `monograph_splitter.__version__`** (`"0.4.1"`, new in
   `src/monograph_splitter/__init__.py:16`). Do NOT use `ENGINE_VERSION` (an int, 17): that's the index-cache
   key, not a release. `import monograph_splitter` alone doesn't import `fitz`, so health stays cheap.
   The contract is `tests/test_web_mode.py::test_the_package_version_is_the_pyproject_version` in the engine repo.
@@ -39,11 +43,29 @@ default, so pin 3.12 explicitly with `requires-python = ">=3.12"` plus a `.pytho
   `session.Book.open(entries=rows)`, `session.Book.cut_all(progress=…)`. Their contracts are the
   engine tests `tests/test_profile_dict.py`, `tests/test_detect.py` and `tests/test_web_mode.py`. You
   don't call any of them in STORY-004.
+- What `docs/Architecture.md` now says about that surface (§ "Engine additions" and § "Data Types",
+  updated after STORY-003's gate), so nothing you build in the store or settings contradicts it:
+  - `Book.cut_all(progress=None, verify=True, preview=False, only=None, *, limit=None, redact=True) -> dict`
+    with keys `written, flags, notes, leaks, missing, unknown` (pinned by `tests/test_web_mode.py`
+    `SUMMARY_KEYS`); `progress(done, total, name)` after each entry; one `Book` per cut job.
+  - **Engine names vs display names.** `sections[].name` in a Plan is the DISPLAY name (≤ 120 chars,
+    duplicates allowed). The engine never sees it: the worker passes a unique, filename-safe
+    `NNN-<ascii-slug>` (≤ 80 bytes) per section, keeps the display name in the Plan, and translates
+    `overrides` (keyed by section INDEX in the Plan) to engine names. ZIP entries are
+    `NNN - <display name, sanitized>.pdf`. The engine refuses names containing `/`, `\`, NUL or equal
+    to `.`/`..`/empty with a `ValueError` before any write.
+  - **Page validation is the web layer's job.** Plan validation rejects `page ∉ [1, pages]` (the
+    engine's `cuts.plan` raises `IndexError` past the book end). That is STORY-007's `PUT plan` → 422; in
+    STORY-004 it only means the job row's `pages` column must be there for it (it is in the schema).
+  - None of this changes STORY-004's schema or settings; it is here so the Store's `progress`/`total`/
+    `message` columns are understood as the `cut_all` progress callback's `(done, total, name)`.
 
 ## Critical gotchas
 
-1. **The dep pin.** The story's Depends-On says "pinned to v0.3.1 until STORY-003 lands". It has landed,
-   so pin `@v0.4.0`. Architecture's Dependency Map says to pin PyMuPDF exactly: add `pymupdf==1.28.2`
+1. **The dep pin.** The story's Depends-On says "pinned to v0.3.1 until STORY-003 lands" and its
+   Implementation Notes say `@v0.4.0`; both are stale. STORY-003 has landed **and** been patched, so pin
+   `@v0.4.1` (the story file is not yours to edit; record the pin in findings). Architecture's Dependency
+   Map says to pin PyMuPDF exactly: add `pymupdf==1.28.2`
    explicitly (the engine only says `>=1.24`).
 2. **Job ids** are `secrets.token_urlsafe(16)`: 16 random bytes, url-safe base64, 22 characters, no
    padding. Architecture § Interfaces says ids are "the only credential" and never appear in logs.
@@ -85,7 +107,7 @@ default, so pin 3.12 explicitly with `requires-python = ">=3.12"` plus a `.pytho
 ## Recommended ordering
 
 1. `pyproject.toml` (hatchling, `packages = ["src/pdf_splitter"]`, Python ≥ 3.12, deps: fastapi, uvicorn,
-   pydantic-settings, python-multipart (STORY-005 needs it; fine to add now), `monograph-splitter @ git+…@v0.4.0`,
+   pydantic-settings, python-multipart (STORY-005 needs it; fine to add now), `monograph-splitter @ git+…@v0.4.1`,
    `pymupdf==1.28.2`; dev group: pytest, httpx, ruff), `.python-version`, `.gitignore`, `uv sync`.
 2. `src/pdf_splitter/config.py`: the `Settings` class (AC-2), plus `tests/test_config.py` for the env
    prefix and each default.

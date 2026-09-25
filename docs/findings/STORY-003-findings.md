@@ -4,6 +4,18 @@
 
 Engine commit: `c8935d2` on `feature/web-mode` (`BigSpoon33/pdf-splitter-engine`), pushed to `origin` and `gitea`. Annotated tag **`v0.4.0`** (on `c8935d2`) is pushed to both remotes. An anonymous `git ls-remote` on GitHub sees the tag, and `uv run --no-project --with "monograph-splitter @ git+https://github.com/BigSpoon33/pdf-splitter-engine@v0.4.0"` installs and imports it (`__version__` 0.4.0, `ENGINE_VERSION` 17, PyMuPDF 1.28.2). `main` was not touched and is still `6fd22fc`.
 
+## Gate r1 fix (0.4.1)
+
+Round 1 of the review (`docs/findings/STORY-003-review.md`) confirmed one finding: `review/server.py`'s `excerpt_pdf` wrapped the lazy `cfg_of(book_id).book` (= `Book.open`) in the same `try/except ValueError` as the name guard, so a malformed `overrides.json` (or any other `ValueError` from opening the book) came back as 404 "no such excerpt" instead of surfacing as it did before 0.4.0.
+
+Fixed forward in engine **`8e52cc3`** on `feature/web-mode` (`fix: STORY-003 - gate r1: the excerpt route maps only the name guard to 404 (0.4.1)`), pushed to `origin` and `gitea` with annotated tag **`v0.4.1`** on it. `v0.4.0` still points at `c8935d2` on both remotes and was not moved.
+
+- `src/monograph_splitter/review/server.py:265`: `book = cfg_of(book_id).book` is resolved before the `try`; only `book.excerpt_path(name)` sits inside `except ValueError → 404`.
+- Test `tests/test_review_server.py::test_the_excerpt_route_maps_only_the_name_guard_to_404`: an unsafe name (`a\b`, `..`) is 404; then `overrides.json` is corrupted, a fresh app is built, and its FIRST request is the excerpt route → `pytest.raises(json.JSONDecodeError)` (the same exception a pre-0.4.0 server raised); once the file is repaired the same app returns 404 for the unsafe name and 200 for the excerpt. The test fails against `c8935d2`'s route ("DID NOT RAISE"), so it guards the regression. The orchestrator's `scratchpad/gate/srv/probe.py` now prints the `JSONDecodeError` traceback instead of `404`.
+- Version **0.4.1** in `pyproject.toml`, `uv.lock` and `__version__`; `tests/test_web_mode.py:190` pins `0.4.1`. `ENGINE_VERSION` stays 17 (no index change, so Inkwell does not re-index again). The README lists no version numbers, so it is unchanged.
+- The tag is visible anonymously on GitHub (`git ls-remote --tags origin` shows `v0.4.1` → `8e52cc3`). The `uv run --no-project --with …@v0.4.1` install was NOT re-run in this session (the sandbox refused to execute code fetched from the external git source); the resolution path is identical to the `v0.4.0` check above, and STORY-004's `uv sync` is the next real test of it.
+- Suite: **150 passed** (149 + 1), 2 pre-existing warnings.
+
 ## AC Verification
 - [x] AC-1: `Book.cut_all(progress=None, verify=True, preview=False, only=None, *, limit=None, redact=True) -> dict`. The loop that was in `cli.main` now lives here: `select`, `cut` for each entry, `save_manifest`, and `write_review_index(rows)` when previewing. `progress(done, total, name)` fires after each entry, including an entry whose plan falls off the book. **Summary shape** (pinned by `tests/test_web_mode.py:33`, `SUMMARY_KEYS`):
   - `written`: the manifest rows cut in this call, in entry order.
@@ -32,7 +44,7 @@ Engine commit: `c8935d2` on `feature/web-mode` (`BigSpoon33/pdf-splitter-engine`
   - `cut_all`, which checks every chosen name **before the first write**: no PDF and no manifest is written.
   - The CLI, which turns the error into `Error: …` with rc 2.
   
-  In the review server, `excerpt_pdf` maps the error to a 404. Tests: `tests/test_web_mode.py:106` (6 names, including a `../escape` that must not land in the parent dir), `:124`, `:129`.
+  In the review server, `excerpt_pdf` maps the guard's error (and only that error, since 0.4.1 — see "Gate r1 fix") to a 404. Tests: `tests/test_web_mode.py:106` (6 names, including a `../escape` that must not land in the parent dir), `:124`, `:129`; `tests/test_review_server.py::test_the_excerpt_route_maps_only_the_name_guard_to_404`.
 - **WEB_BASE:** `chapter_only = ""`, and `Profile.chapter_only_re` compiles an empty pattern to `(?!)`, which never matches, so empty *disables* the rule (`profile.py:140`). `long_span = 200 = max_span` (`profile.py:232-234`), and `profile_from_dict` moves `long_span` with `max_span` when the base has them equal (`:278`), the same trick `subheader_bottom` uses. `title_min_y` is unchanged. Tests: `test_web_mode.py:140` (a bare 16 pt "Chapter 3" line is a break under `Profile()` but not under `WEB_BASE`/`profile_from_dict({})`, and the empty pattern matches nothing) and `:151` (a 6-sheet section is not `long-span` under web defaults but is with `long_span=3`). `tests/test_profile_dict.py:37-42` now also asserts `long_span == max_span`.
 - **One wrap-gap setting:** `detect.heading_candidates(doc, *, …, profile=None, header_band=None, footer_band=None, wrap_gap=None, column_split=None, full_width_ratio=None)` (`detect.py:195`). A profile supplies the bands, `column_split`, `full_width_ratio` and `wrap_gap` (= `heading_wrap_gap`). An explicit keyword still wins. With neither, the values are `Profile()`'s defaults, as before. Test: `test_web_mode.py:163`: `profile=` gives the same result as the explicit kwargs, `wrap_gap=16` overrides the profile's 24, no-profile gives the same result as `profile=Profile()`, and one profile for detect + `Book.open` gives 0 `heading-not-found` on the single-column book.
 
@@ -41,6 +53,7 @@ Engine commit: `c8935d2` on `feature/web-mode` (`BigSpoon33/pdf-splitter-engine`
 **Result:** pass
 ```
 149 passed, 2 warnings in 8.32s        (before: 133; +16 = tests/test_web_mode.py, 1 of them parametrized ×6)
+150 passed, 2 warnings in 8.19s        (after the gate r1 fix, 8e52cc3: +1 in tests/test_review_server.py)
 ```
 The 2 warnings are the pre-existing starlette/httpx deprecations.
 
@@ -49,7 +62,7 @@ The 2 warnings are the pre-existing starlette/httpx deprecations.
 - None in the new code.
 
 ## Handoff Context for Next Session
-STORY-004 is the first code in the web repo. It only needs the dep pin: `monograph-splitter @ git+https://github.com/BigSpoon33/pdf-splitter-engine@v0.4.0` (verified installable anonymously). For health's `engine_version`, use `monograph_splitter.__version__` ("0.4.0"). `ENGINE_VERSION` (17) is the index-cache int. The web worker (STORY-006/007) passes ONE `profile_from_dict(settings)` to both `detect.heading_candidates(doc, profile=prof)` and `Book.open(profile=prof)`. It makes one `Book` per cut job, because `summary["missing"]` is `book.missing` and accumulates across calls on the same Book.
+STORY-004 is the first code in the web repo. It only needs the dep pin: `monograph-splitter @ git+https://github.com/BigSpoon33/pdf-splitter-engine@v0.4.1` (the `v0.4.0` line was verified installable anonymously; `v0.4.1` is the same path one commit later). For health's `engine_version`, use `monograph_splitter.__version__` ("0.4.1"). `ENGINE_VERSION` (17) is the index-cache int. The web worker (STORY-006/007) passes ONE `profile_from_dict(settings)` to both `detect.heading_candidates(doc, profile=prof)` and `Book.open(profile=prof)`. It makes one `Book` per cut job, because `summary["missing"]` is `book.missing` and accumulates across calls on the same Book.
 
 ## Out-of-Scope Items
 - **Unique and display names are the web job layer's job** (STORY-007). `cut_all` refuses unsafe names but does not dedupe: two entries with one name share a PDF, a manifest row and an override. The worker should pass engine names such as `NNN-<slug>` and keep the user's display names in its Plan.

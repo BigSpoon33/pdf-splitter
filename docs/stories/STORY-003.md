@@ -101,7 +101,7 @@ feat: STORY-003 - Book.cut_all with progress; CLI on it; web mode documented (0.
 
 ## Status
 
-**Done** — 2026-09-25 (engine `c8935d2` on `feature/web-mode`, tag `v0.4.0` on `origin` + `gitea`; findings `docs/findings/STORY-003-findings.md`)
+**Done** — 2026-09-25 (engine `c8935d2` on `feature/web-mode`, tag `v0.4.0` on `origin` + `gitea`; gate r1 fix `8e52cc3`, tag `v0.4.1` on both remotes — this is the tag the web repo pins; findings `docs/findings/STORY-003-findings.md`)
 
 - [x] AC-1
 - [x] AC-2
