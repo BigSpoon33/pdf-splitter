@@ -222,6 +222,37 @@ def test_preflight_uses_a_10s_timeout_and_this_interpreter(
         assert post(client, pdf_bytes()).status_code == 201
     assert seen["timeout"] == 10.0
     assert seen["cmd"][:3] == [sys.executable, "-m", "pdf_splitter.preflight"]
+    # `--` before the path: an id that starts with `-` must never parse as an option.
+    assert seen["cmd"][-2] == "--"
+    assert seen["cmd"][-1].startswith(str(settings.jobs_dir))
+    assert Path(seen["cmd"][-1]).is_absolute()
+
+
+def test_upload_with_relative_jobs_dir_and_dash_id(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """1 in 64 ids starts with `-`; with `PDFSPLIT_JOBS_DIR=.` the preflight path used to read as an option."""
+    monkeypatch.chdir(tmp_path)
+    ids = iter(["-bCdEfGhIjKlMnOpQrSt00", "--CdEfGhIjKlMnOpQrSt01"])
+    monkeypatch.setattr(upload, "new_job_id", lambda: next(ids))
+    settings = Settings(jobs_dir=Path("."))
+    assert settings.jobs_dir == tmp_path.resolve()
+    with TestClient(create_app(settings)) as client:
+        for expected in ("-bCdEfGhIjKlMnOpQrSt00", "--CdEfGhIjKlMnOpQrSt01"):
+            r = post(client, pdf_bytes())
+            assert r.status_code == 201, r.json()
+            assert r.json()["id"] == expected
+            assert (tmp_path / expected / "source.pdf").exists()
+    assert job_count(settings) == 2
+
+
+def test_preflight_main_accepts_a_dash_leading_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    Path("-x.pdf").write_bytes(pdf_bytes())
+    assert preflight.main(["--max-pages", "5", "--", "-x.pdf"]) == 0
+    assert json.loads(capsys.readouterr().out.splitlines()[-1]) == {"ok": True, "pages": 1}
+    with pytest.raises(SystemExit):
+        preflight.main(["--max-pages", "5", "-x.pdf"])
 
 
 def test_row_insert_failure_leaves_no_directory(settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -361,11 +392,59 @@ def test_concurrent_uploads_all_succeed(settings: Settings) -> None:
     assert {p.name for p in job_dirs(settings)} == set(ids)
 
 
+JOB_ID = "-bCdEfGhIjKlMnOpQrSt00"  # the token_urlsafe(16) shape, with the awkward leading `-`
+
+
 def test_redact_path() -> None:
-    assert redact_path("/api/jobs/abc") == f"/api/jobs/{log_id('abc')}"
-    assert redact_path("/api/jobs/abc/sheets/3.png") == f"/api/jobs/{log_id('abc')}/sheets/3.png"
+    assert redact_path(f"/api/jobs/{JOB_ID}") == f"/api/jobs/{log_id(JOB_ID)}"
+    assert redact_path(f"/api/jobs/{JOB_ID}/sheets/3.png") == f"/api/jobs/{log_id(JOB_ID)}/sheets/3.png"
     assert redact_path("/api/jobs") == "/api/jobs"
     assert redact_path("/api/health") == "/api/health"
+    # Not id-shaped: 21 or 23 chars, or a char outside the url-safe alphabet.
+    for other in ("/api/jobs/" + "a" * 21, "/api/jobs/" + "a" * 23, "/api/jobs/" + "a" * 11 + "." + "a" * 10):
+        assert redact_path(other) == other
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "//api/jobs/{id}",
+        "/api/jobs//{id}",
+        "/api//jobs/{id}",
+        "/API/jobs/{id}",
+        "/api/jobs/./{id}",
+        "/api/jobs/../jobs/{id}",
+        "/http://h:1/api/jobs/{id}",
+        "/api/jobs/{id}.json",
+        "/api/jobs/{id};v=1/sheets/1.png",
+        "/{id}",
+        "{id}",
+        "/api/jobs/{id}/sheets/{id}",
+    ],
+)
+def test_redact_path_cannot_be_dodged_by_path_shape(path: str) -> None:
+    for job_id in (JOB_ID, upload.new_job_id()):
+        out = redact_path(path.format(id=job_id))
+        assert job_id not in out
+        assert log_id(job_id) in out
+
+
+def test_logged_path_is_escaped(settings: Settings, caplog: pytest.LogCaptureFixture) -> None:
+    """The ASGI path arrives percent-decoded: `%1B%5B31m` is a real ESC by the time it is logged."""
+    caplog.set_level(logging.INFO)
+    with TestClient(create_app(settings)) as client:
+        client.get(f"/api/jobs/%1B%5B31m/{JOB_ID}")
+        client.get(f"/api/jobs/%E2%80%A8%C2%85{JOB_ID}%0A")
+        client.get("/api/jobs/%25/x")
+    access = [r.getMessage() for r in caplog.records if r.name == "pdf_splitter.access"]
+    assert len(access) == 3
+    for line in access:
+        assert line.isascii() and line.isprintable()
+        assert JOB_ID not in line
+    assert access[0].startswith(f"GET /api/jobs/%1B%5B31m/{log_id(JOB_ID)} 404 ")
+    assert access[1].startswith(f"GET /api/jobs/%E2%80%A8%C2%85{log_id(JOB_ID)}%0A 404 ")
+    # A literal `%` is re-encoded, so the logged path is unambiguous.
+    assert access[2].startswith("GET /api/jobs/%25/x 404 ")
 
 
 def test_logs_never_contain_a_job_id(settings: Settings, caplog: pytest.LogCaptureFixture) -> None:

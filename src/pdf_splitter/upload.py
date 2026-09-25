@@ -70,7 +70,8 @@ def reject(code: str) -> JSONResponse:
 
 def run_preflight(path: Path, max_pages: int, job_id: str, timeout: float | None = None) -> dict[str, Any]:
     """Run the preflight subprocess; a crash, timeout or garbage output is `unreadable`."""
-    cmd = [sys.executable, "-m", "pdf_splitter.preflight", "--max-pages", str(max_pages), str(path)]
+    # `--` ends option parsing: a job id can start with `-`, and the path must never read as an option.
+    cmd = [sys.executable, "-m", "pdf_splitter.preflight", "--max-pages", str(max_pages), "--", str(path)]
     try:
         proc = subprocess.run(
             cmd, capture_output=True, timeout=timeout or PREFLIGHT_TIMEOUT, check=False, stdin=subprocess.DEVNULL

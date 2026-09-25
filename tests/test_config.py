@@ -12,7 +12,7 @@ def test_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
                  "ANALYZE_TIMEOUT", "CUT_TIMEOUT", "PUBLIC_URL"):
         monkeypatch.delenv(f"PDFSPLIT_{name}", raising=False)
     s = Settings()
-    assert s.jobs_dir == Path("jobs")
+    assert s.jobs_dir == Path.cwd() / "jobs"
     assert s.max_bytes == 200 * 1024 * 1024
     assert s.max_pages == 2000
     assert s.ttl_hours == 24
@@ -21,7 +21,18 @@ def test_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert s.analyze_timeout == 300
     assert s.cut_timeout == 600
     assert s.public_url == "http://localhost:8000"
-    assert s.db_path == Path("jobs") / "jobs.db"
+    assert s.db_path == Path.cwd() / "jobs" / "jobs.db"
+
+
+@pytest.mark.parametrize("raw", [".", "", "jobs", "./jobs/../jobs"])
+def test_jobs_dir_is_always_absolute(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, raw: str) -> None:
+    monkeypatch.chdir(tmp_path)
+    for s in (Settings(jobs_dir=Path(raw)), Settings(jobs_dir=raw)):
+        assert s.jobs_dir.is_absolute()
+        assert s.jobs_dir == (tmp_path / raw).resolve()
+        assert s.db_path.is_absolute()
+    monkeypatch.setenv("PDFSPLIT_JOBS_DIR", raw)
+    assert Settings().jobs_dir == (tmp_path / raw).resolve()
 
 
 def test_env_prefix(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
