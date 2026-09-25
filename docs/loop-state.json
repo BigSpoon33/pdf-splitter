@@ -29,7 +29,7 @@
     "STORY-004": 2,
     "STORY-005": 3,
     "STORY-006": 3,
-    "STORY-007": 2
+    "STORY-007": 3
   },
   "failed": {},
   "consecutive_failures": 0,
@@ -44,7 +44,7 @@
   "run": {
     "started": "2026-09-25",
     "runner": "in-session background subagent (tmux --dangerously-skip-permissions route denied by the auto-mode classifier)",
-    "active": "STORY-007 (retry)"
+    "active": "STORY-007 (2b: auto-fix, incomplete fix of r1-1)"
   },
   "last_updated": "2026-09-25",
   "exceptions": {

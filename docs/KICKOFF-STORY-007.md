@@ -247,3 +247,14 @@ Attempt 1 (`6fcf848`, docs `8f07e87`) passed everything except ONE confirmed fin
    the job (e.g. a hook/monkeypatched render or a slow fixture) → 410 and NO `<jobs>/<id>` dir
    afterwards; section-plan after DELETE → 410 not 500.
 Update findings ("Gate r1 fix") and KICKOFF-STORY-008 if it cites these routes' error codes.
+
+## Attempt 2b — round-2 fix (standing auto-fix policy) — READ THIS FIRST
+
+One commit on the feature/mvp tip:
+`fix: STORY-007 - gate r2: a sheet deleted after its render is 410, never 500`
+In `get_sheet` (and check `post_section_plan` for the same ordering): read the rendered bytes FIRST,
+then `settled(...)`; and whenever the bytes are missing (render "gone", file vanished, `_cached` None),
+re-check the row — deleted/expired → 410, only a live job gets 500 `preview_failed`. Test: the
+reviewer's deterministic settled-then-delete hook (scratchpad/rv007g2/fix/tests/test_zz_probe.py)
+as a real test → 410; prove it fails on 3058d91. Fix the false sentence in the findings' "Gate r1 fix"
+section ("the bytes were already read"). Keep all other tests green.
