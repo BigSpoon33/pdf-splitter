@@ -393,6 +393,13 @@ def test_concurrent_uploads_all_succeed(settings: Settings) -> None:
 
 
 JOB_ID = "-bCdEfGhIjKlMnOpQrSt00"  # the token_urlsafe(16) shape, with the awkward leading `-`
+ROUTE_WORDS = ("health", "sheets", "sections", "result.zip", "plan", "cut")
+
+
+def assert_id_gone(out: str, job_id: str) -> None:
+    """Neither the id nor any 16-char window of it (enough to brute-force the rest) survives."""
+    assert job_id not in out
+    assert not any(job_id[i : i + 16] in out for i in range(len(job_id) - 15))
 
 
 def test_redact_path() -> None:
@@ -400,51 +407,95 @@ def test_redact_path() -> None:
     assert redact_path(f"/api/jobs/{JOB_ID}/sheets/3.png") == f"/api/jobs/{log_id(JOB_ID)}/sheets/3.png"
     assert redact_path("/api/jobs") == "/api/jobs"
     assert redact_path("/api/health") == "/api/health"
-    # Not id-shaped: 21 or 23 chars, or a char outside the url-safe alphabet.
-    for other in ("/api/jobs/" + "a" * 21, "/api/jobs/" + "a" * 23, "/api/jobs/" + "a" * 11 + "." + "a" * 10):
-        assert redact_path(other) == other
+    # Route words stay readable: none is a 16+ run of the id alphabet and none sits in the id slot.
+    for word in ROUTE_WORDS:
+        assert redact_path(f"/api/jobs/{JOB_ID}/{word}") == f"/api/jobs/{log_id(JOB_ID)}/{word}"
+        assert redact_path(f"/api/{word}") == f"/api/{word}"
+    # Rule 1: a 16+ run of the id alphabet is hashed whole wherever it sits; 15 is left alone.
+    assert redact_path("/x/" + "a" * 15) == "/x/" + "a" * 15
+    assert redact_path("/x/" + "a" * 16) == "/x/" + log_id("a" * 16)
+    assert redact_path("/x/" + "a" * 11 + "." + "a" * 10) == "/x/" + "a" * 11 + "." + "a" * 10
+    # Rule 2: whatever sits in the slot after `/api/jobs/` is hashed, however short.
+    assert redact_path("/api/jobs/ab") == "/api/jobs/" + log_id("ab")
+    assert redact_path("/API//jobs//ab/x") == "/API//jobs//" + log_id("ab") + "/x"
 
 
 @pytest.mark.parametrize(
-    "path",
+    "glue",
     [
-        "//api/jobs/{id}",
-        "/api/jobs//{id}",
-        "/api//jobs/{id}",
-        "/API/jobs/{id}",
-        "/api/jobs/./{id}",
-        "/api/jobs/../jobs/{id}",
-        "/http://h:1/api/jobs/{id}",
-        "/api/jobs/{id}.json",
-        "/api/jobs/{id};v=1/sheets/1.png",
-        "/{id}",
-        "{id}",
-        "/api/jobs/{id}/sheets/{id}",
+        lambda i: i + "x",
+        lambda i: "x" + i,
+        lambda i: i + i,
+        lambda i: i + "-extra",
+        lambda i: i + "_",
+        lambda i: i + "A",  # what `%41` decodes to
+        lambda i: i[:21],
+        lambda i: i[:16],
+    ],
+    ids=["id+x", "x+id", "id+id", "id-extra", "id_", "id+A", "id[:21]", "id[:16]"],
+)
+@pytest.mark.parametrize("shape", ["/api/jobs/{v}", "/x/{v}", "/{v}/sheets/1.png", "{v}"])
+def test_redact_path_hashes_an_id_glued_to_other_alphabet_chars(shape: str, glue) -> None:
+    for job_id in (JOB_ID, upload.new_job_id()):
+        path = shape.format(v=glue(job_id))
+        out = redact_path(path)
+        assert out != path
+        assert_id_gone(out, job_id)
+
+
+@pytest.mark.parametrize(
+    ("path", "expected"),
+    [
+        ("//api/jobs/{id}", "//api/jobs/{h}"),
+        ("/api/jobs//{id}", "/api/jobs//{h}"),
+        ("/api//jobs/{id}", "/api//jobs/{h}"),
+        ("/API/jobs/{id}", "/API/jobs/{h}"),
+        ("/api/jobs/./{id}", "/api/jobs/{dot}/{h}"),
+        ("/api/jobs/../jobs/{id}", "/api/jobs/{dotdot}/jobs/{h}"),
+        ("/http://h:1/api/jobs/{id}", "/http://h:1/api/jobs/{h}"),
+        ("/api/jobs/{id}.json", "/api/jobs/{h_json}"),
+        ("/api/jobs/{id};v=1/sheets/1.png", "/api/jobs/{h_v1}/sheets/1.png"),
+        ("/{id}", "/{h}"),
+        ("{id}", "{h}"),
+        ("/api/jobs/{id}/sheets/{id}", "/api/jobs/{h}/sheets/{h}"),
     ],
 )
-def test_redact_path_cannot_be_dodged_by_path_shape(path: str) -> None:
+def test_redact_path_cannot_be_dodged_by_path_shape(path: str, expected: str) -> None:
     for job_id in (JOB_ID, upload.new_job_id()):
         out = redact_path(path.format(id=job_id))
-        assert job_id not in out
-        assert log_id(job_id) in out
+        assert_id_gone(out, job_id)
+        # The slot after `/api/jobs/` is hashed as one segment, so `<id>.json` there is log_id("<id>.json").
+        assert out == expected.format(
+            h=log_id(job_id),
+            dot=log_id("."),
+            dotdot=log_id(".."),
+            h_json=log_id(job_id + ".json"),
+            h_v1=log_id(job_id + ";v=1"),
+        )
 
 
 def test_logged_path_is_escaped(settings: Settings, caplog: pytest.LogCaptureFixture) -> None:
     """The ASGI path arrives percent-decoded: `%1B%5B31m` is a real ESC by the time it is logged."""
     caplog.set_level(logging.INFO)
     with TestClient(create_app(settings)) as client:
+        client.get(f"/api/jobs/{JOB_ID}/%1B%5B31m")
+        client.get(f"/api/%E2%80%A8%C2%85/jobs/{JOB_ID}%0A")
+        client.get("/api/health/%25/x")
         client.get(f"/api/jobs/%1B%5B31m/{JOB_ID}")
-        client.get(f"/api/jobs/%E2%80%A8%C2%85{JOB_ID}%0A")
-        client.get("/api/jobs/%25/x")
+        client.get(f"/x/{JOB_ID}%41")
     access = [r.getMessage() for r in caplog.records if r.name == "pdf_splitter.access"]
-    assert len(access) == 3
+    assert len(access) == 5
     for line in access:
         assert line.isascii() and line.isprintable()
-        assert JOB_ID not in line
-    assert access[0].startswith(f"GET /api/jobs/%1B%5B31m/{log_id(JOB_ID)} 404 ")
-    assert access[1].startswith(f"GET /api/jobs/%E2%80%A8%C2%85{log_id(JOB_ID)}%0A 404 ")
+        assert_id_gone(line, JOB_ID)
+    assert access[0].startswith(f"GET /api/jobs/{log_id(JOB_ID)}/%1B%5B31m 404 ")
+    assert access[1].startswith(f"GET /api/%E2%80%A8%C2%85/jobs/{log_id(JOB_ID)}%0A 404 ")
     # A literal `%` is re-encoded, so the logged path is unambiguous.
-    assert access[2].startswith("GET /api/jobs/%25/x 404 ")
+    assert access[2].startswith("GET /api/health/%25/x 404 ")
+    # Garbage in the id slot is hashed rather than echoed (escaped) back.
+    assert access[3].startswith(f"GET /api/jobs/{log_id(chr(27) + '[31m')}/{log_id(JOB_ID)} 404 ")
+    # `%41` glues an `A` onto the id after decoding; the whole run is hashed.
+    assert access[4].startswith(f"GET /x/{log_id(JOB_ID + 'A')} 404 ")
 
 
 def test_logs_never_contain_a_job_id(settings: Settings, caplog: pytest.LogCaptureFixture) -> None:
