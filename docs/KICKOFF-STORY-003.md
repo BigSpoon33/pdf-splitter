@@ -7,10 +7,10 @@ PDF per chapter or section.
 
 - **Engine**: `~/Documents/Repos/monograph-splitter` (GitHub `BigSpoon33/pdf-splitter-engine`,
   Python package `monograph_splitter`, still v0.3.1, PyMuPDF 1.28.2). **You write code here**, on
-  branch `feature/web-mode`. `main` = 6fd22fc. On the branch: `742bfbe` (STORY-001) → **`ef828ab`**
-  (STORY-002, detect), both pushed to `origin` and `gitea`. The story file says "branch
+  branch `feature/web-mode`. `main` = 6fd22fc. On the branch: `742bfbe` (STORY-001) → `ef828ab`
+  (STORY-002, detect) → **`4d8d375`** (STORY-002 gate r1 fixes), all pushed to `origin` and `gitea`. The story file says "branch
   `story/STORY-003` off a PUSHED main", but the loop keeps one engine branch, `feature/web-mode`,
-  for every engine story. Stay on it. Tests: `uv run --group dev pytest -q` → baseline **102 passed**
+  for every engine story. Stay on it. Tests: `uv run --group dev pytest -q` → baseline **126 passed**
   (2 pre-existing starlette/httpx warnings).
 - **Web/planning**: `~/Documents/Repos/pdf-splitter`, branch `feature/mvp`. It holds the PRD,
   Architecture, stories and findings. Read `docs/Architecture.md` § "Engine additions
@@ -39,6 +39,8 @@ real book, and it should stay that way.
 - `tests/fixtures.py:headed_book(path)` is the synthetic 2-column book AC-3 names. It has 3 chapters
   (p1 left, p3 full-width, **p4 mid-right-column**), 4 sections, a running header and page numbers,
   and an outline. Its return dict lists `chapters` / `sections` with page and col.
+  `tests/fixtures.py:single_column_book(path)` is its one-column sibling (wrapped 20 pt chapter titles at
+  24 pt leading, roman folios); pass `wrap_gap=24` to detect and `heading_wrap_gap: 24` to the profile.
 
 ## Critical gotchas
 
@@ -62,7 +64,7 @@ real book, and it should stay that way.
    build the entries JSON in a temp dir and run the engine CLI directly with
    `--pdf <Maciocia PDF> --profile maciocia-foundations --entries <tmp>/entries.json --out <tmp>/pre`
    (then `…/post`), once with the pre-change engine (`git stash` is not allowed: use a
-   `git worktree add` of `ef828ab` in the scratchpad) and once with yours, both with `--verify`, then run
+   `git worktree add` of `4d8d375` in the scratchpad) and once with yours, both with `--verify`, then run
    `monograph-splitter-diff`. The PDF path is in the STORY-002 findings. Maciocia is 1319 sheets and
    the index takes a few minutes per run. Per-run index caches live in `--out`, so the temp dirs keep
    it isolated. When running from a path with `uv run --with <path>`, `touch pyproject.toml` first
@@ -131,6 +133,6 @@ real book, and it should stay that way.
 
 ## Final report shape
 
-Per-AC ✅/❌ with file:line, test counts (before 102 / after N), both diff-gate results (synthetic
+Per-AC ✅/❌ with file:line, test counts (before 126 / after N), both diff-gate results (synthetic
 labels + headings, and Maciocia), commits and tag (both repos), and anything STORY-004+ (the web
 worker) should know, especially the `cut_all` summary shape and the name/filename issue.

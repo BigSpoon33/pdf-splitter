@@ -2,7 +2,7 @@
 **Date:** 2026-09-25
 **Status:** done
 
-Engine commit: `ef828ab` on `feature/web-mode` (`BigSpoon33/pdf-splitter-engine`), pushed to `origin` + `gitea`.
+Engine commits: `ef828ab` (story) + `4d8d375` (gate r1 fixes) on `feature/web-mode` (`BigSpoon33/pdf-splitter-engine`), both pushed to `origin` + `gitea`.
 
 ## AC Verification
 - [x] AC-1: `detect.outline_entries(doc, level)` returns `[{name, page, heading, level, y?}]` in outline order, for items at exactly `level` only. `page` is PyMuPDF's 1-based page, which is the web "page" (1-based sheet, engine `sheet_offset=0`). Items with page -1 (broken or external links) or an empty title are dropped. `name` is the whitespace-collapsed title and `heading` is the same title with its leading number stripped (`1`, `1.2.3`, `2.`, `IV.`, `iv)`; words such as "A …" or "I Ching" are kept). The **raw** destination decides `y`, because PyMuPDF reports `/Fit` and `/XYZ null null` as `(0, 0)` and gives a named destination's point unconverted (y up). `y` is present for `/XYZ` with a numeric top, `/FitH`, `/FitBH`, `/FitR` and named destinations that resolve to a non-zero point. It is converted to page coordinates (y down) with `page.transformation_matrix`. — `src/monograph_splitter/detect.py:39` (`_dest_top`), `:95` (`outline_entries`); tests `tests/test_detect.py:37,51,70`
@@ -19,7 +19,7 @@ Engine commit: `ef828ab` on `feature/web-mode` (`BigSpoon33/pdf-splitter-engine`
 **Command:** `cd ~/Documents/Repos/monograph-splitter && uv run --group dev pytest -q`
 **Result:** pass
 ```
-102 passed, 2 warnings in 3.62s        (before: 72 passed; +30 in tests/test_detect.py)
+126 passed, 2 warnings in 5.68s        (before the story: 72; ef828ab: 102; +24 gate-r1 tests in tests/test_detect.py)
 ```
 The 2 warnings are pre-existing starlette/httpx deprecations. `cuts`, `index`, `classify` and `locate_heading` were not touched, so the synthetic manifests cannot change.
 
@@ -27,6 +27,16 @@ The 2 warnings are pre-existing starlette/httpx deprecations. `cuts`, `index`, `
 - `outline_levels`: L1 23 · L2 339 · L3 449 · L4 810 · L5 2250 · L6 1193 · L7 553 · L8 39 · L9 11 (5667 items). Every L1/L2 row has `y` (the book uses `/FitH`), e.g. `{'name': 'Front cover', 'page': 1, 'heading': 'Front cover', 'level': 1, 'y': 0.3}`, `{'name': 'Introduction', 'page': 31, …, 'level': 2, 'y': 50.3}`, `{'name': 'End Notes', 'page': 31, …, 'y': 396.3}`, and at L3 `{'name': 'Nature of Diagnosis by Interrogation', 'page': 366, …, 'y': 144.3}`. L1 is front matter plus parts. The chapters are L2.
 - `heading_candidates` (defaults) takes **13.4 s**, finds body 9.5 pt and **1654 candidates in 15 levels**: 120 / 70 / 58 / 50 / 43.3 / 35 / 29 / 24 (89 = chapter titles) / 21.7 / 21 / 18 / 16 / 15.4 / 14 / 13 (1493 = section and pattern headings, where 12.5 and 13 cluster together). Levels 1–7 are cover and chapter-opener display type. **"Level 1" is not "chapters" on a real book.** The UI needs the `levels` list (size + count) to pick from, and should not default to level 1.
 - MuPDF prints `syntax error: invalid key in dict` 9× on stderr inside `doc.get_toc()` for this file. The noise comes from the file and the output is still complete.
+
+## Gate r1 fixes (`4d8d375`)
+
+Review round 1 (`docs/findings/STORY-002-review.md`) confirmed three findings; all three are fixed forward on `feature/web-mode`, no other behaviour changed, and the review's repro scripts (probe3/4/5, real5) now give the expected output.
+
+1. **Straddling wraps merge** (finding 1, AC-3). `heading_candidates` bucketed wrap lines by the 3-way `col` class, so a wrapped heading with one line wider than `full_width_ratio·W` and one narrower never joined. Lines now bucket by the side of `column_split` their `x0` falls on (`detect.py: _side`), which is `locate_heading`'s grouping (`index.py:229`), and the merged candidate's `col` is `full` if any of its lines is full, else that side. Size tolerance, `wrap_gap` and the 3-line cap are unchanged. Tests: `test_a_wrapped_heading_straddling_the_full_width_threshold_is_one_full_candidate` (wide→narrow and narrow→wide, plus a same-size line on the other side inside `wrap_gap` that must NOT join), and a genuinely one-column synthetic book, `tests/fixtures.py: single_column_book` (US Letter, 72 pt margin, 20 pt chapter titles wrapped at 24 pt leading, 13 pt sections, 14 pt running header, roman folios `i`/`ii`/`iii`): `test_single_column_book_chapters_are_one_candidate_each_under_both_geometries` (default and `single_column` geometry; every chapter `full`) and `test_single_column_candidates_open_a_book_and_every_heading_is_located` (round-trip with `profile_from_dict({"single_column": True, "heading_wrap_gap": 24})`, 0 `heading-not-found`). Real-book check (read-only): Maciocia with `wrap_gap=30` — ch. 30 p480 "Identification of Patterns according to the Eight Principles" and ch. 31 p498 "… according to Qi–Blood–Body Fluids" are ONE candidate each (`col` full), and the Book plans 480–497 / 498–518 instead of the one-sheet sliver.
+2. **Roman page numbers only at the page edge** (finding 2, AC-3/AC-6). `_PAGE_NUMBER`'s `[ivxlcdm]+` swallowed any word made of those letters. Now `_DIGIT_PAGE` (`12`, `- 12 -`, `Page 3`, `— 7 —`) excludes anywhere on the page; `_ROMAN_PAGE` excludes only a **well-formed** numeral (`m{0,3}(cm|cd|d?c{0,3})(xc|xl|l?x{0,3})(ix|iv|v?i{0,3})`, optional `page`) that sits in the page-edge strip `_running` uses (`_at_edge`: `max(band, 0.12·H)` at either end). Tests: the A–Z glossary keeps all 26 letters; `Dill`/`Mild`/`Civil`/`Mid`/`Mill`/`Vivid`/`Ill`/`IIII`/`Fennel` survive even in the footer strip; `XIV`/`C`/`Mix`/`iv` mid-page are headings; `xiv`/`XIV`/`- iv -`/`Page iv` in the footer and `mcmxcix` in the header are still excluded. The old test placed `xiv` mid-page at 20 pt and expected exclusion; under the new rule that is a heading, so the roman cases moved to the page edge.
+3. **Indirect outline destinations carry `y`** (finding 3, AC-1). `xref_get_key` returns kind `"xref"` for `/D 16 0 R` / `/Dest 16 0 R`; `_dest_value` follows the reference (bounded at `MAX_REF_HOPS = 4`) to the destination array, or to a dict holding it under `/D`, and hands it to the existing array path. Test: `test_outline_y_follows_an_indirect_destination_to_the_same_point_as_a_direct_array` — `/A <</S/GoTo/D n 0 R>>` and `/Dest n 0 R` give `y == 200.0`, the same as the direct `/XYZ` control. Note: for the dict-wrapped form PyMuPDF's `get_toc` itself reports page -1, so `_outline` drops that item before `_dest_top` runs; the walker handles the dict form anyway for the `/A` chains PyMuPDF does resolve.
+
+Handoff for STORY-003 from this round: detection's `wrap_gap` and the profile's `heading_wrap_gap` must be the **same value** (the single-column round-trip test passes 24 to both). A web setting for it should feed both calls. The README's `detect` section documents the three rules.
 
 ## Bugs Found
 - None in the new code.
