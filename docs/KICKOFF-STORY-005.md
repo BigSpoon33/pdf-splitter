@@ -151,3 +151,24 @@ subprocess-runner pattern for the worker). Cite the tests as the contract, not h
   `3da3255`; keep using `StoreDep`. Its contracts: `tests/test_store.py::test_connection_survives_cross_thread_close`,
   `::test_close_always_drops_the_connection` and `tests/test_health.py::test_concurrent_health_requests_all_succeed`
   (23 tests now). Your upload route should be exercised by a similar concurrent-requests test.
+
+## Previous attempt (RETRY — read this first)
+
+Attempt 1 (`b84c3c4`, docs `b3ae498`) passed everything except 3 CONFIRMED findings — see
+`docs/findings/STORY-005-review.md` (finding 2 is refuted/rescheduled — do NOT implement it).
+Fix forward, one commit on feature/mvp:
+`fix: STORY-005 - gate r1: ids redacted in any path shape, log paths escaped, preflight argv hardened`
+1. **Redaction that can't be dodged** (access_log.py): don't rely on the route prefix. Replace EVERY
+   path segment that looks like a job id (`[A-Za-z0-9_-]{22}` — the token_urlsafe(16) shape) with
+   `log_id(segment)`, anywhere in the path, regardless of case/extra slashes/dot segments/absolute
+   form. Tests: all 7 variants from the review (`//api/jobs/<id>`, `/api/jobs//<id>`,
+   `/api//jobs/<id>`, `/API/jobs/<id>`, `/api/jobs/./<id>`, `/api/jobs/../jobs/<id>`,
+   `/http://h:1/api/jobs/<id>`) → raw id absent from the log line.
+2. **Escape what's logged**: after redaction, log `urllib.parse.quote(path, safe="/:@!$&'()*+,;=-._~")`
+   (or equivalent) so control chars, ESC, U+2028/U+0085 appear percent-encoded. Test with
+   `%1B%5B31m` and `%E2%80%A8` → no raw control/separator chars in the record.
+3. **Preflight argv**: `Settings` resolves `jobs_dir` to an absolute path (validator), AND the
+   preflight command puts `--` before the path. Test: `jobs_dir=Path(".")` (chdir to tmp) + a forced
+   id starting with `-` → 201.
+Keep `run_preflight`'s shape (STORY-006 copies it) and mention the `--` rule in the findings'
+"pattern for STORY-006" note. Update STORY-005 findings ("Gate r1 fixes") and KICKOFF-STORY-006.
