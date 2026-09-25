@@ -1,9 +1,8 @@
 {
   "mode": "auto",
-  "active_story": "STORY-003",
+  "active_story": "STORY-004",
   "loop_phase": "implement",
   "queue": [
-    "STORY-003",
     "STORY-004",
     "STORY-005",
     "STORY-006",
@@ -20,12 +19,14 @@
   },
   "completed": [
     "STORY-001",
-    "STORY-002"
+    "STORY-002",
+    "STORY-003"
   ],
   "attempts": {
     "STORY-001": 1,
     "STORY-002": 3,
-    "STORY-003": 2
+    "STORY-003": 2,
+    "STORY-004": 1
   },
   "failed": {},
   "consecutive_failures": 0,
@@ -34,13 +35,13 @@
     "web": "pdf-splitter feature/mvp"
   },
   "baseline": {
-    "engine_tests": "133 passed after STORY-002 (8c12b3f)",
+    "engine_tests": "150 passed at v0.4.1 (8e52cc3)",
     "web_tests": "none yet"
   },
   "run": {
     "started": "2026-09-25",
     "runner": "in-session background subagent (tmux --dangerously-skip-permissions route denied by the auto-mode classifier)",
-    "active": "STORY-003 (retry)"
+    "active": "STORY-004"
   },
   "last_updated": "2026-09-25",
   "exceptions": {
@@ -48,5 +49,6 @@
   },
   "followups": [
     "detection tuning: 4+-line wrapped headings dropped (MAX_WRAP_LINES), size-scaled default wrap_gap feeding heading_wrap_gap (STORY-009 settings), inline big glyph promotes body line \u2014 see STORY-002-review.md r3"
-  ]
+  ],
+  "engine_release": "v0.4.1 (8e52cc3) on origin+gitea; engine main still 6fd22fc \u2014 ff-merge feature/web-mode at sprint end"
 }
