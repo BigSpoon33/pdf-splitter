@@ -1,6 +1,6 @@
 # STORY-006: Web: worker runner, sandbox, analyze task
 
-> **Status:** Pending
+> **Status:** Done (2026-09-25)
 > **Size:** M
 > **Date:** 2026-09-25
 > **Architecture ref:** `docs/Architecture.md#worker`
@@ -97,11 +97,11 @@ feat: STORY-006 - sandboxed worker runner and analyze task (outline + heading ca
 
 ## Status
 
-**Pending**
+**Done** (2026-09-25)
 
-- [ ] AC-1
-- [ ] AC-2
-- [ ] AC-3
-- [ ] AC-4
-- [ ] AC-5
-- [ ] AC-6
+- [x] AC-1
+- [x] AC-2
+- [x] AC-3
+- [x] AC-4
+- [x] AC-5
+- [x] AC-6
