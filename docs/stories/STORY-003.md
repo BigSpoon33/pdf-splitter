@@ -1,6 +1,6 @@
 # STORY-003: Engine: Book.cut_all with progress + v0.4.0
 
-> **Status:** Pending
+> **Status:** Done (2026-09-25)
 > **Size:** S
 > **Date:** 2026-09-25
 > **Architecture ref:** `docs/Architecture.md#Engine additions (monograph-splitter 0.4.0)`
@@ -101,9 +101,9 @@ feat: STORY-003 - Book.cut_all with progress; CLI on it; web mode documented (0.
 
 ## Status
 
-**Pending**
+**Done** — 2026-09-25 (engine `c8935d2` on `feature/web-mode`, tag `v0.4.0` on `origin` + `gitea`; findings `docs/findings/STORY-003-findings.md`)
 
-- [ ] AC-1
-- [ ] AC-2
-- [ ] AC-3
-- [ ] AC-4
+- [x] AC-1
+- [x] AC-2
+- [x] AC-3
+- [x] AC-4
