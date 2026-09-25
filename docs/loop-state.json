@@ -1,9 +1,8 @@
 {
   "mode": "auto",
-  "active_story": "STORY-004",
+  "active_story": "STORY-005",
   "loop_phase": "implement",
   "queue": [
-    "STORY-004",
     "STORY-005",
     "STORY-006",
     "STORY-007",
@@ -20,13 +19,15 @@
   "completed": [
     "STORY-001",
     "STORY-002",
-    "STORY-003"
+    "STORY-003",
+    "STORY-004"
   ],
   "attempts": {
     "STORY-001": 1,
     "STORY-002": 3,
     "STORY-003": 2,
-    "STORY-004": 2
+    "STORY-004": 2,
+    "STORY-005": 1
   },
   "failed": {},
   "consecutive_failures": 0,
@@ -36,12 +37,12 @@
   },
   "baseline": {
     "engine_tests": "150 passed at v0.4.1 (8e52cc3)",
-    "web_tests": "none yet"
+    "web_tests": "23 passed after STORY-004 (3da3255)"
   },
   "run": {
     "started": "2026-09-25",
     "runner": "in-session background subagent (tmux --dangerously-skip-permissions route denied by the auto-mode classifier)",
-    "active": "STORY-004 (retry)"
+    "active": "STORY-005"
   },
   "last_updated": "2026-09-25",
   "exceptions": {
