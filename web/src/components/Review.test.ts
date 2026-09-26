@@ -17,7 +17,7 @@ const cut: LoadManifest = async () => ROWS
 const VIEW: SectionPlan = { pages: [3, 4], startCut: null, startCol: 'full', endCut: 400, endCol: 'right', flags: [], notes: [], rects: [[4, [254.5, 400, 522.7, 757.6]]] }
 
 /** Renders with fake loaders; returns the DEFAULT save mock (a test that passes its own keeps its own handle). */
-function mount(over: { jobState?: 'review' | 'done'; save?: Save; loadPlan?: LoadPlan; loadManifest?: LoadManifest } = {}) {
+function mount(over: { jobState?: 'review' | 'done'; save?: Save; loadPlan?: LoadPlan; loadManifest?: LoadManifest; cuts?: number } = {}) {
   const save = vi.fn<Save>(async (_id, plan) => plan)
   const loadAnalysis = vi.fn(async () => analysisOf())
   const loadPlan = vi.fn<LoadPlan>(async () => planOf())
@@ -35,6 +35,8 @@ function mount(over: { jobState?: 'review' | 'done'; save?: Save; loadPlan?: Loa
     loadSheet,
     save: over.save ?? save,
     debounceMs: 20,
+    retryMs: 5,
+    cuts: over.cuts ?? 0,
   })
   return { save, loadAnalysis, loadPlan, loadManifest, loadSectionPlan, loadSheet, ...utils }
 }
@@ -142,6 +144,22 @@ describe('Review', () => {
     await vi.waitFor(() => expect(badges()).toContain('Heading not found on its page'))
     expect(badges()).toEqual(['Heading not found on its page'])
     expect(screen.getByText(STALE)).toBeTruthy()
+  })
+
+  it('a cut whose manifest cannot be read twice keeps the error until Retry succeeds; the old rows are gone at once (gate r1 F2)', async () => {
+    const { loadManifest, rerender } = mount({ jobState: 'done', loadManifest: cut })
+    await vi.waitFor(() => expect(screen.getByRole('link', { name: '001 - 1 Foundations of Testing.pdf' })).toBeTruthy())
+    loadManifest.mockRejectedValue(new ApiError(502, 'internal'))
+    await rerender({ cuts: 1 })
+    expect(screen.queryByRole('link', { name: '001 - 1 Foundations of Testing.pdf' })).toBeNull()
+    await vi.waitFor(() => expect(loadManifest).toHaveBeenCalledTimes(3)) // mount, the cut, the automatic retry
+    await vi.waitFor(() => expect(screen.getByRole('button', { name: 'Retry' })).toBeTruthy())
+    expect(screen.queryByRole('link', { name: 'Download all (ZIP)' })).toBeNull()
+    loadManifest.mockResolvedValue([rowOf(0, '1 Foundations, Cut Again')])
+    await fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+    await vi.waitFor(() => expect(screen.getByRole('link', { name: '001 - 1 Foundations, Cut Again.pdf' })).toBeTruthy())
+    expect(loadManifest).toHaveBeenCalledTimes(4)
+    expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull()
   })
 
   it("shows the load error's message in place", async () => {

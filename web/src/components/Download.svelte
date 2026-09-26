@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from 'svelte'
   import { ApiError, isGone, postCut, resultUrl, sectionUrl, type CreatedJob, type JobStatus, type ManifestRow } from '../lib/api'
   import type { PlanEditor } from '../lib/editor.svelte'
   import { messageFor } from '../lib/errors'
@@ -12,24 +13,44 @@
     job: JobStatus | null
     /** The last cut's rows; null before any cut. They stay listed after an edit — the files are valid until the next cut. */
     results: ManifestRow[] | null
+    /** The last cut's rows could not be read; `onretry` asks again. */
+    resultsError?: string | null
+    /** A refresh is in flight (the automatic retry, or the button's). */
+    retrying?: boolean
     /** The files follow an older plan than the one on screen. */
     stale: boolean
     cut?: (id: string) => Promise<CreatedJob>
     /** The cut was queued: the page starts polling again to follow it. */
     oncut?: () => void
+    onretry?: () => void
     ongone?: (err: ApiError) => void
   }
 
-  let { id, editor, job, results, stale, cut = postCut, oncut, ongone }: Props = $props()
+  let { id, editor, job, results, resultsError = null, retrying = false, stale, cut = postCut, oncut, onretry, ongone }: Props = $props()
 
   let posting = $state(false)
   let error = $state<string | null>(null)
+  /**
+   * The status this click's cut has yet to show up in: Split stays disabled until the poll reports the cut, so the
+   * gap between the 202 and the first poll cannot take a second click (gate r1).
+   */
+  let requestedOn = $state<JobStatus | null | undefined>(undefined)
 
   const cutting = $derived(job?.kind === 'cut' && (job.state === 'queued' || job.state === 'running'))
   // A failed cut leaves the job outside the states a cut may start from (`EDITABLE`, routes/common.py): no retry here.
   const failed = $derived(job?.kind === 'cut' && job.state === 'failed')
   const count = $derived(editor.plan.sections.length)
-  const disabled = $derived(posting || cutting || failed || editor.saving || editor.gone || count === 0)
+  const requested = $derived(requestedOn !== undefined)
+  const disabled = $derived(posting || requested || cutting || failed || editor.saving || editor.gone || count === 0)
+
+  // Each status is a new object; the first one after the click that reports a cut is ours, and any split error
+  // that came before it is history.
+  $effect(() => {
+    const now = job
+    if (now === untrack(() => requestedOn)) return
+    error = null
+    if (now?.kind === 'cut' && now.state !== 'review') requestedOn = undefined
+  })
 
   async function split() {
     if (disabled) return
@@ -44,7 +65,17 @@
         error = 'Fix the section list first: the plan on screen has not been saved.'
         return
       }
-      await cut(id)
+      requestedOn = job
+      try {
+        await cut(id)
+      } catch (err) {
+        // `busy` means a cut is already running — ours, from a click the answer to which never arrived — so it is
+        // followed like any other; every other refusal frees the button for another try.
+        if (!(err instanceof ApiError && err.code === 'busy')) {
+          requestedOn = undefined
+          throw err
+        }
+      }
       // The cut follows the plan as saved now; only edits from here on make its files stale.
       editor.edited = false
       oncut?.()
@@ -80,6 +111,11 @@
       <div class="bar"><span style:width="{Math.min(job.progress / job.total, 1) * 100}%"></span></div>
     {/if}
   </div>
+{:else if resultsError}
+  <p class="error" role="alert">
+    <span>The list of your files could not be loaded. {resultsError}</span>
+    <button type="button" onclick={() => onretry?.()} disabled={retrying}>{retrying ? 'Retrying…' : 'Retry'}</button>
+  </p>
 {:else if results && results.length}
   <div class="results">
     <h3>{stale ? 'Files from the last cut' : 'Your files'}</h3>
@@ -116,6 +152,12 @@
   }
   .muted {
     color: var(--muted);
+  }
+  p.error {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.75rem;
   }
   .progress {
     margin-top: 1rem;

@@ -1,5 +1,5 @@
 import { fireEvent, render, screen } from '@testing-library/svelte'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ApiError, type JobStatus, type ManifestRow, type Plan } from '../lib/api'
 import { MESSAGES } from '../lib/errors'
 import { analysisOf, planOf, rowOf } from '../lib/fixtures'
@@ -19,6 +19,7 @@ function status(over: Partial<JobStatus>): JobStatus {
     message: null,
     error_code: null,
     expires_at: new Date(Date.now() + 23.5 * HOUR).toISOString(),
+    seconds_left: 23.5 * 3600,
     filename: 'My Book.pdf',
     pages: 6,
     ...over,
@@ -43,6 +44,8 @@ function fakeApi(start: Partial<JobStatus> = {}) {
   let deleted = false
   const gone = () => new ApiError(410, 'expired')
   const api = {
+    /** What the next cut writes. */
+    rows: ROWS,
     load: vi.fn(async () => {
       if (deleted) throw gone()
       const next = phases.shift()
@@ -62,7 +65,7 @@ function fakeApi(start: Partial<JobStatus> = {}) {
         { ...row, state: 'running', progress: 1, total: 3, message: 'Cutting sections' },
         { ...row, state: 'done', progress: 3, total: 3, message: null },
       ]
-      manifest = ROWS
+      manifest = api.rows
       return { id: ID, state: 'queued' as const }
     }),
     loadManifest: vi.fn(async () => {
@@ -94,10 +97,15 @@ function mount(api: ReturnType<typeof fakeApi>, confirmDelete = vi.fn(() => true
       save: api.save,
       cut: api.cut,
       debounceMs: 10,
+      retryMs: 300,
     },
-    expiry: { remove: api.remove, confirmDelete },
+    expiry: { remove: api.remove, confirmDelete, graceMs: 5 },
   })
 }
+
+afterEach(() => {
+  vi.useRealTimers()
+})
 
 const stateShown = () => document.querySelector('[data-state]')?.getAttribute('data-state')
 const splitButton = () => screen.getByRole('button', { name: /^Split into/ })
@@ -193,9 +201,59 @@ describe('JobPage', () => {
     expect(screen.queryByText(MESSAGES.expired, { selector: '.error-inline' })).toBeNull()
   })
 
-  it('an expires_at already past is the deleted screen (AC-4)', async () => {
-    const api = fakeApi({ expires_at: new Date(Date.now() - 1000).toISOString() })
+  it.each([25, -25])("the visitor's clock %i h off the server's: the countdown is the server's count and the page stays (gate r1 F1)", async (skewHours) => {
+    // The row (and its expires_at) is the server's; only then does the visitor's Date go wrong.
+    const api = fakeApi()
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(Date.now() + skewHours * HOUR)
+    mount(api)
+    await vi.waitFor(() => expect(screen.getByText('Files deleted in 23 h.')).toBeTruthy())
+    await vi.waitFor(() => expect(splitButton()).toBeTruthy())
+    await new Promise((r) => setTimeout(r, 30))
+    expect(goneScreen()).toBeUndefined()
+    expect(screen.getByText('Files deleted in 23 h.')).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Delete now' })).toBeTruthy()
+  })
+
+  it("the count running out asks the API once more: a fresh count keeps the page, it is never the clock's call (gate r1 F1)", async () => {
+    const api = fakeApi({ seconds_left: 0, expires_at: new Date(Date.now() - 1000).toISOString() })
+    api.load.mockImplementationOnce(async () => status({ seconds_left: 0 })).mockImplementation(async () => status({ seconds_left: 3600 }))
+    mount(api)
+    await vi.waitFor(() => expect(screen.getByText('Files deleted in 1 h.')).toBeTruthy())
+    expect(api.load).toHaveBeenCalledTimes(2)
+    await new Promise((r) => setTimeout(r, 30))
+    expect(api.load).toHaveBeenCalledTimes(2)
+    expect(goneScreen()).toBeUndefined()
+  })
+
+  it("the count running out asks the API once more: its 410 is the deleted screen (AC-4, gate r1 F1)", async () => {
+    const api = fakeApi({ seconds_left: 0 })
+    api.load.mockImplementationOnce(async () => status({ seconds_left: 0 })).mockRejectedValue(new ApiError(410, 'expired'))
     mount(api)
     await vi.waitFor(() => expect(goneScreen()).toBe('expired'))
+    expect(api.load).toHaveBeenCalledTimes(2)
+  })
+
+  it("a results refresh that fails after a re-cut shows an error and retries by itself; the previous cut's files are never listed (gate r1 F2)", async () => {
+    const api = fakeApi()
+    mount(api)
+    await vi.waitFor(() => expect(splitButton()).toBeTruthy())
+    await fireEvent.click(splitButton())
+    await vi.waitFor(() => expect(screen.getByRole('link', { name: '001 - 1 Foundations of Testing.pdf' })).toBeTruthy())
+    await vi.waitFor(() => expect(splitButton().hasAttribute('disabled')).toBe(false))
+
+    api.rows = [rowOf(0, '1 Foundations of Testing'), rowOf(1, '2 A Different Second Chapter')]
+    api.loadManifest.mockImplementationOnce(async () => Promise.reject(new ApiError(502, 'internal')))
+    await fireEvent.click(splitButton())
+    await vi.waitFor(() => expect(screen.getByRole('alert').textContent).toContain(MESSAGES.internal))
+    expect(stateShown()).toBe('done')
+    expect(screen.queryByRole('link', { name: 'Download all (ZIP)' })).toBeNull()
+    expect(screen.queryByRole('link', { name: '002 - 2 Chapter Two: The Middle of the Synthetic Book.pdf' })).toBeNull()
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeTruthy()
+
+    await vi.waitFor(() => expect(screen.getByRole('link', { name: '002 - 2 A Different Second Chapter.pdf' })).toBeTruthy(), { timeout: 2000 })
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(screen.getByRole('heading', { name: 'Your files' })).toBeTruthy()
+    expect(api.loadManifest).toHaveBeenCalledTimes(4) // mount (409), cut 1, cut 2 (502), the automatic retry
   })
 })

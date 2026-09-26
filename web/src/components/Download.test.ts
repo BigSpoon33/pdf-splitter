@@ -19,6 +19,7 @@ function status(over: Partial<JobStatus>): JobStatus {
     message: null,
     error_code: null,
     expires_at: '2026-09-26T12:00:00+00:00',
+    seconds_left: 84_600,
     filename: 'My Book.pdf',
     pages: 6,
     ...over,
@@ -31,23 +32,35 @@ const ROWS = [
   rowOf(2, '3 Closing Chapter', ['span-clamped']),
 ]
 
-function mount(over: { job?: JobStatus | null; results?: typeof ROWS | null; stale?: boolean; cut?: (id: string) => Promise<CreatedJob>; save?: (plan: Plan) => Promise<Plan> } = {}) {
+function mount(
+  over: {
+    job?: JobStatus | null
+    results?: typeof ROWS | null
+    resultsError?: string | null
+    stale?: boolean
+    cut?: (id: string) => Promise<CreatedJob>
+    save?: (plan: Plan) => Promise<Plan>
+  } = {},
+) {
   const save = vi.fn(over.save ?? (async (plan: Plan) => plan))
   const editor = new PlanEditor(planOf(), save, { debounceMs: 10_000 })
   const cut = vi.fn(over.cut ?? (async () => ({ id: ID, state: 'queued' as const })))
   const oncut = vi.fn()
+  const onretry = vi.fn()
   const ongone = vi.fn()
   const utils = render(Download, {
     id: ID,
     editor,
     job: over.job === undefined ? status({}) : over.job,
     results: over.results ?? null,
+    resultsError: over.resultsError ?? null,
     stale: over.stale ?? false,
     cut,
     oncut,
+    onretry,
     ongone,
   })
-  return { editor, save, cut, oncut, ongone, ...utils }
+  return { editor, save, cut, oncut, onretry, ongone, ...utils }
 }
 
 const splitButton = () => screen.getByRole('button', { name: /^Split into/ }) as HTMLButtonElement
@@ -73,16 +86,57 @@ describe('Download', () => {
     expect(cut).not.toHaveBeenCalled()
   })
 
-  it('a busy cut is shown; a 410 from the cut hands the page to the deleted screen', async () => {
-    const busy = mount({ cut: async () => Promise.reject(new ApiError(409, 'busy')) })
+  it('a busy answer to our own cut is not an error: the cut is followed like any other (gate r1 F3)', async () => {
+    const { oncut } = mount({ cut: async () => Promise.reject(new ApiError(409, 'busy')) })
     await fireEvent.click(splitButton())
-    await vi.waitFor(() => expect(screen.getByRole('alert').textContent).toBe(MESSAGES.busy))
-    busy.unmount()
+    await vi.waitFor(() => expect(oncut).toHaveBeenCalledTimes(1))
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(splitButton().disabled).toBe(true)
+  })
 
+  it('a 410 from the cut hands the page to the deleted screen', async () => {
     const { ongone } = mount({ cut: async () => Promise.reject(new ApiError(410, 'expired')) })
     await fireEvent.click(splitButton())
     await vi.waitFor(() => expect(ongone).toHaveBeenCalledTimes(1))
     expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  it('one split per click: Split stays disabled from the click until the poll reports the cut, so a second click posts nothing (gate r1 F3)', async () => {
+    const { cut, oncut, rerender } = mount({ job: status({ state: 'done', kind: 'cut' }), results: ROWS })
+    await fireEvent.click(splitButton())
+    await vi.waitFor(() => expect(oncut).toHaveBeenCalledTimes(1))
+    // The 202 is back, no poll has answered yet: this is the gap a double-click used to fall into.
+    expect(splitButton().disabled).toBe(true)
+    await fireEvent.click(splitButton())
+    await fireEvent.click(splitButton())
+    expect(cut).toHaveBeenCalledTimes(1)
+    expect(screen.queryByRole('alert')).toBeNull()
+
+    await rerender({ job: status({ state: 'queued', kind: 'cut' }) })
+    expect(splitButton().disabled).toBe(true)
+    await rerender({ job: status({ state: 'done', kind: 'cut' }) })
+    expect(splitButton().disabled).toBe(false)
+    await fireEvent.click(splitButton())
+    await vi.waitFor(() => expect(cut).toHaveBeenCalledTimes(2))
+  })
+
+  it('a split refused by the API frees the button again, and the message goes once a later status arrives (gate r1 F3)', async () => {
+    const { cut, rerender } = mount({ cut: async () => Promise.reject(new ApiError(500, 'internal')) })
+    await fireEvent.click(splitButton())
+    await vi.waitFor(() => expect(screen.getByRole('alert').textContent).toBe(MESSAGES.internal))
+    expect(splitButton().disabled).toBe(false)
+    await fireEvent.click(splitButton())
+    await vi.waitFor(() => expect(cut).toHaveBeenCalledTimes(2))
+    await rerender({ job: status({ state: 'review', kind: 'analyze' }) })
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  it('a results list that could not be loaded is an error with Retry, never the previous files (gate r1 F2)', async () => {
+    const { onretry } = mount({ job: status({ state: 'done', kind: 'cut' }), results: null, resultsError: MESSAGES.internal })
+    expect(screen.queryByRole('link', { name: 'Download all (ZIP)' })).toBeNull()
+    expect(screen.getByRole('alert').textContent).toContain(MESSAGES.internal)
+    await fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+    expect(onretry).toHaveBeenCalledTimes(1)
   })
 
   it('while cutting: Split is disabled, progress is per section, the old results are hidden (AC-1)', () => {

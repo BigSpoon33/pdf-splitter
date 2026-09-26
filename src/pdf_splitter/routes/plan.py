@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Body
@@ -26,6 +27,13 @@ from .common import (
 router = APIRouter()
 
 
+def seconds_left(job: dict[str, Any], now: datetime | None = None) -> int:
+    """Time until the janitor's deadline, by the server's clock: the SPA counts down from this, since a visitor's
+    clock can be hours off `expires_at` and only a 410 from here may declare a job gone."""
+    remaining = datetime.fromisoformat(job["expires_at"]) - (now or datetime.now(UTC))
+    return max(0, int(remaining.total_seconds()))
+
+
 def status_of(job: dict[str, Any]) -> dict[str, Any]:
     """The polling shape (Architecture § API Interface). `error_code` only with `failed`: a queued or running
     row can carry the worker's re-queue marker, which is not an error. `queue_position` is STORY-012's."""
@@ -39,6 +47,7 @@ def status_of(job: dict[str, Any]) -> dict[str, Any]:
         "message": job["message"],
         "error_code": job["error_code"] if job["state"] == "failed" else None,
         "expires_at": job["expires_at"],
+        "seconds_left": seconds_left(job),
         "filename": job["filename"],
         "pages": job["pages"],
     }

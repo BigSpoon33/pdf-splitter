@@ -1,8 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { formatBytes, timeLeft } from './expiry'
 
-const NOW = Date.parse('2026-09-25T12:00:00Z')
-const at = (ms: number) => new Date(NOW + ms).toISOString()
 const MIN = 60_000
 
 describe('timeLeft', () => {
@@ -13,17 +11,12 @@ describe('timeLeft', () => {
     [MIN, '1 min'],
     [59_000, 'less than a minute'],
   ])('%i ms → %s', (ms, text) => {
-    expect(timeLeft(at(ms), NOW)).toBe(text)
+    expect(timeLeft(ms)).toBe(text)
   })
 
-  it('is null once the time has passed, or for a value that is not a date', () => {
-    expect(timeLeft(at(0), NOW)).toBeNull()
-    expect(timeLeft(at(-MIN), NOW)).toBeNull()
-    expect(timeLeft('soon', NOW)).toBeNull()
-  })
-
-  it('reads the API offset form (`+00:00`)', () => {
-    expect(timeLeft('2026-09-26T11:30:00+00:00', NOW)).toBe('23 h')
+  it('never claims the files are gone: at and past zero it is the server\'s 410 that says so', () => {
+    expect(timeLeft(0)).toBe('less than a minute')
+    expect(timeLeft(-MIN)).toBe('less than a minute')
   })
 })
 

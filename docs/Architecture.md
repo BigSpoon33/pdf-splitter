@@ -194,7 +194,8 @@ rejects `page ∉ [1, pages]` (the engine's `cuts.plan` raises IndexError past t
 ```
 POST   /api/jobs                       multipart file=<pdf>
   201: {id, state:"queued"}            400 not_pdf|encrypted|no_text_layer · 413 too_large|too_many_pages · 429 rate_limited · 503 disk_full
-GET    /api/jobs/{id}                  {id, state, kind, progress, total, queue_position, message, error_code, expires_at, filename, pages}
+GET    /api/jobs/{id}                  {id, state, kind, progress, total, queue_position, message, error_code, expires_at, seconds_left, filename, pages}
+                                       seconds_left = whole seconds until expires_at by the SERVER clock (0 at the deadline, never negative); the SPA counts down from it and only a 404/410 declares a job gone
                                        404 unknown · 410 expired
 GET    /api/jobs/{id}/analysis         Analysis (409 until state ≥ review)
 GET    /api/jobs/{id}/plan             Plan (default = suggested source, no overrides)

@@ -23,3 +23,12 @@ export const PREVIEW_DPI = 110 as const
 
 /** The "files deleted in 23 h" line counts in whole minutes at best, so it re-reads the clock this often. */
 export const EXPIRY_TICK_MS = 60_000
+
+/**
+ * Once the countdown from `seconds_left` reaches zero the page asks the API once more; this margin lets the server's
+ * whole-second deadline pass first, and paces the re-asks if it keeps answering 200 with nothing left.
+ */
+export const EXPIRY_GRACE_MS = 1500
+
+/** A results refresh that fails after a cut is retried once by itself this long later, before the visitor has to. */
+export const MANIFEST_RETRY_MS = 2000

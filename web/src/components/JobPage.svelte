@@ -19,9 +19,12 @@
   let { id, load = getJob, review = {}, expiry = {}, pollMs }: Props = $props()
 
   let job = $state<Status | null>(null)
+  /** When `job` arrived, on the monotonic clock: the expiry countdown runs from the server's count anchored here. */
+  let receivedAt = $state(0)
   /**
-   * The page's single "this job is gone" signal: the poll, a save, a preview, a cut, the expiry clock and "Delete now"
-   * all feed it, and the first reason wins — the deleted screen then replaces everything, error lines included.
+   * The page's single "this job is gone" signal: the poll, a save, a preview, a cut and "Delete now" all feed it, and
+   * the first reason wins — the deleted screen then replaces everything, error lines included. The expiry countdown
+   * never does: when it runs out the page polls once more, and only the API's 404/410 counts (gate r1).
    */
   let gone = $state<GoneReason | null>(null)
   /** Bumped to make the status poll run again after a terminal state (a cut queued, a save that left `done`). */
@@ -40,6 +43,7 @@
 
   function onstatus(next: Status) {
     job = next
+    receivedAt = performance.now()
     const active = next.state === 'queued' || next.state === 'running'
     if (next.state === 'review' || next.state === 'done') {
       reviewable = true
@@ -68,9 +72,10 @@
   {#if job}
     <Expiry
       {id}
-      expiresAt={job.expires_at}
+      secondsLeft={job.seconds_left}
+      {receivedAt}
       ondeleted={() => goneWith('deleted')}
-      onexpired={() => goneWith('expired')}
+      onexpired={() => resume++}
       {...expiry}
     />
   {/if}

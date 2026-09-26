@@ -29,6 +29,7 @@ from pdf_splitter.config import Settings
 from pdf_splitter.files import read_json
 from pdf_splitter.routes import download as download_routes
 from pdf_splitter.routes import preview as preview_routes
+from pdf_splitter.routes.plan import seconds_left
 from pdf_splitter.store import Store, log_id
 from pdf_splitter.worker.analyze import DEFAULT_SETTINGS
 from pdf_splitter.worker.cut import MANIFEST, zip_entry
@@ -37,7 +38,7 @@ from pdf_splitter.worker.runner import Runner
 JSON = {"content-type": "application/json"}
 STATUS_KEYS = {
     "id", "state", "kind", "progress", "total", "queue_position", "message", "error_code", "expires_at",
-    "filename", "pages",
+    "seconds_left", "filename", "pages",
 }
 SECTION_PLAN_KEYS = {"pages", "startCut", "startCol", "endCut", "endCol", "flags", "notes", "rects"}
 
@@ -140,6 +141,7 @@ def test_job_status_shape_hides_the_requeue_marker_and_shows_failures(settings: 
         assert body["id"] == DASH_ID and body["state"] == "review" and body["kind"] == "analyze"
         assert (body["pages"], body["filename"], body["queue_position"]) == (6, "My Book.pdf", None)
         assert body["error_code"] is None and body["expires_at"] > datetime.now(UTC).isoformat()
+        assert 23 * 3600 < body["seconds_left"] <= 24 * 3600
 
         store = Store(settings.db_path)
         store.set_state(DASH_ID, "queued", error_code="requeued")        # the worker's sweep marker
@@ -152,6 +154,23 @@ def test_job_status_shape_hides_the_requeue_marker_and_shows_failures(settings: 
         body = client.get(f"/api/jobs/{DASH_ID}").json()
         assert (body["state"], body["error_code"], body["message"]) == ("failed", "resources", "The PDF needed more memory.")
         store.close()
+
+
+def test_seconds_left_counts_down_on_the_servers_clock(settings: Settings, seeded: Path) -> None:
+    """Gate r1 of STORY-011: the SPA must not compare `expires_at` with the visitor's clock, so the status carries
+    the remaining time as the server measures it, and it is 0 (never negative) right at the deadline."""
+    store = Store(settings.db_path)
+    store.create_job(job_id=OTHER_ID, ip_hash="h", filename="old.pdf", bytes=1, pages=1, ttl_hours=24,
+                     now=datetime.now(UTC) - timedelta(hours=23, minutes=30))
+    store.close()
+    with api(settings) as client:
+        body = client.get(f"/api/jobs/{OTHER_ID}").json()
+        assert 29 * 60 < body["seconds_left"] <= 30 * 60
+        assert body["seconds_left"] == int((datetime.fromisoformat(body["expires_at"]) - datetime.now(UTC)).total_seconds())
+    job = Store(settings.db_path).get_job(OTHER_ID)
+    assert job is not None
+    assert seconds_left(job, now=datetime.fromisoformat(job["expires_at"])) == 0
+    assert seconds_left(job, now=datetime.fromisoformat(job["expires_at"]) + timedelta(days=1)) == 0
 
 
 def test_unknown_deleted_and_expired_jobs(settings: Settings, seeded: Path) -> None:

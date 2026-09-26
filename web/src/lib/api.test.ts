@@ -33,6 +33,7 @@ const STATUS: JobStatus = {
   message: 'Indexing pages',
   error_code: null,
   expires_at: '2026-09-26T12:00:00+00:00',
+  seconds_left: 84_600,
   filename: 'My Book.pdf',
   pages: 6,
 }

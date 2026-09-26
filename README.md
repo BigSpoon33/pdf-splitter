@@ -40,7 +40,9 @@ has every code), 422s add `errors: [{loc, msg, type}]`.
 ```
 POST   /api/jobs                             multipart file → 201 {id, state}
 GET    /api/jobs/{id}                        {id, state, kind, progress, total, queue_position, message,
-                                              error_code (failed only), expires_at, filename, pages}
+                                              error_code (failed only), expires_at, seconds_left, filename, pages}
+                                              (seconds_left: until expires_at by the server's clock — the SPA counts
+                                              down from it; only the 410 below declares a job gone)
                                               404 not_found · 410 expired (deleted or past its TTL)
 GET    /api/jobs/{id}/analysis               the Analysis (409 not_ready before review)
 GET    /api/jobs/{id}/plan                   the saved Plan
@@ -102,6 +104,9 @@ keystroke; a 422 shows next to the field it names.
 **Split** posts `/api/jobs/{id}/cut` (a pending edit is saved first); the status poll resumes and follows the cut
 section by section, then the results list shows one download link per section (with its flags) and "Download all
 (ZIP)" — plain `<a download>` links to the API, never fetched into memory. An edit after a cut puts the job back in
-`review` while the last cut's files stay downloadable until the next cut. "Files deleted in N h" (from `expires_at`)
-and **Delete now** (confirm → `DELETE /api/jobs/{id}`) are always on the job page; a deleted, expired or unknown job
-turns the whole page into the deleted screen with a "Split another PDF" link.
+`review` while the last cut's files stay downloadable until the next cut; a new cut empties that list first, and a
+refresh that fails shows an error with Retry (one automatic retry) rather than the previous cut's files. "Files
+deleted in N h" (counting down from the status's `seconds_left`, never from the visitor's clock) and **Delete now**
+(confirm → `DELETE /api/jobs/{id}`) are always on the job page; a deleted, expired or unknown job (the API's 404/410 —
+when the countdown runs out the page asks once more) turns the whole page into the deleted screen with a "Split
+another PDF" link.

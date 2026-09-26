@@ -1,35 +1,40 @@
 <script lang="ts">
   import { ApiError, deleteJob, isGone } from '../lib/api'
-  import { EXPIRY_TICK_MS } from '../lib/config'
+  import { EXPIRY_GRACE_MS, EXPIRY_TICK_MS } from '../lib/config'
   import { messageFor } from '../lib/errors'
   import { timeLeft } from '../lib/expiry'
 
   interface Props {
     id: string
-    /** The status's `expires_at` (ISO). */
-    expiresAt: string
+    /** The status's `seconds_left`: the server's own count, so a visitor's clock that is hours off changes nothing. */
+    secondsLeft: number
+    /** When that status arrived, on the monotonic clock (`now()`); the countdown runs from there. */
+    receivedAt: number
     /** The job is gone: deleted here, or found already gone by the DELETE. */
     ondeleted: () => void
-    /** The clock passed `expiresAt`: the janitor may have removed the files, and the API answers 410 from now on. */
+    /** The server's count ran out: ask it again — only its 410 makes the job gone. */
     onexpired: () => void
     remove?: (id: string) => Promise<void>
     confirmDelete?: (message: string) => boolean
     now?: () => number
     tickMs?: number
+    graceMs?: number
   }
 
   let {
     id,
-    expiresAt,
+    secondsLeft,
+    receivedAt,
     ondeleted,
     onexpired,
     remove = deleteJob,
     confirmDelete = (message) => window.confirm(message),
-    now = Date.now,
+    now = () => performance.now(),
     tickMs = EXPIRY_TICK_MS,
+    graceMs = EXPIRY_GRACE_MS,
   }: Props = $props()
 
-  let clock = $state(Date.now())
+  let clock = $state(0)
   let deleting = $state(false)
   let error = $state<string | null>(null)
 
@@ -39,10 +44,13 @@
     return () => clearInterval(timer)
   })
 
-  const left = $derived(timeLeft(expiresAt, clock))
+  const left = $derived(timeLeft(secondsLeft * 1000 - (clock - receivedAt)))
 
+  // Re-armed by every status: when the server's count runs out, one more poll settles it (a 410, or a fresh count).
   $effect(() => {
-    if (left === null) onexpired()
+    const due = secondsLeft * 1000 - (now() - receivedAt) + graceMs
+    const timer = setTimeout(() => onexpired(), Math.max(due, 0))
+    return () => clearTimeout(timer)
   })
 
   async function deleteNow() {
@@ -61,16 +69,14 @@
   }
 </script>
 
-{#if left !== null}
-  <div class="expiry">
-    <p>Files deleted in {left}.</p>
-    <button type="button" class="danger" onclick={() => void deleteNow()} disabled={deleting}>
-      {deleting ? 'Deleting…' : 'Delete now'}
-    </button>
-  </div>
-  {#if error}
-    <p class="error" role="alert">{error}</p>
-  {/if}
+<div class="expiry">
+  <p>Files deleted in {left}.</p>
+  <button type="button" class="danger" onclick={() => void deleteNow()} disabled={deleting}>
+    {deleting ? 'Deleting…' : 'Delete now'}
+  </button>
+</div>
+{#if error}
+  <p class="error" role="alert">{error}</p>
 {/if}
 
 <style>

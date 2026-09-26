@@ -22,6 +22,8 @@ export interface JobStatus {
   /** Non-null only when `state === 'failed'`. */
   error_code: JobErrorCode | null
   expires_at: string
+  /** Whole seconds until `expires_at` by the SERVER's clock; the countdown runs from this, never from `Date`. */
+  seconds_left: number
   filename: string
   pages: number
 }

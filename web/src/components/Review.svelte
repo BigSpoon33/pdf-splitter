@@ -17,6 +17,7 @@
     type SectionPlanRequest,
     type SheetDpi,
   } from '../lib/api'
+  import { MANIFEST_RETRY_MS } from '../lib/config'
   import { PlanEditor } from '../lib/editor.svelte'
   import { messageFor } from '../lib/errors'
   import { initialPicker } from '../lib/plan'
@@ -40,6 +41,8 @@
     cut?: (id: string) => Promise<CreatedJob>
     debounceMs?: number
     undoMs?: number
+    /** How long after a failed results refresh the one automatic retry goes out. */
+    retryMs?: number
     /** The latest status (the cut's progress and outcome). */
     job?: JobStatus | null
     /** Cuts the page has seen finish; each new one replaces the results with the new manifest. */
@@ -65,6 +68,7 @@
     cut,
     debounceMs,
     undoMs,
+    retryMs = MANIFEST_RETRY_MS,
     job = null,
     cuts = 0,
     oncut,
@@ -78,6 +82,9 @@
   let hasManifest = $state(false)
   /** The last cut's rows as the results list shows them: unlike `editor.rows` (badges), edits never drop one. */
   let results = $state<ManifestRow[] | null>(null)
+  /** The new cut's rows could not be read: shown in place of any list, since the old rows' links no longer match. */
+  let resultsError = $state<string | null>(null)
+  let refreshing = $state(false)
   let loadError = $state<string | null>(null)
 
   $effect(() => {
@@ -124,17 +131,20 @@
   /** The files of the last cut follow an older plan: from `review` they already do; from `done`, once an edit lands. */
   const stale = $derived(!cutting && hasManifest && (jobState === 'review' || (editor?.edited ?? false)))
 
-  // A finished cut replaced the ZIP: its manifest is the new results list and the new badges.
+  // A finished cut replaced the ZIP: its manifest is the new results list and the new badges. The old rows go first
+  // (gate r1): their links now point at other files, so a refresh that fails must show an error, not them.
   let refreshed = 0
-  $effect(() => {
-    const n = cuts
-    const ed = editor
-    if (!ed || n <= refreshed) return
-    refreshed = n
+  let refresh: AbortController | null = null
+  function loadResults(ed: PlanEditor, retry: boolean) {
+    refresh?.abort()
     const ctrl = new AbortController()
+    refresh = ctrl
+    refreshing = true
     loadManifest(id, ctrl.signal).then(
       (rows) => {
         if (ctrl.signal.aborted) return
+        refreshing = false
+        resultsError = null
         results = rows
         ed.rows = rows
         hasManifest = true
@@ -143,10 +153,28 @@
         if (ed.error?.code === 'busy') void ed.flush()
       },
       (err: unknown) => {
-        if (!ctrl.signal.aborted && isGone(err)) ongone?.(err as ApiError)
+        if (ctrl.signal.aborted) return
+        refreshing = false
+        if (isGone(err)) {
+          ongone?.(err as ApiError)
+          return
+        }
+        resultsError = err instanceof ApiError ? err.userMessage : messageFor(null)
+        if (retry) setTimeout(() => refresh === ctrl && loadResults(ed, false), retryMs)
       },
     )
-    return () => ctrl.abort()
+  }
+  $effect(() => {
+    const n = cuts
+    const ed = editor
+    if (!ed || n <= refreshed) return
+    refreshed = n
+    results = null
+    loadResults(ed, true)
+  })
+  $effect(() => () => {
+    refresh?.abort()
+    refresh = null
   })
 
   // AC-2: a save from `done` puts the job back in `review` server-side; the status card should say so.
@@ -213,7 +241,19 @@
     </p>
 
     <section class="card">
-      <Download {id} {editor} {job} {results} {stale} {cut} {oncut} {ongone} />
+      <Download
+        {id}
+        {editor}
+        {job}
+        {results}
+        {resultsError}
+        retrying={refreshing}
+        {stale}
+        {cut}
+        {oncut}
+        {ongone}
+        onretry={() => editor && loadResults(editor, false)}
+      />
     </section>
 
     {#if editor.undo}

@@ -1,8 +1,9 @@
-/** How long until `expiresAt` (the API's ISO `expires_at`), as a visitor reads it; null once it has passed. */
-export function timeLeft(expiresAt: string, now: number): string | null {
-  const ms = Date.parse(expiresAt) - now
-  if (!Number.isFinite(ms) || ms <= 0) return null
-  const minutes = Math.floor(ms / 60_000)
+/**
+ * A remaining duration as a visitor reads it. It never runs out on its own: at zero the files are deleted "in less
+ * than a minute" until the API, whose clock set the duration, answers 410 (gate r1: the visitor's clock has no say).
+ */
+export function timeLeft(ms: number): string {
+  const minutes = Math.floor(Math.max(ms, 0) / 60_000)
   // Floored, so a fresh upload reads "23 h": the line promises no more time than is left.
   if (minutes >= 60) return `${Math.floor(minutes / 60)} h`
   if (minutes >= 1) return `${minutes} min`

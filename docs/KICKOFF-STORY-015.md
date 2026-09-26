@@ -8,11 +8,13 @@ new Plan *source*, not a new pipeline.
 
 - **Web + API (you write code here):** `~/Documents/Repos/pdf-splitter` (GitHub `BigSpoon33/pdf-splitter` = `origin`,
   Gitea mirror = `gitea`), branch **`feature/mvp`**. Stay on it. STORY-011 landed as
-  `68769d3 feat: STORY-011 - split, download, delete-now and expiry UX` plus its docs commit
-  `docs: STORY-011 - findings + KICKOFF-STORY-015`. Anything after those is the orchestrator's gate work — check
-  `git log --oneline -8` and `docs/findings/STORY-011-review.md` if it exists.
-  **Baselines:** `cd web && bun run test` → **228 pass** (17 files), `bun run check` 0 errors 0 warnings (330 files),
-  `bun run build` ≈ 101 kB JS (36.3 kB gzip); `uv run pytest -q` → **344 pass** (≈ 80 s), `uv run ruff check` clean.
+  `68769d3 feat: STORY-011 - split, download, delete-now and expiry UX`, its docs commit `5754c1d`, and the gate r1
+  fix `fix: STORY-011 - gate r1: server decides expiry, results never outlive a failed refresh, one split per click`
+  (`docs/findings/STORY-011-findings.md` § Gate r1 fixes — read it: it changed `Expiry`, `Review`, `Download` and
+  added `seconds_left` to the status). Anything after those is the orchestrator's gate work — check
+  `git log --oneline -8` and `docs/findings/STORY-011-review.md`.
+  **Baselines:** `cd web && bun run test` → **238 pass** (17 files), `bun run check` 0 errors 0 warnings (330 files),
+  `bun run build` ≈ 102 kB JS (36.6 kB gzip); `uv run pytest -q` → **345 pass** (≈ 80 s), `uv run ruff check` clean.
   `docs/loop-state.json` belongs to the orchestrator: never stage it.
 - **Engine (read-only):** `~/Documents/Repos/monograph-splitter` pinned at `v0.4.1` (STORY-016 bumps it to v0.4.2
   later). The ranges cut must NOT use it — PyMuPDF only (ADR-009).
@@ -27,25 +29,33 @@ Port 8000 is taken on this laptop: API on 8010, Vite with `API_PORT=8010 bun run
 
 ## What STORY-011 established (reuse, don't re-invent)
 
-- **Job page** `web/src/components/JobPage.svelte`: owns the job-level state — `job` (latest status), `gone`
-  (`GoneReason`, the single "deleted screen" signal; `goneWith()` first-reason-wins), `resume` (bumped to restart
-  the status poll after a terminal state), `jobState` (last of `review`/`done`), `cuts` (cuts seen finishing),
+- **Job page** `web/src/components/JobPage.svelte`: owns the job-level state — `job` (latest status) + `receivedAt`
+  (`performance.now()` when it arrived), `gone` (`GoneReason`, the single "deleted screen" signal; `goneWith()`
+  first-reason-wins — fed ONLY by API 404/410s, never by a clock), `resume` (bumped to restart the status poll
+  after a terminal state, also when the expiry countdown runs out), `jobState` (last of `review`/`done`), `cuts` (cuts seen finishing),
   `reviewable` (sticky: the editor is never unmounted mid-edit, through a cut and a failed cut). `onstatus()`
   detects the `done` that ends a cut (`cutPending`). Props `load`, `pollMs`, `review`, `expiry` are the test seam
   (`JobPage.test.ts` `fakeApi()` follows the API's transitions).
 - **Poll** `JobStatus.svelte`: new props `resume` (a counter the effect reads) and `ongone(err)`.
 - **Split/results** `Download.svelte` (mounted INSIDE `Review.svelte`, which owns the `PlanEditor`): props
-  `id, editor, job, results, stale, cut?, oncut?, ongone?`. `split()` commits a draft, `editor.flush()`, refuses to
-  cut an unsaved/refused plan, `postCut`, sets `editor.edited = false`, `oncut()`. Progress "Cutting section N of
-  M…" from `job.progress/total`; results = per-row `<a href={sectionUrl(id, row.index)} download>` + size + flags
-  (`badgeFlags`/`flagLabel`) + "Download all (ZIP)" (`resultUrl`). Ranges manifests have `flags: []` — nothing to
-  change there.
-- **Review** `Review.svelte`: new props `job, cuts, cut, oncut, onsaved, ongone`; `results` state (separate from
-  `editor.rows`); effect on `cuts` re-fetches the manifest; effect on `editor.saves` calls `onsaved()` when the job
-  was `done` (AC-2 of 011: one poll shows `review`); effect on `editor.gone` → `ongone`.
-- **Expiry / deleted screen** `Expiry.svelte` ("Files deleted in 23 h", Delete now with injectable
-  `confirmDelete`/`remove`/`now`), `Expired.svelte` (`GoneReason` exported from its module script), `lib/expiry.ts`
-  (`timeLeft`, `formatBytes`).
+  `id, editor, job, results, resultsError?, retrying?, stale, cut?, oncut?, onretry?, ongone?`. `split()` commits a
+  draft, `editor.flush()`, refuses to cut an unsaved/refused plan, `postCut`, sets `editor.edited = false`,
+  `oncut()`; `requestedOn` keeps the button disabled from the click until the poll reports the cut (gate r1 F3 —
+  keep that if you add a ranges Split), a 409 `busy` to our own POST is followed, not shown. Progress "Cutting
+  section N of M…" from `job.progress/total`; results = per-row `<a href={sectionUrl(id, row.index)} download>` +
+  size + flags (`badgeFlags`/`flagLabel`) + "Download all (ZIP)" (`resultUrl`); `resultsError` renders an inline
+  alert + Retry in place of any list. Ranges manifests have `flags: []` — nothing to change there.
+- **Review** `Review.svelte`: props `job, cuts, cut, oncut, onsaved, ongone, retryMs?`; `results` state (separate
+  from `editor.rows`); `loadResults()` on each `cuts` bump EMPTIES `results` first, then fetches the manifest — a
+  non-gone failure → `resultsError` + one automatic retry (`MANIFEST_RETRY_MS`), never the old rows (gate r1 F2);
+  effect on `editor.saves` calls `onsaved()` when the job was `done` (AC-2 of 011: one poll shows `review`); effect
+  on `editor.gone` → `ongone`. A ranges review must go through the same `loadResults` path.
+- **Expiry / deleted screen** `Expiry.svelte` (props `secondsLeft` = the status's `seconds_left`, `receivedAt`;
+  "Files deleted in 23 h" counts down on `performance.now()` — never `Date` vs `expires_at`, gate r1 F1; when the
+  count runs out `onexpired` makes the page poll once and only a 404/410 is the deleted screen; Delete now with
+  injectable `confirmDelete`/`remove`/`now`/`graceMs`), `Expired.svelte` (`GoneReason` exported from its module
+  script), `lib/expiry.ts` (`timeLeft(ms)`, `formatBytes`). Any new status fixture needs `seconds_left`
+  (`tests/test_api_e2e.py::test_seconds_left_counts_down_on_the_servers_clock` is the contract).
 - **Client** `web/src/lib/api.ts`: `postCut`, `deleteJob`, `resultUrl`, `sectionUrl` (+ STORY-009/010's `getJob`,
   `createJob`, `getAnalysis`, `getPlan`, `putPlan`, `getManifest`, `Plan`/`Section`/`Source` types).
   `Source = 'outline' | 'headings' | 'manual'` — you add `'ranges'` and `Section.endPage?`.
@@ -164,7 +174,7 @@ Port 8000 is taken on this laptop: API on 8010, Vite with `API_PORT=8010 bun run
 
 ## Final report shape
 
-Per-AC ✅/❌ with file:line; counts (`bun run test` before 228 / after N; `uv run pytest` before 344 / after N);
+Per-AC ✅/❌ with file:line; counts (`bun run test` before 238 / after N; `uv run pytest` before 345 / after N);
 `bun run check` and `bun run build` (bundle size); the manual run's observations (home page → "Split by page
 ranges" → upload → range editor → `1-10, 15-20, 5-7` → Split → 3 PDFs of 10/6/3 pages; every-N; reload keeps the
 mode; chapter mode unchanged); the commits (on both remotes); decisions taken (mode in URL vs plan source,
