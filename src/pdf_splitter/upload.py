@@ -11,20 +11,23 @@ import subprocess
 import sys
 import unicodedata
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Request, UploadFile
+from fastapi import APIRouter, Form, Request, UploadFile
 from fastapi.responses import JSONResponse
 
 from .config import Settings
 from .deps import SettingsDep, StoreDep
 from .errors import MESSAGES
+from .files import DEFAULT_MODE, write_mode
 from .preflight import MAGIC
 from .store import Store, log_id, new_job_id
 from .worker import sandbox
 
 CHUNK = 1024 * 1024
 PREFLIGHT_TIMEOUT = 10.0
+# ADR-009 as built: the split mode is a property of the job, chosen once here; FastAPI answers 422 for anything else.
+Mode = Literal["chapters", "ranges"]
 MAX_FILENAME = 120
 DEFAULT_FILENAME = "document.pdf"
 
@@ -109,7 +112,9 @@ def _copy_capped(file: UploadFile, dest: Path, max_bytes: int) -> int | None:
     return total
 
 
-def _accept(file: UploadFile | None, request: Request, settings: Settings, store: Store) -> JSONResponse:
+def _accept(
+    file: UploadFile | None, mode: Mode, request: Request, settings: Settings, store: Store
+) -> JSONResponse:
     if file is None:
         return reject("not_pdf")
     job_id = new_job_id()
@@ -130,6 +135,10 @@ def _accept(file: UploadFile | None, request: Request, settings: Settings, store
             log.info("job %s rejected: %s", log_id(job_id), result["code"])
             return reject(result["code"])
         part.rename(job_dir / "source.pdf")
+        # Written before the row exists, so a queued job can never be analyzed without it; no later request can
+        # change it — the review screen's mode comes from the plan this produces, never from a URL.
+        if mode != DEFAULT_MODE:
+            write_mode(job_dir, mode)
         job = store.create_job(
             job_id=job_id,
             ip_hash=ip_hash(request.client.host if request.client else None),
@@ -147,8 +156,12 @@ def _accept(file: UploadFile | None, request: Request, settings: Settings, store
 
 @router.post("/api/jobs", status_code=201)
 def create_job(
-    request: Request, settings: SettingsDep, store: StoreDep, file: UploadFile | None = None
+    request: Request,
+    settings: SettingsDep,
+    store: StoreDep,
+    file: UploadFile | None = None,
+    mode: Annotated[Mode, Form()] = DEFAULT_MODE,
 ) -> JSONResponse:
     # A sync route: the chunked copy, the preflight subprocess and sqlite all block, so they run on
     # the threadpool rather than the event loop.
-    return _accept(file, request, settings, store)
+    return _accept(file, mode, request, settings, store)

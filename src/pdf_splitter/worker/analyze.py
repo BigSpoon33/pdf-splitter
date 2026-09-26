@@ -180,3 +180,9 @@ def default_plan(analysis: dict[str, Any]) -> dict[str, Any]:
         ],
         "overrides": {},
     }
+
+
+def ranges_plan() -> dict[str, Any]:
+    """The Plan a page-range job starts from (ADR-009): no spans yet, so nothing can be cut until the visitor types
+    some. The settings ride along unused, so every saved plan has the same four keys."""
+    return {"source": "ranges", "settings": dict(DEFAULT_SETTINGS), "sections": [], "overrides": {}}

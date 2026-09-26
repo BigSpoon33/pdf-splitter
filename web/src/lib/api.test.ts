@@ -140,6 +140,14 @@ describe('createJob', () => {
     await expect(done).resolves.toEqual({ id: 'new-id', state: 'queued' })
   })
 
+  it('sends the split mode as the multipart `mode` field, chapters by default (tests/test_ranges.py::test_upload_in_chapter_mode_is_unchanged)', async () => {
+    void createJob(pdf, undefined, make)
+    expect((FakeXhr.last.body as FormData).get('mode')).toBe('chapters')
+    void createJob(pdf, undefined, make, 'ranges')
+    expect((FakeXhr.last.body as FormData).get('mode')).toBe('ranges')
+    expect((FakeXhr.last.body as FormData).get('file')).toBeInstanceOf(File)
+  })
+
   it('rejects with the upload error body (tests/test_upload.py::assert_rejected)', async () => {
     const done = createJob(pdf, undefined, make)
     FakeXhr.last.respond(400, JSON.stringify({ code: 'encrypted', message: 'The PDF is password-protected.' }))

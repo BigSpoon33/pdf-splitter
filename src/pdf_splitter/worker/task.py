@@ -21,9 +21,9 @@ from collections.abc import Callable
 import pymupdf
 
 from ..config import Settings
-from ..files import read_json, write_json
+from ..files import read_json, read_mode, write_json
 from ..store import Store
-from .analyze import MUPDF_ERRORS, analyze, default_plan
+from .analyze import MUPDF_ERRORS, analyze, default_plan, ranges_plan
 from .cut import MSG_PACKAGING, cut_book, cut_ranges, write_zip
 
 PROGRESS_INTERVAL_S = 0.5
@@ -80,7 +80,9 @@ def run_analyze(settings: Settings, job_id: str, store: Store) -> bool:
     throttle = Throttle(lambda done, total, msg: store.update_progress(job_id, done, total, msg))
     analysis = analyze(job_dir / "source.pdf", job_dir / "work", throttle)
     write_json(job_dir / "analysis.json", analysis)
-    write_json(job_dir / "plan.json", default_plan(analysis))
+    # The mode was fixed at upload (ADR-009 as built): a page-range job starts from an empty span list, never from
+    # the chapter suggestion — so no link, query or later load ever has a chapter plan to convert.
+    write_json(job_dir / "plan.json", ranges_plan() if read_mode(job_dir) == "ranges" else default_plan(analysis))
     return store.transition(job_id, "running", "review")
 
 

@@ -93,7 +93,7 @@ function fakeApi(start: Partial<JobStatus> = {}) {
 function mount(
   api: ReturnType<typeof fakeApi>,
   confirmDelete = vi.fn(() => true),
-  page: { recheckMs?: number; tickMs?: number; mode?: 'ranges'; plan?: Plan } = {},
+  page: { recheckMs?: number; tickMs?: number; plan?: Plan } = {},
 ) {
   const { plan, ...rest } = page
   return render(JobPage, {
@@ -399,22 +399,22 @@ describe('page-range mode (STORY-015, ADR-009)', () => {
   const RANGE_ROWS: ManifestRow[] = [rowOf(0, 'Pages 1–3'), rowOf(1, 'Page 5')]
   const field = () => screen.getByLabelText(/pages to keep/i) as HTMLInputElement
 
-  it('a job opened with ?mode=ranges saves an empty ranges plan, shows the range editor and no chapter tools; typing ranges enables Split → cut → files (AC-1, AC-5)', async () => {
+  it('a ranges upload (the API wrote an empty ranges plan) shows the range editor and no chapter tools, saves nothing by itself; typing ranges enables Split → cut → files (AC-1, AC-5)', async () => {
     const api = fakeApi()
     api.rows = RANGE_ROWS
-    mount(api, undefined, { mode: 'ranges' })
+    mount(api, undefined, { plan: planOf({ source: 'ranges', sections: [] }) })
     await vi.waitFor(() => expect(field()).toBeTruthy())
     expect(document.querySelector('.review')?.getAttribute('data-mode')).toBe('ranges')
     expect(screen.queryByLabelText('Outline')).toBeNull()
     expect(screen.queryByText('Layout')).toBeNull()
     expect(screen.queryByText('Select a section to preview where it will be cut.')).toBeNull()
     expect(screen.queryByLabelText('Select section 1')).toBeNull()
-    // The chapter plan the upload analyzed to became an empty ranges plan, saved at once.
-    await vi.waitFor(() => expect(api.save).toHaveBeenCalledTimes(1))
-    expect(api.save.mock.calls[0]?.[1]).toMatchObject({ source: 'ranges', sections: [], overrides: {} })
     expect(field().value).toBe('')
     expect((splitButton() as HTMLButtonElement).disabled).toBe(true)
     expect(screen.getByText('No ranges yet. Type them above.')).toBeTruthy()
+    // Gate r1: loading writes nothing — the mode is the plan's, and the plan is the API's.
+    await new Promise((r) => setTimeout(r, 30))
+    expect(api.save).not.toHaveBeenCalled()
 
     await fireEvent.input(field(), { target: { value: '1-3, 5' } })
     expect(screen.getByText('2 sections')).toBeTruthy()
@@ -423,8 +423,8 @@ describe('page-range mode (STORY-015, ADR-009)', () => {
     expect(screen.queryByLabelText('Start page of section 1')).toBeNull()
     expect(screen.queryByRole('button', { name: 'Merge ↓' })).toBeNull()
     expect(screen.queryByRole('button', { name: 'Add section' })).toBeNull()
-    await vi.waitFor(() => expect(api.save).toHaveBeenCalledTimes(2))
-    expect(api.save.mock.calls[1]?.[1].sections).toEqual([
+    await vi.waitFor(() => expect(api.save).toHaveBeenCalledTimes(1))
+    expect(api.save.mock.calls[0]?.[1].sections).toEqual([
       { name: 'Pages 1–3', page: 1, heading: '', endPage: 3 },
       { name: 'Page 5', page: 5, heading: '', endPage: 5 },
     ])

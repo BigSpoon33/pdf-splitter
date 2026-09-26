@@ -15,12 +15,14 @@ import pytest
 from fixtures.books import text_book
 from helpers import DASH_ID, row, seed_job
 from test_api_e2e import STATUS_KEYS, api, assert_error, locs, plan_with
+from test_upload import job_count, job_dirs
 
 from pdf_splitter.config import Settings
-from pdf_splitter.files import read_json, write_json
+from pdf_splitter.files import MODE_FILE, read_json, read_mode, write_json
 from pdf_splitter.store import Store
 from pdf_splitter.worker import cut
 from pdf_splitter.worker.analyze import DEFAULT_SETTINGS, INDEX_CACHE, analyze, default_plan
+from pdf_splitter.worker.analyze import ranges_plan as empty_ranges_plan
 from pdf_splitter.worker.cut import MANIFEST, cut_ranges, engine_name, zip_entry
 from pdf_splitter.worker.runner import Runner
 
@@ -312,3 +314,84 @@ def test_ac14_upload_ranges_plan_cut_download(settings: Settings, tmp_path: Path
         with zipfile.ZipFile(io.BytesIO(client.get(f"/api/jobs/{job_id}/result.zip").content)) as zf:
             assert len([n for n in zf.namelist() if n.endswith(".pdf")]) == 3
         assert plan["sections"][0]["endPage"] == 10
+
+
+# ── Gate r1: the mode is the job's, fixed at upload; no URL can convert a job ──────────────────────────
+
+
+def upload(client, path: Path, **form) -> object:
+    """`POST /api/jobs` with the optional `mode` form field next to the file."""
+    return client.post("/api/jobs", files={"file": ("Thirty.pdf", path.read_bytes(), "application/pdf")}, data=form)
+
+
+def test_upload_in_ranges_mode_analyzes_to_an_empty_ranges_plan_then_cuts_ac14(settings: Settings, tmp_path: Path) -> None:
+    text_book(tmp_path / "thirty.pdf", PAGES)
+    with api(settings) as client:
+        r = upload(client, tmp_path / "thirty.pdf", mode="ranges")
+        assert r.status_code == 201, r.text
+        job_id = r.json()["id"]
+        job_dir = settings.jobs_dir / job_id
+        assert sorted(p.name for p in job_dir.iterdir()) == [MODE_FILE, "source.pdf"]
+        assert read_mode(job_dir) == "ranges"
+        store = Store(settings.db_path)
+        try:
+            worker = Runner(settings, kinds=("analyze", "cut"))
+            assert worker.run_once(store) is True
+            assert client.get(f"/api/jobs/{job_id}").json()["state"] == "review"
+            # The analysis still exists (same pipeline), but the first plan is the mode's: no chapter suggestion to
+            # convert, so opening the job — with any query — never writes anything.
+            assert read_json(job_dir / "analysis.json")["pages"] == PAGES
+            first = client.get(f"/api/jobs/{job_id}/plan").json()
+            assert first == empty_ranges_plan() == {
+                "source": "ranges", "settings": dict(DEFAULT_SETTINGS), "sections": [], "overrides": {},
+            }
+            # It is already what a PUT of itself normalizes to, so the SPA has nothing to save on load.
+            r = client.put(f"/api/jobs/{job_id}/plan", json=first)
+            assert r.status_code == 200 and r.json() == first
+            r = client.post(f"/api/jobs/{job_id}/cut")
+            assert_error(r, 422, "invalid")
+            assert locs(r) == [["plan", "sections"]]
+            r = client.put(f"/api/jobs/{job_id}/plan", json=ranges_plan(AC14))
+            assert r.status_code == 200 and r.json()["source"] == "ranges"
+            assert client.post(f"/api/jobs/{job_id}/cut").status_code == 202
+            assert worker.run_once(store) is True
+            assert client.get(f"/api/jobs/{job_id}").json()["state"] == "done"
+        finally:
+            store.close()
+        manifest = client.get(f"/api/jobs/{job_id}/manifest").json()
+        assert [(m["index"], m["pageCount"]) for m in manifest] == [(0, 10), (1, 6), (2, 3)]
+        with zipfile.ZipFile(io.BytesIO(client.get(f"/api/jobs/{job_id}/result.zip").content)) as zf:
+            pdfs = [zf.read(n) for n in zf.namelist() if n.endswith(".pdf")]
+        assert [sheets_of(p) for p in pdfs] == [list(range(1, 11)), list(range(15, 21)), [5, 6, 7]]
+
+
+# An empty field is what an HTML form sends for "nothing chosen": FastAPI reads it as absent, i.e. the default.
+@pytest.mark.parametrize("form", [{}, {"mode": "chapters"}, {"mode": ""}], ids=["default", "explicit", "empty"])
+def test_upload_in_chapter_mode_is_unchanged(settings: Settings, tmp_path: Path, form: dict) -> None:
+    text_book(tmp_path / "thirty.pdf", PAGES)
+    with api(settings) as client:
+        r = upload(client, tmp_path / "thirty.pdf", **form)
+        assert r.status_code == 201, r.text
+        job_dir = settings.jobs_dir / r.json()["id"]
+        # The default writes no marker: a chapter job's directory is byte-for-byte what it was before the fix.
+        assert sorted(p.name for p in job_dir.iterdir()) == ["source.pdf"]
+        assert read_mode(job_dir) == "chapters"
+        store = Store(settings.db_path)
+        try:
+            assert Runner(settings, kinds=("analyze",)).run_once(store) is True
+        finally:
+            store.close()
+        plan = client.get(f"/api/jobs/{r.json()['id']}/plan").json()
+    assert plan == default_plan(read_json(job_dir / "analysis.json"))
+    assert plan["source"] != "ranges"
+    assert not (job_dir / MODE_FILE).exists()
+
+
+@pytest.mark.parametrize("mode", ["pages", "RANGES", "chapters,ranges"])
+def test_upload_refuses_an_unknown_mode_and_leaves_nothing_behind(settings: Settings, tmp_path: Path, mode: str) -> None:
+    text_book(tmp_path / "thirty.pdf", 2)
+    with api(settings) as client:
+        r = upload(client, tmp_path / "thirty.pdf", mode=mode)
+    assert_error(r, 422, "invalid")
+    assert locs(r) == [["body", "mode"]]
+    assert job_dirs(settings) == [] and job_count(settings) == 0

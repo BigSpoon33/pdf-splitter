@@ -93,13 +93,13 @@ bun run build                # static files in web/dist/
 
 `API_PORT` can also go in `web/.env.local`. `VITE_MAX_BYTES` (build time) changes the client-side size
 precheck; it should match `PDFSPLIT_MAX_BYTES`. Routes are `/` (the home page: **Split by chapters** and **Split by
-page ranges**, each with its own drop zone), `/j/<id>` (a job; `?mode=ranges` after an upload through the second
-entry point), `/privacy` and `/terms`, so whatever serves `web/dist/` in production must answer `index.html` for
-all of them.
+page ranges**, each with its own drop zone), `/j/<id>` (a job), `/privacy` and `/terms`, so whatever serves
+`web/dist/` in production must answer `index.html` for all of them.
 
-**Page ranges** (ADR-009): the job analyzes like any other; on first load the SPA saves an empty plan with
-`source: "ranges"`, and from then on that source is the mode (a reload with or without the query lands in it).
-The review screen is the range field (`1-10, 15-20, 40` — ranges may overlap or leave pages out, each bad entry
+**Page ranges** (ADR-009): the split mode is chosen once, at upload — the second drop zone sends `mode=ranges` with
+the file (`POST /api/jobs`, default `chapters`) and the analyze step writes an empty `source: "ranges"` plan
+instead of the chapter suggestion. From then on the saved plan's source is the mode: a job's URL is just `/j/<id>`,
+a query string on it is ignored, and opening a job never changes it. The review screen is the range field (`1-10, 15-20, 40` — ranges may overlap or leave pages out, each bad entry
 gets its own error and the plan only follows an error-free text), an "every N pages" fill, and the section list
 with rename and delete; no source picker, preview or layout panel. Each section carries `endPage` (inclusive);
 the cut copies the whole-page spans with PyMuPDF into the same ZIP + manifest shape (flags empty). `endPage` is

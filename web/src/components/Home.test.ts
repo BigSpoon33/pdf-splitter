@@ -1,12 +1,11 @@
 import { fireEvent, render, screen } from '@testing-library/svelte'
 import { describe, expect, it, vi } from 'vitest'
 import type { CreatedJob } from '../lib/api'
-import type { JobMode } from '../lib/route'
 import Home from './Home.svelte'
 
 function setup() {
-  const upload = vi.fn<(f: File, p: (x: number) => void) => Promise<CreatedJob>>(async () => ({ id: 'NewJobId', state: 'queued' }))
-  const oncreated = vi.fn<(id: string, mode?: JobMode) => void>()
+  const upload = vi.fn<(f: File, p: (x: number) => void, mode: string) => Promise<CreatedJob>>(async () => ({ id: 'NewJobId', state: 'queued' }))
+  const oncreated = vi.fn<(id: string) => void>()
   render(Home, { oncreated, upload })
   const inputs = screen.getAllByLabelText(/drop a pdf here/i, { selector: 'input' }) as HTMLInputElement[]
   return { upload, oncreated, inputs }
@@ -27,13 +26,16 @@ describe('Home', () => {
     expect(ranges.contains(inputs[1]!)).toBe(true)
   })
 
-  it('reports which entry point the upload came through', async () => {
+  it('sends the entry point as the upload mode (gate r1: the mode goes with the file, not with the redirect)', async () => {
     const { inputs, oncreated, upload } = setup()
     await pick(inputs[1]!)
-    await vi.waitFor(() => expect(oncreated).toHaveBeenCalledWith('NewJobId', 'ranges'))
+    await vi.waitFor(() => expect(oncreated).toHaveBeenCalledWith('NewJobId'))
+    expect(upload.mock.calls[0]?.[2]).toBe('ranges')
     await pick(inputs[0]!)
     await vi.waitFor(() => expect(oncreated).toHaveBeenCalledTimes(2))
-    expect(oncreated).toHaveBeenLastCalledWith('NewJobId')
     expect(upload).toHaveBeenCalledTimes(2)
+    expect(upload.mock.calls[1]?.[2]).toBe('chapters')
+    // The page gets the id and nothing else: there is no mode for a URL to carry.
+    expect(oncreated.mock.calls).toEqual([['NewJobId'], ['NewJobId']])
   })
 })

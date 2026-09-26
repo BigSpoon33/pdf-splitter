@@ -2,17 +2,17 @@
  * A handful of routes, no router library: `/` (upload), `/j/<id>` (a job) and the static `/privacy` and `/terms`. The job id is the only credential
  * (ADR-007), so it lives in the URL and nowhere else: no storage, no title, no logging.
  *
- * `/j/<id>?mode=ranges` (ADR-009) is the mode the home page chose, carried through the upload redirect until the
- * job's plan says `source: "ranges"` itself; the query is the only part of the URL that is read.
+ * A query string is tolerated and ignored (ADR-009 as built): a job's split mode was fixed at upload and lives in its
+ * saved plan, so nothing in a URL can describe — let alone change — a job. A link with `?mode=…` on it (the old
+ * redirect) opens the job exactly as one without.
  */
-export type JobMode = 'ranges'
-export type Route = { name: 'home' } | { name: 'job'; id: string; mode?: JobMode } | { name: 'privacy' } | { name: 'terms' } | { name: 'not_found' }
+export type Route = { name: 'home' } | { name: 'job'; id: string } | { name: 'privacy' } | { name: 'terms' } | { name: 'not_found' }
 
 // Job ids are `secrets.token_urlsafe(16)`: 22 url-safe base64 chars. Accept any url-safe run so a future id
 // length change does not strand links; the API answers 404 for ids it never issued.
 const JOB_PATH = /^\/j\/([A-Za-z0-9_-]{1,64})\/?$/
 
-/** `path` is the pathname with an optional `?query` (what `href()` gives): the query only matters on a job. */
+/** `path` is the pathname with an optional `?query` (what `href()` gives); only the pathname is read. */
 export function parseRoute(path: string): Route {
   const at = path.indexOf('?')
   const pathname = at === -1 ? path : path.slice(0, at)
@@ -20,13 +20,11 @@ export function parseRoute(path: string): Route {
   if (pathname === '/privacy' || pathname === '/privacy/') return { name: 'privacy' }
   if (pathname === '/terms' || pathname === '/terms/') return { name: 'terms' }
   const m = JOB_PATH.exec(pathname)
-  if (!m?.[1]) return { name: 'not_found' }
-  const mode = at === -1 ? null : new URLSearchParams(path.slice(at + 1)).get('mode')
-  return mode === 'ranges' ? { name: 'job', id: m[1], mode } : { name: 'job', id: m[1] }
+  return m?.[1] ? { name: 'job', id: m[1] } : { name: 'not_found' }
 }
 
-export function jobPath(id: string, mode?: JobMode): string {
-  return `/j/${encodeURIComponent(id)}${mode ? `?mode=${mode}` : ''}`
+export function jobPath(id: string): string {
+  return `/j/${encodeURIComponent(id)}`
 }
 
 /** The part of the location the router reads: pathname plus query, never the hash. */

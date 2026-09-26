@@ -1,5 +1,9 @@
 <script lang="ts" module>
+  import type { CreatedJob, UploadMode } from '../lib/api'
   import type { ErrorCode } from '../lib/errors'
+
+  /** What a zone uploads with: the file, a progress sink and the mode the zone stands for. */
+  export type Upload = (file: File, onProgress: (fraction: number) => void, mode: UploadMode) => Promise<CreatedJob>
 
   /** The client-side precheck: the API repeats both checks (and reads the `%PDF-` magic), this only spares a doomed upload. */
   export function precheck(file: File, maxBytes: number): ErrorCode | null {
@@ -11,17 +15,21 @@
 </script>
 
 <script lang="ts">
-  import { ApiError, createJob, type CreatedJob } from '../lib/api'
+  import { ApiError, createJob } from '../lib/api'
   import { MAX_BYTES } from '../lib/config'
   import { messageFor } from '../lib/errors'
 
   interface Props {
     oncreated: (id: string) => void
+    /** The split mode this zone uploads into (ADR-009 as built): it goes with the file, not with the redirect. */
+    mode?: UploadMode
     maxBytes?: number
-    upload?: (file: File, onProgress: (fraction: number) => void) => Promise<CreatedJob>
+    upload?: Upload
   }
 
-  let { oncreated, maxBytes = MAX_BYTES, upload = createJob }: Props = $props()
+  const defaultUpload: Upload = (file, onProgress, mode) => createJob(file, onProgress, undefined, mode)
+
+  let { oncreated, mode = 'chapters', maxBytes = MAX_BYTES, upload = defaultUpload }: Props = $props()
 
   let dragging = $state(false)
   let error = $state<string | null>(null)
@@ -41,7 +49,7 @@
     }
     progress = 0
     try {
-      const job = await upload(file, (f) => (progress = f))
+      const job = await upload(file, (f) => (progress = f), mode)
       oncreated(job.id)
     } catch (err) {
       error = err instanceof ApiError ? err.userMessage : messageFor(null)

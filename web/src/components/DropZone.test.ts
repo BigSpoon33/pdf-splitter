@@ -10,7 +10,7 @@ function file(name: string, size: number, type: string): File {
   return new File([new Uint8Array(size)], name, { type })
 }
 
-function setup(upload = vi.fn<(f: File, p: (x: number) => void) => Promise<CreatedJob>>()) {
+function setup(upload = vi.fn<(f: File, p: (x: number) => void, mode: string) => Promise<CreatedJob>>()) {
   const oncreated = vi.fn<(id: string) => void>()
   render(DropZone, { oncreated, upload, maxBytes: MAX })
   const input = screen.getByLabelText(/drop a pdf here/i, { selector: 'input' }) as HTMLInputElement
@@ -82,6 +82,18 @@ describe('DropZone', () => {
     await drop(zone, file('book.pdf', 10, 'application/pdf'))
     expect(upload).toHaveBeenCalledOnce()
     await vi.waitFor(() => expect(oncreated).toHaveBeenCalledWith('dropped'))
+  })
+
+  it('hands its mode to the upload — chapters unless told otherwise (ADR-009 as built)', async () => {
+    const { upload, input } = setup()
+    await pick(input, file('book.pdf', 10, 'application/pdf'))
+    expect(upload.mock.calls[0]?.[2]).toBe('chapters')
+
+    const ranges = vi.fn<(f: File, p: (x: number) => void, mode: string) => Promise<CreatedJob>>(async () => ({ id: 'r', state: 'queued' }))
+    render(DropZone, { oncreated: vi.fn(), upload: ranges, maxBytes: MAX, mode: 'ranges' })
+    const inputs = screen.getAllByLabelText(/drop a pdf here/i, { selector: 'input' }) as HTMLInputElement[]
+    await pick(inputs[1]!, file('book.pdf', 10, 'application/pdf'))
+    expect(ranges.mock.calls[0]?.[2]).toBe('ranges')
   })
 
   it("renders the API's rejection in place (a PNG renamed .pdf)", async () => {

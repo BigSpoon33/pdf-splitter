@@ -23,3 +23,21 @@ def write_json(path: Path, data: Any) -> None:
 
 def read_json(path: Path) -> Any:
     return json.loads(path.read_bytes().decode("utf-8"))
+
+
+# The split mode chosen at upload (ADR-009 as built): the api writes it, the analyze task reads it to pick the first
+# plan, and nothing after that reads it — from then on the plan's own `source` is the mode. Only a non-default mode
+# is written, so a chapter job's directory is exactly what it always was.
+MODE_FILE = "mode.json"
+DEFAULT_MODE = "chapters"
+
+
+def write_mode(job_dir: Path, mode: str) -> None:
+    write_json(job_dir / MODE_FILE, {"mode": mode})
+
+
+def read_mode(job_dir: Path) -> str:
+    try:
+        return read_json(job_dir / MODE_FILE)["mode"]
+    except FileNotFoundError:
+        return DEFAULT_MODE

@@ -17,7 +17,7 @@ const cut: LoadManifest = async () => ROWS
 const VIEW: SectionPlan = { pages: [3, 4], startCut: null, startCol: 'full', endCut: 400, endCol: 'right', flags: [], notes: [], rects: [[4, [254.5, 400, 522.7, 757.6]]] }
 
 /** Renders with fake loaders; returns the DEFAULT save mock (a test that passes its own keeps its own handle). */
-function mount(over: { jobState?: 'review' | 'done'; save?: Save; loadPlan?: LoadPlan; loadManifest?: LoadManifest; cuts?: number; mode?: 'ranges' } = {}) {
+function mount(over: { jobState?: 'review' | 'done'; save?: Save; loadPlan?: LoadPlan; loadManifest?: LoadManifest; cuts?: number } = {}) {
   const save = vi.fn<Save>(async (_id, plan) => plan)
   const loadAnalysis = vi.fn(async () => analysisOf())
   const loadPlan = vi.fn<LoadPlan>(async () => planOf())
@@ -28,7 +28,6 @@ function mount(over: { jobState?: 'review' | 'done'; save?: Save; loadPlan?: Loa
     id: ID,
     pages: 6,
     jobState: over.jobState ?? 'review',
-    mode: over.mode,
     loadAnalysis,
     loadPlan: over.loadPlan ?? loadPlan,
     loadManifest,
@@ -201,11 +200,12 @@ describe('Review in page-range mode (STORY-015, ADR-009)', () => {
     ],
   })
 
-  it('mode=ranges on a chapter plan: one save of an empty ranges plan, no picker/preview/layout (AC-1, AC-4)', async () => {
-    const { save, loadSectionPlan, loadSheet } = mount({ mode: 'ranges' })
+  it('the empty ranges plan the API wrote at upload opens in range mode with nothing saved and no picker/preview/layout (AC-1, AC-4, gate r1)', async () => {
+    const { save, loadSectionPlan, loadSheet } = mount({ loadPlan: async () => planOf({ source: 'ranges', sections: [] }) })
     await vi.waitFor(() => expect(field()).toBeTruthy())
-    await vi.waitFor(() => expect(save).toHaveBeenCalledTimes(1))
-    expect(save.mock.calls[0]?.[1]).toEqual({ ...planOf(), source: 'ranges', sections: [], overrides: {} })
+    expect(field().value).toBe('')
+    await new Promise((r) => setTimeout(r, 60))
+    expect(save).not.toHaveBeenCalled()
     expect(screen.queryByLabelText('Outline')).toBeNull()
     expect(screen.queryByLabelText('Headings')).toBeNull()
     expect(screen.queryByText('Layout')).toBeNull()

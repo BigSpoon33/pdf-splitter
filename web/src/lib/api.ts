@@ -115,11 +115,22 @@ export function getJob(id: string, signal?: AbortSignal): Promise<JobStatus> {
   return request<JobStatus>(jobUrl(id), { signal })
 }
 
-/** Uploads with XHR because `fetch` reports no upload progress. `onProgress` gets 0..1. */
+/**
+ * The split mode is a property of the job, chosen once at upload (ADR-009 as built): the API writes the first plan for
+ * it, and nothing later — no URL, no query — can change it. `tests/test_ranges.py::test_upload_in_ranges_mode_analyzes_to_an_empty_ranges_plan_then_cuts_ac14`
+ * and `::test_upload_refuses_an_unknown_mode_and_leaves_nothing_behind` pin the field.
+ */
+export type UploadMode = 'chapters' | 'ranges'
+
+/**
+ * Uploads with XHR because `fetch` reports no upload progress. `onProgress` gets 0..1. `mode` comes last because
+ * `makeXhr` is the tests' seam and its position is what `api.test.ts` calls.
+ */
 export function createJob(
   file: File,
   onProgress?: (fraction: number) => void,
   makeXhr: () => XMLHttpRequest = () => new XMLHttpRequest(),
+  mode: UploadMode = 'chapters',
 ): Promise<CreatedJob> {
   return new Promise((resolve, reject) => {
     const xhr = makeXhr()
@@ -143,6 +154,7 @@ export function createJob(
     xhr.onabort = () => reject(new ApiError(0, 'network'))
     const form = new FormData()
     form.append('file', file, file.name)
+    form.append('mode', mode)
     xhr.send(form)
   })
 }

@@ -7,20 +7,26 @@ ranges, download, auto-delete. STORY-007..011 built the job API, the worker, the
 UX; STORY-015 added page-range mode (ADR-009). Nothing yet stops one visitor from filling the disk or starving the
 queue, and nothing deletes anything: the `rate` table exists but is never written, `expires_at` is only *read*
 (`gone()` answers 410 past it, `Store.expired()` lists rows), `queue_position` is always `null`, and the health
-route's `disk_free_gb` is informational. STORY-012 makes those real, plus three orchestrator addenda at the bottom of
-`docs/stories/STORY-012.md` (read them — they are ACs in all but name).
+route's `disk_free_gb` is informational. STORY-012 makes those real, plus FOUR orchestrator addenda at the bottom of
+`docs/stories/STORY-012.md` (read them — they are ACs in all but name). The fourth (`:111`, from the STORY-015
+review) is new: **cap what a single cut may write** — a per-job output budget enforced in BOTH cut paths, chapters
+and ranges (2,000 whole-book spans wrote ~0.9 GB of Maciocia, ~19 GB of an image-heavy PDF, per 10-min cut), the
+cut failing as `failed/too_large_output` with no partial zip left behind.
 
 - **Web + API (you write code here):** `~/Documents/Repos/pdf-splitter` (GitHub `BigSpoon33/pdf-splitter` = `origin`,
   Gitea mirror = `gitea`), branch **`feature/mvp`**. Stay on it. STORY-015 landed as
-  `722b231 feat: STORY-015 - home page with chapter and page-range entry points; page-range split mode` and its docs
-  commit `docs: STORY-015 - findings + KICKOFF-STORY-012`. Anything after those is the orchestrator's gate work —
-  check `git log --oneline -8` and `docs/findings/STORY-015-review.md` if it exists (gate fixes may have moved lines).
-  **Baselines:** `uv run pytest -q` → **367 pass** (≈ 80 s), `uv run ruff check` clean; `cd web && bun run test` →
-  **274 pass** (20 files), `bun run check` 0 errors 0 warnings (336 files), `bun run build` ≈ 109 kB JS (38.9 kB gzip).
+  `722b231 feat: STORY-015 - home page with chapter and page-range entry points; page-range split mode`, its docs
+  commit `docs: STORY-015 - findings + KICKOFF-STORY-012`, then the gate r1 fix `fix: STORY-015 - gate r1: the split
+  mode is fixed at upload, a link can never convert a job` (`docs/findings/STORY-015-findings.md` § Gate r1 fix —
+  read it: it added the `mode` form field to `POST /api/jobs`, `mode.json` in the job dir, `files.py:read_mode`, and
+  removed every mode from the SPA's URLs; `docs/findings/STORY-015-review.md` has the finding). Anything after those
+  is the orchestrator's gate work — check `git log --oneline -8` (gate fixes may have moved lines).
+  **Baselines:** `uv run pytest -q` → **374 pass** (≈ 95 s), `uv run ruff check` clean; `cd web && bun run test` →
+  **280 pass** (21 files), `bun run check` 0 errors 0 warnings (337 files), `bun run build` ≈ 109.1 kB JS (38.9 kB gzip).
   `docs/loop-state.json` belongs to the orchestrator: never stage it.
 - **Engine (read-only):** `~/Documents/Repos/monograph-splitter` pinned at `v0.4.1` (STORY-016 bumps it). Not touched
   by this story.
-- Read, in order: `docs/stories/STORY-012.md` (ACs + the three addenda), `docs/Architecture.md` § Component Map
+- Read, in order: `docs/stories/STORY-012.md` (ACs + the four addenda), `docs/Architecture.md` § Component Map
   "janitor" (:123 — every 5 min, expired dirs + rows, orphan dirs, 503 under 2 GB free), § Job states (:218 — incl.
   the "Failed cuts are recoverable" paragraph, Shuma-approved), § API Interface (:192 — `429 rate_limited`,
   `503 disk_full` on POST, `queue_position` in the status), § Storage Schema (:294 — `rate (ip_hash, at)` "sliding
@@ -47,11 +53,13 @@ Port 8000 is taken on this laptop: API on 8010, Vite with `API_PORT=8010 bun run
   `tests/test_store.py::test_expired_without_sleeping` is the frozen-clock pattern: `make(store, now=T0)`, then
   query with `now=T0 + timedelta(...)`). `tests/test_store.py::test_schema_matches_architecture` compares the schema
   with § Storage Schema — a new column or index goes in both.
-- **Upload** `src/pdf_splitter/upload.py`: `:38-44` the per-process `_IP_SALT` + `ip_hash(host)` (the comment says
-  STORY-012 replaces it with the daily salt + trusted-proxy rule); `:112` `_accept(file, request, settings, store)` —
-  the job dir is created before the copy and removed unless `created`; the row is inserted at `:135` with
-  `ip_hash(request.client.host)`. The rate check and the disk guard belong BEFORE `job_dir.mkdir()` (nothing on disk
-  for a refused upload); `reject(code)` (`:63`) builds the error body — `Retry-After` is a header it does not set yet.
+- **Upload** `src/pdf_splitter/upload.py`: `:43-47` the per-process `_IP_SALT` + `ip_hash(host)` (the comment says
+  STORY-012 replaces it with the daily salt + trusted-proxy rule); `:115` `_accept(file, mode, request, settings, store)`
+  — the job dir is created before the copy (`:124`) and removed unless `created`; `:141` writes `mode.json` for a
+  `ranges` upload (gate r1 — `mode` is the `Mode` form field of `create_job` `:158-163`, `Literal["chapters","ranges"]`,
+  FastAPI's own 422 for anything else); the row is inserted at `:142` with `ip_hash(request.client.host)`. The rate
+  check and the disk guard belong BEFORE `job_dir.mkdir()` (nothing on disk for a refused upload); `reject(code)`
+  (`:66`) builds the error body — `Retry-After` is a header it does not set yet.
   Codes `rate_limited` / `disk_full` are NOT in `src/pdf_splitter/errors.py:MESSAGES` yet (the SPA's
   `web/src/lib/errors.ts` already has both, and `web/src/lib/errors.test.ts` counts the API's table against it —
   adding them to the API is required, and keeps that test green).
@@ -90,8 +98,24 @@ Port 8000 is taken on this laptop: API on 8010, Vite with `API_PORT=8010 bun run
 - **Access log / ids** `src/pdf_splitter/access_log.py`, `store.py:51` `log_id`: job ids never appear in logs
   (`tests/helpers.py::assert_id_gone`, `tests/test_upload.py::test_logs_never_contain_a_job_id`) — the janitor's log
   lines use `log_id(...)` too. IPs never appear anywhere (ADR-007): the rate limiter logs the hash prefix at most.
-- **Page-range jobs (STORY-015)** need nothing from this story, but the janitor deletes their dirs like any other;
-  `tests/test_ranges.py` has a 30-page `ranges_template` fixture and `seed_ranges_job` if you need a bigger job.
+- **Page-range jobs (STORY-015 + gate r1)**: the mode is fixed at upload — `files.py:31-42` `MODE_FILE`/`write_mode`/
+  `read_mode` (absent marker = `chapters`), `worker/task.py:85` `run_analyze` writes `analyze.py:185` `ranges_plan()`
+  (empty `ranges` plan) or `default_plan`; nothing else reads the marker, the plan's `source` is the mode from then
+  on. The janitor deletes their dirs like any other (`mode.json` is just one more file). `tests/test_ranges.py:322`
+  `upload(client, path, **form)` posts with the `mode` field; `ranges_template` / `seed_ranges_job` give a 30-page job.
+- **Output cap (addendum 4)** — both cut paths write into `work/` and then one ZIP: `worker/cut.py:74` `cut_book`
+  (the engine writes every section file; `:66` `_reset_outputs` empties `work/` first), `:97` `cut_ranges` (one
+  `save()` per span), `:138` `write_zip` (tmp + rename, `::test_write_zip_removes_the_tmp_when_the_rename_fails`);
+  `worker/task.py:98` `run_cut` dispatches on the plan's source, `:109` `_result` / `:114` `guarded` turn an exception
+  into the task's result line (`{"ok": false, "code": …}`), and `worker/runner.py:52` `classify` maps that line to
+  the row's `error_code` with `:40` `MESSAGES` (today only `timeout|resources|internal`;
+  `tests/test_worker.py::test_runner_*` + `tests/test_cut.py::test_runner_runs_the_real_cut_task_to_done` are the
+  contract). A `too_large_output` code needs: a check of the bytes written so far after every section in BOTH paths
+  (count `work/`, abort before the ZIP so nothing partial is left — `_reset_outputs` semantics), a new result code
+  through `guarded` → `classify` → `MESSAGES`, the setting in `config.py` (`max_output_bytes`, default min(2 GB,
+  10 × upload)), and the SPA's `web/src/lib/api.ts:8` `JobErrorCode` union (`JobStatus.svelte:99` shows
+  `job.message`, so the wording lives in `runner.MESSAGES`). The failed cut must then be recoverable (addendum 3):
+  the visitor fixes the plan and cuts again.
 
 ## Contracts (the tests ARE the contract — never hand-write sample JSON)
 
@@ -164,7 +188,9 @@ Port 8000 is taken on this laptop: API on 8010, Vite with `API_PORT=8010 bun run
    rmtree; `deleted` rows' dirs; orphan dirs; prune `rate` + old `deleted` rows), wired into `Runner` every 5 min
    (`JANITOR_EVERY_S`); logs counts only (no ids beyond `log_id`).
 5. Addenda: `saved_plan` race → 410 (+ `_result_zip` if you touch it); recoverable failed cut (API + SPA + tests both
-   sides, incl. `failed/analyze` staying 409).
+   sides, incl. `failed/analyze` staying 409); the output cap in both cut paths (pytest with a synthetic PDF and a
+   small `PDFSPLIT_MAX_OUTPUT_BYTES` where 200 whole-book spans blow it: `failed/too_large_output`, no `result.zip`,
+   no `.tmp`, then a smaller plan cuts fine from the same page).
 6. AC-5 + verification: `uv run pytest -q && uv run ruff check`; `cd web && bun run check && bun run test && bun run
    build`; a short live run: API :8010 + worker with `PDFSPLIT_RATE_PER_HOUR=2` → the 3rd upload gets 429 with
    `Retry-After`; `PDFSPLIT_TTL_HOURS` can't go below 1 h — move `expires_at` into the past in `jobs.db` (the
@@ -189,11 +215,14 @@ Port 8000 is taken on this laptop: API on 8010, Vite with `API_PORT=8010 bun run
   `routes/common.py`, `routes/plan.py` (`status_of`, `put_plan`, `post_cut`), `routes/download.py` (only the
   `exists()`-then-read shape), `worker/runner.py`, `app.py` (health), `tests/test_limits.py` (new) + additions to
   existing tests, `web/src/components/Download.svelte` + `JobPage.svelte` + their tests (addendum 3), `README.md`,
-  `docs/Architecture.md` where the build differs, `docs/findings/`, `KICKOFF-*`, STORY-012's status lines.
+  `docs/Architecture.md` where the build differs, `docs/findings/`, `KICKOFF-*`, STORY-012's status lines;
+  `worker/cut.py` + `worker/task.py` (`run_cut`/`guarded`) and `web/src/lib/api.ts:JobErrorCode` ONLY for the
+  output cap (addendum 4).
 - Do not touch: the engine repo, `~/Documents/AI/Inkwell`, `~/Documents/Vaults`, `docs/loop-state.json`, the PRD,
-  existing tests' assertions (add, don't rewrite), the cut/analyze tasks, the review editor.
+  existing tests' assertions (add, don't rewrite), the analyze task and the upload's `mode` handling, the review
+  editor.
 - Out of scope: captcha / proof-of-work; Caddy (STORY-013); terms/privacy text (STORY-014); the engine bump
-  (STORY-016); any change to the ranges mode.
+  (STORY-016); any change to the ranges mode beyond the output cap applying to it.
 
 ## Stopping conditions (BLOCKED protocol)
 
@@ -205,8 +234,9 @@ Port 8000 is taken on this laptop: API on 8010, Vite with `API_PORT=8010 bun run
 
 ## Final report shape
 
-Per-AC ✅/❌ with file:line (the three addenda as their own lines); counts (`uv run pytest` before 367 / after N;
-`bun run test` before 274 / after N); `bun run check` and `bun run build` (bundle size); the live run's observations
+Per-AC ✅/❌ with file:line (the four addenda as their own lines); counts (`uv run pytest` before 374 / after N;
+`bun run test` before 280 / after N); `bun run check` and `bun run build` (bundle size); the live run's observations
 (the 3rd upload → 429 + `Retry-After`; an expired job's dir gone after the janitor and the SPA's deleted screen;
-`queue_position` on a queued job; a failed cut re-cut from the same page); the commits (on both remotes); decisions
-taken (salt derivation, trusted-proxy rule, window semantics, janitor placement); what STORY-016 should know.
+`queue_position` on a queued job; a failed cut re-cut from the same page; a cut over the output cap failing cleanly);
+the commits (on both remotes); decisions taken (salt derivation, trusted-proxy rule, window semantics, janitor
+placement, how the output budget is counted); what STORY-016 should know.

@@ -102,7 +102,7 @@ feat: STORY-015 - home page with chapter and page-range entry points; page-range
 
 ## Status
 
-**Done** — 2026-09-26, `722b231` on feature/mvp (`docs/findings/STORY-015-findings.md`)
+**Done** — 2026-09-26, `722b231` on feature/mvp + gate r1 fix `fix: STORY-015 - gate r1: the split mode is fixed at upload, a link can never convert a job` (`docs/findings/STORY-015-findings.md` § Gate r1 fix)
 
 - [x] AC-1
 - [x] AC-2

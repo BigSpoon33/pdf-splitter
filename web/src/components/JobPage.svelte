@@ -2,7 +2,7 @@
   import type { ComponentProps } from 'svelte'
   import { getJob, TERMINAL_STATES, type ApiError, type JobStatus as Status } from '../lib/api'
   import { EXPIRY_TICK_MS, WAKE_RECHECK_MS } from '../lib/config'
-  import { linkClick, type JobMode } from '../lib/route'
+  import { linkClick } from '../lib/route'
   import Expired, { type GoneReason } from './Expired.svelte'
   import Expiry from './Expiry.svelte'
   import JobStatus from './JobStatus.svelte'
@@ -10,8 +10,6 @@
 
   interface Props {
     id: string
-    /** `ranges` when the URL says so (ADR-009); Review makes it the plan's `source` on the first load. */
-    mode?: JobMode
     /** Everything Review, Expiry and JobStatus load, injectable so the page's state transitions are testable. */
     load?: (id: string, signal: AbortSignal) => Promise<Status>
     review?: Partial<ComponentProps<typeof Review>>
@@ -23,7 +21,7 @@
     tickMs?: number
   }
 
-  let { id, mode, load = getJob, review = {}, expiry = {}, pollMs, recheckMs = WAKE_RECHECK_MS, tickMs = EXPIRY_TICK_MS }: Props = $props()
+  let { id, load = getJob, review = {}, expiry = {}, pollMs, recheckMs = WAKE_RECHECK_MS, tickMs = EXPIRY_TICK_MS }: Props = $props()
 
   let job = $state<Status | null>(null)
   /** When `job` arrived, on the monotonic clock: the expiry countdown runs from the server's count anchored here. */
@@ -130,7 +128,6 @@
   {#if reviewable && job}
     <Review
       {id}
-      {mode}
       pages={job.pages}
       {jobState}
       {job}

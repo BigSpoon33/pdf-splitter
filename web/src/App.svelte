@@ -18,10 +18,10 @@
 
 <main>
   {#if route.name === 'home'}
-    <Home oncreated={(id, mode) => navigate(jobPath(id, mode))} />
+    <Home oncreated={(id) => navigate(jobPath(id))} />
   {:else if route.name === 'job'}
     {#key route.id}
-      <JobPage id={route.id} mode={route.mode} />
+      <JobPage id={route.id} />
     {/key}
   {:else if route.name === 'privacy'}
     <Privacy />

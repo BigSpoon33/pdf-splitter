@@ -21,7 +21,6 @@
   import { PlanEditor } from '../lib/editor.svelte'
   import { messageFor } from '../lib/errors'
   import { initialPicker } from '../lib/plan'
-  import type { JobMode } from '../lib/route'
   import Download from './Download.svelte'
   import LayoutPanel from './LayoutPanel.svelte'
   import PagePreview from './PagePreview.svelte'
@@ -34,12 +33,6 @@
     pages: number
     /** `done`: the last cut matches the saved plan; `review`: no cut yet, or the plan changed since one. */
     jobState: 'review' | 'done'
-    /**
-     * `ranges` (from `/j/<id>?mode=ranges`, ADR-009): the job was uploaded through "Split by page ranges". Its plan
-     * analyzed as chapters like any other; the first load turns it into an empty `ranges` plan and saves that, so
-     * from then on — and after a reload with or without the query — the plan's own `source` is the mode.
-     */
-    mode?: JobMode
     loadAnalysis?: (id: string, signal: AbortSignal) => Promise<Analysis>
     loadPlan?: (id: string, signal: AbortSignal) => Promise<Plan>
     loadManifest?: (id: string, signal: AbortSignal) => Promise<ManifestRow[]>
@@ -67,7 +60,6 @@
     id,
     pages,
     jobState,
-    mode,
     loadAnalysis = getAnalysis,
     loadPlan = getPlan,
     loadManifest = getManifest,
@@ -110,7 +102,6 @@
         if (ctrl.signal.aborted) return
         analysis = a
         created = new PlanEditor(plan, (p, o) => save(id, p, o), { debounceMs, undoMs, picker: initialPicker(a) })
-        if (mode === 'ranges' && plan.source !== 'ranges') created.setRanges([])
         editor = created
         const rows = await manifest
         if (ctrl.signal.aborted || !rows) return
@@ -138,7 +129,11 @@
 
   const cutting = $derived(job?.kind === 'cut' && (job.state === 'queued' || job.state === 'running'))
 
-  /** Page-range mode shows the range editor and the list; the source picker, preview and layout are chapter tools. */
+  /**
+   * Page-range mode shows the range editor and the list; the source picker, preview and layout are chapter tools. The
+   * saved plan's `source` is the ONLY thing that decides it (ADR-009 as built): the mode was fixed at upload and the
+   * API wrote the first plan for it, so loading a job — from any link, with any query — never writes a plan.
+   */
   const ranges = $derived(editor?.plan.source === 'ranges')
 
   /** The files of the last cut follow an older plan: from `review` they already do; from `done`, once an edit lands. */
