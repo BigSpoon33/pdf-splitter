@@ -175,7 +175,7 @@ janitor ──every 5 min──▶ delete expired /jobs/<id> + row
 |------|-------|---------------|----------------|
 | Job row | `{id, state, kind, created_at, expires_at, ip_hash, filename, pages, bytes, progress, total, message, error_code}` | api | api, worker, janitor |
 | Analysis | `{pages, pageLabels[], size:{W,H}[], outline:{levels:[n1,n2,n3], items:[{name,page,heading,level,y?}]}, headings:{body_size, levels:[{size,count}], candidates:[{name,page,heading,size,level,y,col}]}, suggested:{source, level}}` | worker/analyze | web |
-| Plan | `{source:"outline"\|"headings"\|"manual", settings:{column_split, single_column, header_band, footer_band, heading_min_size}, sections:[{name, page, heading}], overrides:{[sectionIndex]: {startCut, startCol, endCut, endCol}}}` | web | api (validate) → worker/cut, preview |
+| Plan | `{source:"outline"\|"headings"\|"manual", settings:{column_split, single_column, header_band, footer_band, heading_min_size, heading_wrap_gap?}, sections:[{name, page, heading}], overrides:{[sectionIndex]: {startCut, startCol, endCut, endCol}}}` | web | api (validate) → worker/cut, preview |
 | Section plan (preview) | the engine's `_plan_view`: `{pages:[a,b], startCut, startCol, endCut, endCol, flags[], rects:[[sheet,[x0,y0,x1,y1]]]}` | preview subprocess | PagePreview |
 | Manifest | the engine's `manifest.json` rows + `{file}` | worker/cut | download zip |
 
@@ -202,7 +202,7 @@ PUT    /api/jobs/{id}/plan             Plan → 200 normalized Plan | 422 with f
 GET    /api/jobs/{id}/sheets/{n}.png?dpi=72   PNG (dpi ∈ {48, 72, 110})
 POST   /api/jobs/{id}/sections/{i}/plan       {settings?, override?} → Section plan (not persisted)
 POST   /api/jobs/{id}/cut              202 {state:"queued"} (uses the saved Plan) · 409 if running
-GET    /api/jobs/{id}/manifest         the last cut's manifest rows as JSON [{index, name, file, pages, flags, notes, leaks, bytes}] (409 before any cut; kept until the next cut replaces it)
+GET    /api/jobs/{id}/manifest         the last cut's manifest rows as JSON [{index, name, file, printedPages, pageCount, flags, notes, leaks, bytes} — the engine's manifest row + index/name/file] (409 before any cut; kept until the next cut replaces it)
 GET    /api/jobs/{id}/result.zip       attachment
 GET    /api/jobs/{id}/sections/{i}.pdf attachment (after cut)
 DELETE /api/jobs/{id}                  204
