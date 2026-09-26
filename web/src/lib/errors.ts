@@ -14,6 +14,8 @@ export const MESSAGES = {
   // STORY-012 adds these two (Architecture § API Interface)
   rate_limited: 'Too many uploads from your network. Wait a few minutes and try again.',
   disk_full: 'The server is full right now. Try again later.',
+  // STORY-013 gate r1: the api's in-flight-uploads cap (503 + Retry-After)
+  overloaded: 'The service is busy right now — try again in a few seconds.',
   // /api/jobs/{id}/...
   not_found: 'There is no job at this address. Check the link.',
   expired: 'This job was deleted (files are kept 24 h).',

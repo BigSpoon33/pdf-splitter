@@ -216,6 +216,14 @@ once (131 KB sent). **Host state:** `docker ps` before/after each run is byte-id
 `deploy-caddy-1`/`deploy-docs-1`); nothing of `pdfsplit-smoke`, `pdfsplit-r2` (the exploration stack, torn down) or a
 `:smoke`/`:r2` tag remains; no image was pushed, no daemon setting changed.
 
+**Addendum — attempt 2b (web parity regression from `6ef0253`):** the gate r1 commit added `overloaded` to
+`src/pdf_splitter/errors.py` without a SPA message, so `web/src/lib/errors.test.ts` (which parses errors.py) failed 2 of
+285. Fix: `overloaded` → "The service is busy right now — try again in a few seconds." in `web/src/lib/errors.ts`, and
+the parser sanity count 16 → 17 in `errors.test.ts`. DropZone already renders `ApiError.userMessage` in place, so no
+component change; `JobErrorCode` enumerates worker job failures only, not API codes, so it is unchanged. Checks:
+`bun run check` 0 errors 0 warnings (337 files), `bun run test` 285 passed (21 files), `bun run build` ok
+(109.22 kB / 38.92 kB gzip), `uv run pytest -q` 434 passed, `uv run ruff check` clean.
+
 ## Bugs Found
 - **`docker compose down --rmi all` under a throwaway project untagged another project's image.** First teardown design.
   The smoke build is byte-identical to a `:local` build, so both tags share one image ID and compose's remove-by-ID took
