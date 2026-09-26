@@ -16,6 +16,8 @@ export const MESSAGES = {
   disk_full: 'The server is full right now. Try again later.',
   // STORY-013 gate r1: the api's in-flight-uploads cap (503 + Retry-After)
   overloaded: 'The service is busy right now — try again in a few seconds.',
+  // STORY-013 gate r2: the body stopped arriving (408)
+  too_slow: 'The upload stalled and was abandoned. Check your connection and try again.',
   // /api/jobs/{id}/...
   not_found: 'There is no job at this address. Check the link.',
   expired: 'This job was deleted (files are kept 24 h).',

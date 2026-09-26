@@ -97,11 +97,29 @@ def test_the_trusted_proxy_setting_is_a_list_and_ipv6_spellings_match(monkeypatc
     # Any other peer, v4 or v6, is the client whatever it forwards.
     assert ratelimit.client_ip(request_from("fd30:5eaf:9a13::11", "2001:db8::7"), both) == "fd30:5eaf:9a13::11"
     assert ratelimit.client_ip(request_from("172.30.0.11", "2001:db8::7"), both) == "172.30.0.11"
-    # Distinct hashes for distinct v6 clients: a v6 visitor gets a bucket of their own (the review saw them share one).
-    assert ratelimit.ip_hash("2001:db8::7", T0, "s") != ratelimit.ip_hash("2001:db8::8", T0, "s")
     # Through Settings, from the environment, as compose sets it.
     monkeypatch.setenv("PDFSPLIT_TRUSTED_PROXY", both)
     assert ratelimit.trusted_proxies(Settings().trusted_proxy) == ratelimit.trusted_proxies(both)
+
+
+def test_ipv6_clients_share_a_window_per_64_and_v4_mapped_addresses_are_their_v4() -> None:
+    """A v6 visitor owns a /64 (or more), so keying on the full address would hand them 2^64 windows (gate r2):
+    the key is the /64. Distinct /64s stay distinct; IPv4 is keyed as before; `::ffff:a.b.c.d` is a.b.c.d."""
+    assert ratelimit.rate_key("2001:db8:1:2:3:4:5:6") == "2001:db8:1:2::/64"
+    assert ratelimit.rate_key("2001:DB8:1:2::7") == ratelimit.rate_key("2001:db8:1:2:ffff:ffff:ffff:ffff")
+    assert ratelimit.rate_key("::ffff:203.0.113.9") == ratelimit.rate_key("203.0.113.9") == "203.0.113.9"
+    assert ratelimit.rate_key("testclient") == "testclient"
+    # The whole /64 is one bucket: the hash — what `rate` rows and the in-flight cap key on — is the same.
+    same = ratelimit.ip_hash("2001:db8:1:2::7", T0, "s")
+    assert ratelimit.ip_hash("2001:db8:1:2:aaaa:bbbb:cccc:dddd", T0, "s") == same
+    assert ratelimit.ip_hash("2001:db8:1:2::8", T0, "s") == same
+    # A different /64 is a different client, as is the same host part in another prefix.
+    assert ratelimit.ip_hash("2001:db8:1:3::7", T0, "s") != same
+    assert ratelimit.ip_hash("2001:db8:1:2::/64", T0, "s") == same
+    # IPv4: address for address, and the mapped spelling is not a way around it.
+    v4 = ratelimit.ip_hash("203.0.113.9", T0, "s")
+    assert ratelimit.ip_hash("::ffff:203.0.113.9", T0, "s") == v4
+    assert ratelimit.ip_hash("203.0.113.10", T0, "s") != v4
 
 
 def test_ip_hash_is_salted_shared_by_secret_and_rotates_daily() -> None:
@@ -180,7 +198,7 @@ def test_parallel_uploads_from_one_client_get_exactly_the_limit(settings: Settin
     statuses: list[int] = []
     lock = threading.Lock()
     # The in-flight cap (STORY-013 gate r1) would answer 503 to most of the burst; this test is about the window.
-    with TestClient(create_app(settings.model_copy(update={"max_uploads": n}))) as client:
+    with TestClient(create_app(settings.model_copy(update={"max_uploads": n, "max_uploads_per_client": n}))) as client:
 
         def attempt() -> None:
             barrier.wait()

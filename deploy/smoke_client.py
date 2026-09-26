@@ -5,10 +5,12 @@ and Docker creates no port binding on an internal network), and be a client with
 fixed address on one of the stack's networks. Each upload is a multipart POST whose file part
 is a real file or `--zeros N` streamed without ever holding N bytes; the response is read WHILE the body is sent,
 so a refusal the guard sends after the headers is seen at once and the send stops — which is the evidence: how
-many bytes went out before the api answered.
+many bytes went out before the api answered. `--raw` sends the zeros as a bare JSON body instead (any `--method`),
+`--chunk` + `--rate` make a real trickle, and `--declare N` promises N bytes in Content-Length while sending only
+`--zeros` — a body that never finishes (gate r2: the slow-body checks).
 
   python smoke_client.py URL [--file P | --zeros N] [--header 'K: V']... [--n N] [--rate BYTES/S] [--family 4|6]
-                            [--sni HOST]
+                            [--sni HOST] [--method PUT] [--raw] [--chunk BYTES] [--declare N]
 
 Prints one line per upload: `<status> sent=<bytes> local=<address> <body>`; exits 0 whatever the statuses were.
 """
@@ -38,19 +40,21 @@ def multipart(name: str, size: int) -> tuple[bytes, bytes]:
     return head, tail
 
 
-def body_chunks(head: bytes, tail: bytes, path: str | None, zeros: int):
-    yield head
+def body_chunks(head: bytes, tail: bytes, path: str | None, zeros: int, chunk: int):
+    if head:
+        yield head
     if path is not None:
         with open(path, "rb") as f:
-            while chunk := f.read(CHUNK):
-                yield chunk
+            while piece := f.read(chunk):
+                yield piece
     else:
         left = zeros
         while left > 0:
-            n = min(CHUNK, left)
+            n = min(chunk, left)
             yield b"\0" * n
             left -= n
-    yield tail
+    if tail:
+        yield tail
 
 
 def connect(url: urllib.parse.SplitResult, family: int, sni: str | None) -> socket.socket:
@@ -69,15 +73,19 @@ def connect(url: urllib.parse.SplitResult, family: int, sni: str | None) -> sock
 
 def upload(args: argparse.Namespace) -> str:
     url = urllib.parse.urlsplit(args.url)
-    head, tail = multipart(args.filename, 0)
+    if args.raw:
+        head, tail, content_type = b"", b"", "application/json"
+    else:
+        head, tail = multipart(args.filename, 0)
+        content_type = f"multipart/form-data; boundary={BOUNDARY.decode()}"
     size = args.zeros if args.file is None else __import__("os").path.getsize(args.file)
-    length = len(head) + size + len(tail)
+    length = args.declare or len(head) + size + len(tail)
     headers = [
-        f"POST {url.path or '/'} HTTP/1.1",
+        f"{args.method} {url.path or '/'} HTTP/1.1",
         # Caddy picks the site block by Host: reached as `caddy` on the compose network, it must still be asked
         # for `localhost` (an unmatched host gets an empty 200, not the SPA's api).
         f"Host: {args.sni or url.hostname}",
-        f"Content-Type: multipart/form-data; boundary={BOUNDARY.decode()}",
+        f"Content-Type: {content_type}",
         f"Content-Length: {length}",
         "Connection: close",
         *args.header,
@@ -87,10 +95,11 @@ def upload(args: argparse.Namespace) -> str:
     local = sock.getsockname()[0]
     sock.sendall(("\r\n".join(headers) + "\r\n\r\n").encode())
     sock.setblocking(False)
-    chunks = body_chunks(head, tail, args.file, args.zeros)
+    chunks = body_chunks(head, tail, args.file, args.zeros, args.chunk)
     pending, sent, received, started = b"", 0, b"", time.monotonic()
     done_sending, eof = False, False
-    while not eof:
+    # A body the server is left waiting for (--declare) ends only with the server's answer; never wait forever.
+    while not eof and time.monotonic() - started < args.wait:
         want_write = not done_sending
         readable, writable, _ = select.select([sock], [sock] if want_write else [], [], 5)
         if readable:
@@ -155,6 +164,11 @@ def main() -> None:
     p.add_argument("--rate", type=int, default=0)
     p.add_argument("--family", default="")
     p.add_argument("--sni")
+    p.add_argument("--method", default="POST")
+    p.add_argument("--raw", action="store_true")
+    p.add_argument("--chunk", type=int, default=CHUNK)
+    p.add_argument("--declare", type=int, default=0)
+    p.add_argument("--wait", type=float, default=120)
     p.add_argument("--verbose", action="store_true")
     args = p.parse_args()
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.n) as pool:

@@ -6,8 +6,11 @@ Commit `cce9bd1 feat: STORY-013 - containers, compose, Caddy and an end-to-end s
 `origin` (GitHub) and `gitea`. Last story of the autonomous run; STORY-014 is held for Shuma (§ Handoff for STORY-014).
 **Gate r1** (`docs/findings/STORY-013-review.md`) failed it with 3 confirmed findings + 1 hardening; the fix is the
 commit `fix: STORY-013 - gate r1: uploads guarded before the body is read, real IPv6 client addresses, api without
-egress, smoke on an empty host` on top of `7d9311a` — § Gate r1 fixes below. The file:line references in § AC
-Verification are as of `cce9bd1`; § Gate r1 fixes cites the current ones.
+egress, smoke on an empty host` (`6ef0253`) on top of `7d9311a` — § Gate r1 fixes below; `3396e1a` repaired the SPA
+parity it broke. **Gate r2** (§ Round 2 of the review) failed it with 5 confirmed findings; the fix is `fix: STORY-013 -
+gate r2: slow bodies can't pin the caps, v6 keyed per /64, host reachability documented and probed` on top of
+`cc32530` — § Gate r2 fixes below. The file:line references in § AC Verification are as of `cce9bd1`; the gate sections
+cite the lines current at their commit.
 
 ## AC Verification
 - [x] AC-1: one multi-stage `Dockerfile` — `:6` `web` (`oven/bun:1.3.5`, `bun install --frozen-lockfile` + `bun run build`),
@@ -224,6 +227,145 @@ component change; `JobErrorCode` enumerates worker job failures only, not API co
 `bun run check` 0 errors 0 warnings (337 files), `bun run test` 285 passed (21 files), `bun run build` ok
 (109.22 kB / 38.92 kB gzip), `uv run pytest -q` 434 passed, `uv run ruff check` clean.
 
+## Gate r2 fixes (2026-09-26)
+
+**1. Slow bodies can't pin the caps** (finding 1, CONFIRMED live: 4 trickled uploads held all 4 slots; 63 held `PUT /plan`
+bodies filled `limit_concurrency` — no time or rate bound anywhere). No wall-clock cap anywhere: a genuine slow line
+still finishes a 200 MiB file.
+- **Uploads — the watchdog:** `src/pdf_splitter/upload.py:81` `Progress(min_rate, window, clock)` — `tick(n)` counts
+  bytes and, once a window has closed, is False when fewer than `min_rate` arrived in it; `remaining()` is what the wait
+  is bounded by. `UploadGuard.stream` (`:157`) runs the app with `receive` wrapped: `asyncio.wait_for(receive(),
+  progress.remaining())`, a timeout is `tick(0)` (an empty window is the same failure), a chunk is `tick(len)`. On a
+  stalled window the guard sends 408 `too_slow` ITSELF (the parser is mid-body and has sent nothing; `refuse` adds
+  `Connection: close`), hands the parser an `http.disconnect` and drops the 400 FastAPI answers to that
+  (`guarded_send`, `:181`). `Settings.min_upload_rate` = 32 KiB (`config.py:41`, `PDFSPLIT_MIN_UPLOAD_RATE`) per
+  `UPLOAD_WINDOW` = 30 s (`upload.py:50`). The clock is injectable (`UploadGuard(app, settings, clock=)`).
+- **Uploads — the per-client cap:** `upload.py:130-140` — before the server's cap admits, the client's key is
+  `ratelimit.ip_hash(client_ip)` (the same hash the window uses, so the cap and the window name the same client; held
+  in memory only, while the upload streams) and `per_client[key] >= Settings.max_uploads_per_client` (2 of the 4,
+  `config.py:38`, `PDFSPLIT_MAX_UPLOADS_PER_CLIENT`) is 429 `rate_limited` + `Retry-After: 5`, unread, no slot spent.
+  Order: headers → server cap (503) → client cap (429) → slot → disk. `admit` now takes the address it was handed
+  (`:206`) instead of computing it twice.
+- **Every other body — `BodyGuard`:** new `src/pdf_splitter/body_guard.py` (`app.py:42`, beside `UploadGuard`, both
+  inside the access log). For any http request that is not the upload: no `Content-Length` + a `Transfer-Encoding` →
+  411; `Content-Length` > `Settings.max_json_bytes` (4 MiB, `config.py:45`) → 413 `invalid` "The request body is too
+  large."; otherwise the body is read WHOLE here under `asyncio.wait_for(receive(), deadline − now)` with the deadline
+  `Settings.body_timeout` (20 s, `config.py:46`) from the request → 408 `too_slow` when it is not complete in time;
+  a disconnect mid-body ends the request with no answer and no route; what arrived is replayed to the route
+  (`replayed`, `:80`). Reading it here changes nothing about memory: the route read the same bytes into memory anyway.
+  A byte count backstops the declared length (`:71`). No body at all (a GET, `POST /cut`, `DELETE`) passes untouched.
+- `errors.py:30` `too_slow` (408, `upload.py:STATUS`), `web/src/lib/errors.ts:20` the SPA's message
+  ("The upload stalled and was abandoned…"), `errors.test.ts` sanity 17 → 18. DropZone renders it in place like every
+  upload error.
+- **Tests (no real sleeps — the clock is injected):** `tests/test_upload.py:624` an ASGI harness (`Sink` = the parser
+  stand-in, `trickling` = a `receive` that advances a fake clock per chunk and blocks past a `None`): `:689` 40 KiB every
+  10 s streams through three windows untouched (201, every byte); `:701` 100 bytes in 31 s → 408 sent by the guard with
+  `Connection: close`, the parser disconnected and its 201 dropped, in-flight counts freed, the slot spent (a trickler
+  pays with their own hour); `:718` the wait's own timeout path on the real clock (a 50 ms window, `min_upload_rate=1`:
+  the first window passes on 100 bytes, the empty one refuses). `:567` the per-client cap: two uploads from one /64
+  (`2001:db8:1:2::1/::2`) held in the route, a third from `::3` is 429 `rate_limited` + `Retry-After: 5` + `Connection:
+  close` with `rate` rows still 2, while `203.0.113.5` gets 201 (two of four slots free); after release the /64 is welcome
+  again. `tests/test_body_guard.py` (new): TestClient — chunked → 411, 4 MiB + 1 → 413 `invalid`, both unread (counter),
+  no-body requests untouched, a small body reaches the route whole (`404 not_found` proves the lookup ran; the counter
+  saw exactly the body); harness with a fake clock — the body replayed in order, a chunk landing after the 20 s bound →
+  408 + `Connection: close` with the route never run, the real-clock timeout path (50 ms), a disconnect mid-body → no
+  answer, headers-only refusals (chunked/oversized/malformed), a dishonest `Content-Length` capped by what arrives, the
+  upload path left to `UploadGuard`. `tests/test_config.py` covers the four new defaults and env names.
+- **Live** (smoke transcript below): 4 × 64 KiB at 256 B/s from `172.27.13.78` → `2×429 2×408` (the two admitted
+  abandoned after one 30 s window with ≤ 7 KB in), and `172.27.13.79` uploaded 201 while they held; 63 × `PUT /plan`
+  declaring 100 KB and sending 100 B, straight at the api → 63 × 408 after the 20 s bound, health through caddy 200
+  right after, api `restarts=0 health=healthy`.
+
+**2. v6 keyed per /64** (finding 2, CONFIRMED). `ratelimit.py:54` `rate_key(address)`: IPv4 as is; IPv6 → its /64
+(`ipaddress.ip_network((addr, 64), strict=False)` → `2001:db8:1:2::/64`); a v4-mapped v6 address → its v4; a non-IP
+string as written. `ip_hash` (`:70`) hashes `rate_key(ip)`, so every consumer — the window, `jobs.ip_hash`, the
+per-client cap, the smoke's `hash_of` — agrees. The /128 distinctness assertion in `tests/test_limits.py` is replaced by
+`:105` `test_ipv6_clients_share_a_window_per_64_and_v4_mapped_addresses_are_their_v4`: same /64 (three spellings) → one
+hash, a different /64 → another, the mapped v4 → the v4's, distinct v4 distinct. Live: the edge client
+`fd27:5eaf:9a13:1::77` and the host at `fd27:5eaf:9a13:1::1` now share one bucket (rows 12→13, hashes 4→4, rate_key
+`fd27:5eaf:9a13:1::/64`), where gate r1 had counted them apart. The smoke's v6 step asserts that pair; it no longer
+asserts a "+1 hash" for the edge client, because the run's very first upload (`curl https://localhost`) reaches caddy
+through docker-proxy from the edge gateway — and whether curl picked `::1` or `127.0.0.1` decides whether that opened
+the v6 /64's bucket or the v4 gateway's.
+
+**3. Host reachability** (finding 3, CONFIRMED live: Ollama on this laptop answered the api at the backend gateway).
+The truth, now in README § Deploy, Architecture ADR-005 ("The host is the exception") and the compose header: `internal`
+stops Docker *forwarding* for the network — the api still reaches nothing on the internet or the LAN — but the host sits
+on it as the gateway (`172.30.0.1` / `fd30:5eaf:9a13::1`), Docker's rules live in FORWARD, and INPUT is the host's, so
+a service bound to `0.0.0.0`/`[::]` answers the api unless the host's firewall drops INPUT from the backend subnets.
+`deploy/smoke.sh:154` probes the BACKEND gateway, v4 and v6, on `SMOKE_HOST_PORTS` (default `22`) from inside the api and
+prints a **WARNING** (never a failure — the fix is outside the stack) naming the reachable ports and the rule; this run,
+with `SMOKE_HOST_PORTS="22 11434"`: `WARN the api reaches the host at its backend gateway: [172.27.13.1]:11434
+[fd27:5eaf:9a13::1]:11434`. README § Deploy "Host firewall" has the exact lines (ufw `before.rules`/`before6.rules`
+`-A ufw-before-input -s <subnet> -j DROP` for both families; nftables `ip saddr … drop` / `ip6 saddr … drop`) and the
+check to run from inside the api afterwards; § Handoff for STORY-014 repeats them for the VM.
+
+**4. Real "before the body" tests** (finding 4, reviewer-proven: `spool_dir.iterdir()` cannot see Starlette's unnamed
+`O_TMPFILE`). `tests/test_upload.py:418` `Reading`, an ASGI wrapper around the whole app that counts the body messages
+and bytes the app takes from `receive`; `reading_client(settings)`; `assert_unread`. `:446` (oversized `Content-Length`)
+and `:489` (the slot before the body) assert the counter is at zero instead of listing the directory — and `:489` first
+shows the counter DOES move on the accepted upload (≥ 1 message, more bytes than the PDF) before zeroing it. `:509`
+`test_the_reading_counter_catches_a_guard_that_drains_the_body_first` proves the instrument: a guard monkeypatched to
+drain the body before refusing moves the counter (1 message, > 2 MiB) and `assert_unread` fails with "read … bytes of
+body". The body-guard tests use the same counter.
+
+**5. Docs** (finding 5). § Handoff below no longer asks STORY-014 for the `overloaded` message (done in `3396e1a`).
+Architecture § API Interface `201:` line now lists `408 too_slow · 411 invalid (chunked) · 413 too_large|too_many_pages ·
+415 invalid (not multipart) · … · 503 disk_full|overloaded`, says which 429 is which (the hour vs. the per-client cap)
+and exactly which answers spend a slot (the slot is taken once the headers pass and both caps admit: 201, the route's
+400/413, 503 `disk_full` and 408 `too_slow` count; 411/415, a 413 from the headers, 503 `overloaded` and the cap's 429 do
+not), plus the body-guard line under `PUT /plan`. § api gained the watchdog and **Body guard** bullets; ADR-007 an "As
+built (gate r2)" line for `rate_key`; ADR-008 the per-/64 note. README § Configuration has the four new variables, §
+Deploy the corrected reachability prose, the firewall block and the smoke's new steps; `deploy/.env.example` and
+`compose.yaml` pass the four through.
+
+**Smoke changes on the way:** the in-flight-cap step could no longer be driven from one address (the per-client cap
+refuses four of six first), so it is two steps — the client's cap (6 from `CLIENT4` → `2×400 4×429`, then 2 more so
+`CLIENT4` arrives at the XFF check with exactly two slots left, as before) and the server's cap (6 at once from three
+addresses `.80/.81/.82`, two each → `4×400 2×503`, 4 open `/jobs/.spool` fds mid-upload). `smoke_client.py` learned
+`--method`, `--raw` (a bare JSON body), `--chunk` (a real trickle: the old `--rate` throttled 64 KiB chunks), `--declare`
+(promise N bytes, send fewer — a body that never finishes) and `--wait`. One-off client names carry `$BASHPID`: the
+`$RANDOM` streams of background subshells are copies of each other and two clients collided on a name.
+
+**Tests:** `uv run pytest -q` → **450 passed in 98.38s** (434 → 450); `uv run ruff check` → `All checks passed!`.
+`cd web && bun run check` → `337 FILES 0 ERRORS 0 WARNINGS`; `bun run test` → `Test Files 21 passed · Tests 286 passed`
+(285 → 286: the `too_slow` parity case); `bun run build` → `dist/assets/index-DGwoLPx7.js 109.31 kB │ gzip: 38.95 kB`.
+`docker compose config` renders the four new variables for api and worker. **Smoke (`SMOKE_HOST_PORTS="22 11434"
+./deploy/smoke.sh`), run 4 — PASSED, exit 0** (runs 1–3 stopped at the cap step, a client-name collision and the v6
+"+1 hash" assertion — all three smoke-script defects, fixed as described above):
+```
+08:05:13 smoke: project pdfsplit-smoke, caddy https://localhost:18443, backend 172.27.13.0/24 + fd27:5eaf:9a13::/64, edge 172.27.14.0/24 + fd27:5eaf:9a13:1::/64, 22 other containers running
+08:05:13   ok  fixture book: 127643 bytes
+08:05:13 docker compose up -d --build --wait
+08:05:24   ok  stack up: api=Up 6 seconds (healthy) caddy=Up Less than a second worker=Up 6 seconds
+08:05:24   ok  GET /api/health via caddy → 200 {"ok":true,"queue":0,"disk_free_gb":233.9,"engine_version":"0.4.2"}
+08:05:24   ok  SPA: / and /j/<id> serve index.html; CSP + nosniff present; /assets/index-DGwoLPx7.js gzip-encoded
+08:05:24   ok  egress: api github.com:443 blocked; 172.27.14.1:18443 blocked; 1.1.1.1:53 blocked; caddy reached acme-v02.api.letsencrypt.org; worker network=none; api publishes nothing
+08:05:25 WARN  the api reaches the host at its backend gateway: [172.27.13.1]:11434 [fd27:5eaf:9a13::1]:11434 — drop INPUT from 172.27.13.0/24 and fd27:5eaf:9a13::/64 on the host (README § Deploy) before going public
+08:05:25   ok  POST /api/jobs → 201 (state queued)
+08:05:27   ok  analyze → review (6/6 pages)
+08:05:27   ok  GET /plan → 200 (source headings, 3 sections); PUT /plan → 200
+08:05:30   ok  POST /cut → 202; cut → done (3/3 sections)
+08:05:30   ok  GET /result.zip → 200 application/zip, 94757 bytes, 3 PDFs + manifest.json:
+        001 - Foundations of Testing.pdf
+        002 - Chapter Two- The Middle of the Synthetic Book.pdf
+        003 - Closing Chapter.pdf
+08:05:32   ok  flood: 8 × 300 MiB straight at the api → 8 × 413 too_large, at most 1728 KB of body read each, 0 slots spent; api oom_killed=false restarts=0 health=healthy mem=2147483648, 56.09MiB resident
+08:05:44   ok  per-client cap: 6 × 60 MiB at once from 172.27.13.77 → 2×400 4×429 (2 streamed, 4 refused unread, no slot); rate rows +2 under 172.27.13.77; then 2 more → 2 × 400
+08:05:50   ok  server cap: 6 × 60 MiB at once from 3 addresses → 4×400 2×503 (4 streamed to the spool: 4 open /jobs/.spool fds mid-upload; 2 refused unread); rate rows +4 across 2 new hashes; api oom_killed=false restarts=0 health=healthy mem=2147483648
+08:05:53   ok  XFF check: 3 uploads straight at the api with spoofed X-Forwarded-For → 201 201 429; rate rows 9→11, all under 172.27.13.77, no new client hash
+08:05:55   ok  IPv6: edge client fd27:5eaf:9a13:1::77 → caddy over v6 → 201, counted under its /64; host → [fd27:5eaf:9a13:1::1]:18443 (v6 DNAT) → 201, same /64 → the same bucket (rows 12→13, hashes 4→4; rate_key fd27:5eaf:9a13:1::/64)
+08:06:26   ok  slow uploads: 4 × 64 KiB at 256 B/s from 172.27.13.78 → 2×408 2×429 (2 refused by the per-client cap unread, 2 abandoned after a 30 s window with ≤ 7 KB in); 172.27.13.79 got 201 meanwhile; rate rows +3 (2 admitted trickles + 1), 2 new hashes; api oom_killed=false restarts=0 health=healthy mem=2147483648
+08:06:47   ok  held PUTs: 63 × PUT /plan declaring 100 KB and sending 100 B, straight at the api → 63 × 408 too_slow after the 20 s bound; health via caddy 200 after; api oom_killed=false restarts=0 health=healthy mem=2147483648
+08:06:47   ok  DELETE → 204, GET → 410 (expired)
+08:06:47 teardown: docker compose -p pdfsplit-smoke down -v; untag the :smoke images
+08:06:49 other containers untouched: 22 before and after; leftovers of pdfsplit-smoke: 0
+08:06:49 SMOKE PASSED
+```
+**Isolation:** `docker ps -a`, `docker network ls` and `docker volume ls` before and after the four runs are identical
+(22 containers, incl. `deploy-*` and `multica-*` on `172.26.0.0/16`, untouched); no `pdfsplit*` image or `:smoke` tag
+remains; nothing pushed, no daemon setting changed, the smoke's own subnets stayed `172.27.13/14.0/24` + the `fd27:` ULAs.
+
 ## Bugs Found
 - **`docker compose down --rmi all` under a throwaway project untagged another project's image.** First teardown design.
   The smoke build is byte-identical to a `:local` build, so both tags share one image ID and compose's remove-by-ID took
@@ -286,14 +428,26 @@ a live stack; uploads are auto-deleted after `PDFSPLIT_TTL_HOURS` so no backups 
 decides TLS: a public hostname → Let's Encrypt via TLS-ALPN/HTTP-01 on 443/80; `localhost` → internal CA. If the VM's
 docker already uses `172.30.0.0/24` or `172.30.1.0/24` (or the ULA `fd30:5eaf:9a13::/48`), set the subnet AND the
 addresses in it together (`PDFSPLIT_SUBNET`/`PDFSPLIT_SUBNET6`/`PDFSPLIT_CADDY_IP`/`PDFSPLIT_CADDY_IP6`,
-`PDFSPLIT_EDGE_SUBNET`/`PDFSPLIT_EDGE_SUBNET6`). The api has no egress (its network is internal), so nothing in the api
-may ever need to call out — a future webhook or outbound check belongs in caddy's network or a new service. Two `web/`
-follow-ups for 014 to fold in with the terms/privacy pages: the `overloaded` code (503 + `Retry-After`, gate r1) needs a
-line in the SPA's message map (`web/src/lib/errors.ts`; until then visitors see the fallback text), and the favicon CSP
-note above. The uptime check (AC-5 of 014)
+`PDFSPLIT_EDGE_SUBNET`/`PDFSPLIT_EDGE_SUBNET6`). The api has no egress to the internet or the LAN (its network is
+internal), so nothing in the api may ever need to call out — a future webhook or outbound check belongs in caddy's
+network or a new service. **But the api CAN reach the VM itself** at the backend gateway (`172.30.0.1` and
+`fd30:5eaf:9a13::1` by default): `internal` only stops forwarding, and sshd on `0.0.0.0`/`[::]` answers there (gate r2,
+seen live with Ollama on the laptop). Add the host rule BEFORE the first public `up`, ahead of every allow, both
+families — ufw (Ubuntu): in `/etc/ufw/before.rules`, in the `*filter` section's `ufw-before-input` chain right after
+the `RELATED,ESTABLISHED` line, `-A ufw-before-input -s 172.30.0.0/24 -j DROP`; in `/etc/ufw/before6.rules` at the same
+spot, `-A ufw-before-input -s fd30:5eaf:9a13::/64 -j DROP`; then `ufw reload`. nftables (Debian without ufw), in
+`/etc/nftables.conf` under `chain input` before the accept rules: `ip saddr 172.30.0.0/24 drop` and `ip6 saddr
+fd30:5eaf:9a13::/64 drop`, then `nft -f /etc/nftables.conf`. (Adjust the subnets if `deploy/.env` changed them.) Check,
+from inside the running api, that every line says `blocked`:
+`docker compose -p pdfsplit -f deploy/compose.yaml exec api python -c 'import socket
+for host in ("172.30.0.1", "fd30:5eaf:9a13::1"):
+    try: socket.create_connection((host, 22), timeout=2).close(); print("REACHED", host)
+    except OSError as e: print("blocked", host, type(e).__name__)'` — or run `./deploy/smoke.sh` on the VM: its
+host-reachability step prints a WARNING naming the reachable ports while the rule is missing (README § Deploy has the
+same block). The `overloaded` and `too_slow` codes already have SPA messages (gates r1/r2); the one `web/` follow-up for
+014 to fold in with the terms/privacy pages is the favicon CSP note above. The uptime check (AC-5 of 014)
 should hit `https://<domain>/api/health` and expect `"ok":true` + `"engine_version":"0.4.2"`; ntfy is LAN-only, so a cloud
-cron / healthchecks.io ping is the likely answer — decide in-story. Favicon CSP note above is a one-line `web/` change for
-014 to fold in with the terms/privacy pages.
+cron / healthchecks.io ping is the likely answer — decide in-story.
 
 ## Out-of-Scope Items
 - Favicon `data:,` vs. the CSP (cosmetic; § CSP above) — `web/` is STORY-014's to touch.

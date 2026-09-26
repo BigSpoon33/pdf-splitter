@@ -51,10 +51,26 @@ def client_ip(request: Request, trusted_proxy: str | None) -> str:
     return peer
 
 
+def rate_key(address: str) -> str:
+    """What the window is keyed on. An IPv4 address is itself; an IPv6 address is its /64 (`2001:db8:1:2::/64`),
+    because a visitor's ISP hands out a /64 or more and a client that can pick any of its 2^64 addresses would
+    otherwise get an unlimited number of windows (gate r2); a v4-mapped v6 address (`::ffff:203.0.113.9`) is the
+    v4 client it names. Anything that is not an IP is kept as written."""
+    try:
+        parsed = ipaddress.ip_address(address)
+    except ValueError:
+        return address
+    if isinstance(parsed, ipaddress.IPv6Address):
+        if parsed.ipv4_mapped is not None:
+            return str(parsed.ipv4_mapped)
+        return str(ipaddress.ip_network((parsed, 64), strict=False))
+    return str(parsed)
+
+
 def ip_hash(ip: str, now: datetime | None = None, secret: str | None = None) -> str:
     day = (now or utcnow()).astimezone(UTC).date().isoformat()
     salt = hashlib.sha256(f"{secret or _PROCESS_SECRET}:{day}".encode()).digest()
-    return hashlib.sha256(salt + ip.encode()).hexdigest()
+    return hashlib.sha256(salt + rate_key(ip).encode()).hexdigest()
 
 
 def window_hashes(ip: str, now: datetime, secret: str | None = None) -> list[str]:

@@ -95,8 +95,8 @@ feat: STORY-013 - containers, compose, Caddy and an end-to-end smoke test
 
 ## Status
 
-**Done** (2026-09-26, `cce9bd1` + gate r1 fix on `feature/mvp`; findings in `docs/findings/STORY-013-findings.md`,
-review in `docs/findings/STORY-013-review.md`)
+**Done** (2026-09-26, `cce9bd1` + gate r1 fix `6ef0253` + `3396e1a` + gate r2 fix on `feature/mvp`; findings in
+`docs/findings/STORY-013-findings.md`, review in `docs/findings/STORY-013-review.md`)
 
 - [x] AC-1
 - [x] AC-2

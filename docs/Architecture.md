@@ -110,20 +110,27 @@ deploy/
 - **Responsibility:** the HTTP surface, input validation, rate limiting, job state transitions,
   and serving outputs. It never runs a full analysis or cut in-process.
 - **Inputs:** multipart uploads (streamed to disk), JSON Plans, job ids.
-- **Upload guard** (`upload.UploadGuard`, STORY-013 gate r1): an ASGI layer around `POST /api/jobs` that answers
+- **Upload guard** (`upload.UploadGuard`, STORY-013 gate r1 + r2): an ASGI layer around `POST /api/jobs` that answers
   from the headers alone — 413 for a `Content-Length` past `MAX_BYTES` + a 64 KiB envelope, 411/415 for a chunked
-  or non-multipart body, 503 `overloaded` past `MAX_UPLOADS` in flight, 429 when the client's rate slot is spent,
-  503 `disk_full` — before Starlette's multipart parser reads a byte, and closes the connection on a refusal. The
-  route inherits the client's hash and never takes a slot of its own. What does get parsed spools under
-  `<jobs>/.spool` on the volume (`upload.spooling_to` sets `tempfile`/`TMPDIR` for the app's lifetime), not the
-  container's tmpfs; uvicorn's `limit_concurrency` caps connections.
+  or non-multipart body, 503 `overloaded` past `MAX_UPLOADS` in flight, 429 `rate_limited` when the client already
+  holds `MAX_UPLOADS_PER_CLIENT` of them (keyed like the window: the IPv4 address or the IPv6 /64) or when its rate
+  slot is spent, 503 `disk_full` — before Starlette's multipart parser reads a byte, and closes the connection on a
+  refusal. The route inherits the client's hash and never takes a slot of its own. What is admitted streams under a
+  watchdog (`upload.Progress`): fewer than `MIN_UPLOAD_RATE` bytes in any 30 s window and the upload is abandoned
+  with 408 `too_slow` — a floor on the rate, never a wall clock, so a slow line still finishes a 200 MiB file. What
+  does get parsed spools under `<jobs>/.spool` on the volume (`upload.spooling_to` sets `tempfile`/`TMPDIR` for the
+  app's lifetime), not the container's tmpfs; uvicorn's `limit_concurrency` caps connections.
+- **Body guard** (`body_guard.BodyGuard`, gate r2): every other request with a body (a `PUT /plan`, a section
+  plan) is read whole before its route runs — `Content-Length` required (411), at most `MAX_JSON_BYTES` (413
+  `invalid`), all of it within `BODY_TIMEOUT` seconds (408 `too_slow`) — so a held-open body costs one connection
+  for seconds, not for as long as the client likes (63 of them used to fill `limit_concurrency` for good).
 - **Outputs:** JSON, PNG, PDF, ZIP.
 - **Preview calls** (`/sheets/{n}.png`, `/sections/{i}/plan`) run the engine *read-only* in a
   subprocess from a small pool (`preview_timeout = 20 s`, same rlimits as the worker), using the
   index the analyze job cached. A PNG render is cached on disk per (sheet, dpi, settings-hash).
 - **Failure mode:** each rejection is a specific 4xx with a `code` (`too_large`, `too_many_pages`,
-  `encrypted`, `not_pdf`, `no_text_layer`, `rate_limited`, `disk_full`, `overloaded`, `expired`). Unexpected
-  errors → 500 with a request id. Nothing leaks internal paths.
+  `encrypted`, `not_pdf`, `no_text_layer`, `rate_limited`, `disk_full`, `overloaded`, `too_slow`, `expired`).
+  Unexpected errors → 500 with a request id. Nothing leaks internal paths.
 
 #### worker
 
@@ -220,9 +227,13 @@ rejects `page ∉ [1, pages]` (the engine's `cuts.plan` raises IndexError past t
 
 ```
 POST   /api/jobs                       multipart file=<pdf> [mode=chapters|ranges]   (ADR-009 as built: the split mode is the job's, fixed here; default chapters)
-  201: {id, state:"queued"}            400 not_pdf|encrypted|no_text_layer · 413 too_large|too_many_pages · 422 invalid (loc body.mode) · 429 rate_limited · 503 disk_full
-                                       429 carries Retry-After (seconds until the oldest of the RATE_PER_HOUR attempts leaves the sliding hour); a refused
-                                       upload counts as an attempt; the client is the peer, or X-Forwarded-For's last hop when the peer is TRUSTED_PROXY
+  201: {id, state:"queued"}            400 not_pdf|encrypted|no_text_layer · 408 too_slow · 411 invalid (chunked) · 413 too_large|too_many_pages · 415 invalid (not multipart) · 422 invalid (loc body.mode) · 429 rate_limited · 503 disk_full|overloaded
+                                       429 rate_limited is the sliding hour (Retry-After = seconds until the oldest of the RATE_PER_HOUR attempts leaves it) or the
+                                       per-client in-flight cap (Retry-After 5); 503 overloaded is the server's in-flight cap (Retry-After 5); 408 too_slow is an
+                                       upload that fell under MIN_UPLOAD_RATE bytes per 30 s. Which answers spend one of the client's RATE_PER_HOUR slots: the slot is
+                                       taken once the headers pass and both caps admit, so 201, the route's 400/413, 503 disk_full and 408 too_slow each count as
+                                       an attempt; 411/415, a 413 from the headers, 503 overloaded and the cap's 429 spend none. The client is the peer, or
+                                       X-Forwarded-For's last hop when the peer is TRUSTED_PROXY; an IPv6 client is its /64 (ratelimit.rate_key)
 GET    /api/jobs/{id}                  {id, state, kind, progress, total, queue_position, message, error_code, expires_at, seconds_left, filename, pages}
                                        queue_position = 1 + the queued jobs of the same kind created before this one (the claim order); null unless queued
                                        error_code (failed only) = timeout | resources | too_large_output | internal
@@ -231,6 +242,8 @@ GET    /api/jobs/{id}                  {id, state, kind, progress, total, queue_
 GET    /api/jobs/{id}/analysis         Analysis (409 until state ≥ review)
 GET    /api/jobs/{id}/plan             Plan (default = suggested source, no overrides)
 PUT    /api/jobs/{id}/plan             Plan → 200 normalized Plan | 422 with field errors
+                                       every body but the upload's (body_guard.BodyGuard): Content-Length required (411 invalid), ≤ MAX_JSON_BYTES (413 invalid),
+                                       whole within BODY_TIMEOUT seconds (408 too_slow) — answered before the route runs, with Connection: close
 GET    /api/jobs/{id}/sheets/{n}.png?dpi=72   PNG (dpi ∈ {48, 72, 110})
 POST   /api/jobs/{id}/sections/{i}/plan       {settings?, override?, sections?} → Section plan (not persisted)
                                        sections = the list to plan i in (the client's local one, validated as in PUT), else the saved list
@@ -311,6 +324,12 @@ never appear in logs (logs carry a short hash).
   resolver unreachable from inside it); caddy alone sits on `edge` for the published ports and ACME. Both python
   containers run `read_only`, `cap_drop: [ALL]`, `no-new-privileges`, a 64 MB tmpfs `/tmp`, `mem_limit` with
   `memswap_limit` equal to it (no swap: a runaway is killed and restarted, never paged).
+- **The host is the exception (gate r2):** `internal` stops Docker *forwarding* for the network; the host itself
+  sits on it as the gateway (`172.30.0.1` / `fd30:5eaf:9a13::1`), so anything the host binds to `0.0.0.0`/`[::]`
+  (sshd on the VM; Ollama on the laptop, where the review reached it) answers the api there. Docker's own rules
+  never drop that (they live in FORWARD; INPUT is the host's), so the VM's firewall must: drop INPUT from the
+  backend subnets, v4 and v6, ahead of every allow (README § Deploy has the ufw/nftables lines and the check).
+  `deploy/smoke.sh` probes the backend gateway from inside the api and prints a WARNING when the host answers.
 - **Alternatives:** gVisor/Firecracker (overkill for v1; could be added later as a runtime flag).
 
 ### ADR-006: Svelte + Vite + TypeScript SPA, built with Bun, served by Caddy
@@ -324,6 +343,7 @@ never appear in logs (logs carry a short hash).
 - **Status:** Accepted (Shuma, 2026-09-25)
 - **Decision:** No accounts. The job id is the capability. `jobs.owner` is a nullable column reserved for v2 accounts. The IP is stored only as a salted hash (for rate limiting), and the salt rotates daily.
 - **As built (STORY-012):** `ratelimit.ip_hash(ip, now, secret)` = sha256(sha256(`secret:UTC date`) + ip); the secret is `PDFSPLIT_IP_SALT`, or one drawn per api process when unset (fine for the CLI's single uvicorn process; several processes must share one). The same hash feeds `jobs.ip_hash` and `rate.ip_hash`; logs carry at most its first 8 characters. The window does not notice the salt turning: during the first hour of a UTC day the count also includes the hits recorded under yesterday's hash (`ratelimit.window_hashes`), and new hits are always recorded under today's — so the sliding hour is the same at 00:30 as at any other time. The count and the record are one `BEGIN IMMEDIATE` transaction (`Store.take_rate_slot`), and the clock — so the dated hash set and the window's start — is read INSIDE it, after the lock is won (a request that arrived at 23:59:59 and commits at 00:00:00 counts under the new day's hashes like the requests it queued behind), so a burst of parallel uploads from one client gets exactly `RATE_PER_HOUR` through, midnight or not; the slot is claimed before the disk guard runs, so an attempt the guard refuses (503) still spends one.
+- **As built (STORY-013 gate r2):** what is hashed is `ratelimit.rate_key(address)` — the IPv4 address itself, an IPv6 address's /64 (`2001:db8:1:2::/64`: a visitor's ISP hands out a /64 or more, and keying the full address would give one client 2^64 windows), a v4-mapped v6 address as its v4. The in-flight per-client cap (`upload.UploadGuard`) keys on the same hash, in memory only.
 
 ### ADR-008: Caddy for TLS + static + proxy on one Hetzner/DO VM
 
@@ -339,7 +359,8 @@ never appear in logs (logs carry a short hash).
   canonical addresses): the only peers whose `X-Forwarded-For` (last hop) names the client; uvicorn runs with
   `proxy_headers=False` so nothing else rewrites the peer. With IPv6 on the networks Docker DNATs a v6 visitor to caddy's
   own v6 address and caddy forwards their real address, so v6 visitors no longer all arrive as the bridge gateway (gate r1
-  finding 2; the fallback, should a host's Docker lack `ip6tables`, is to publish no AAAA record). The api
+  finding 2; the fallback, should a host's Docker lack `ip6tables`, is to publish no AAAA record) and are keyed per /64
+  (gate r2, ADR-007). The api
   (`api --host 0.0.0.0 --port 8000`, IPv4 inside its container — caddy falls back from the refused v6 dial at once) is
   reachable from caddy only; the worker has `network_mode: none`. Both are the `python` image (uid 10001) with `read_only`,
   `cap_drop: [ALL]`, `no-new-privileges`, a 64 MB tmpfs `/tmp` (uploads spool on the volume, § api), `mem_limit` 2g/3g with

@@ -9,6 +9,7 @@ from fastapi import FastAPI
 
 from . import errors
 from .access_log import access_log
+from .body_guard import BodyGuard
 from .config import Settings
 from .deps import SettingsDep, StoreDep, get_settings, get_store
 from .routes import download, plan, preview
@@ -36,8 +37,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app = FastAPI(title="pdf-splitter", lifespan=lifespan)
     app.state.settings = settings
-    # Added first, so the access log wraps it: a refusal the guard sends without reading the body is still
-    # logged, with an X-Request-ID.
+    # Added first, so the access log wraps them: a refusal a guard sends without reading the body is still
+    # logged, with an X-Request-ID. The two guards split the requests by path (the upload; every other body).
+    app.add_middleware(BodyGuard, settings=settings)
     app.add_middleware(UploadGuard, settings=settings)
     app.middleware("http")(access_log)
     errors.install(app)

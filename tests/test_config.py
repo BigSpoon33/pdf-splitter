@@ -10,7 +10,8 @@ from pdf_splitter.config import Settings
 def test_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in ("JOBS_DIR", "MAX_BYTES", "MAX_PAGES", "TTL_HOURS", "WORKERS", "RATE_PER_HOUR", "MIN_FREE_GB",
                  "TRUSTED_PROXY", "IP_SALT", "MAX_OUTPUT_BYTES", "ANALYZE_TIMEOUT", "CUT_TIMEOUT", "PUBLIC_URL",
-                 "MAX_UPLOADS", "LIMIT_CONCURRENCY"):
+                 "MAX_UPLOADS", "LIMIT_CONCURRENCY", "MAX_UPLOADS_PER_CLIENT", "MIN_UPLOAD_RATE", "MAX_JSON_BYTES",
+                 "BODY_TIMEOUT"):
         monkeypatch.delenv(f"PDFSPLIT_{name}", raising=False)
     s = Settings()
     assert s.jobs_dir == Path.cwd() / "jobs"
@@ -30,6 +31,10 @@ def test_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     # STORY-013 gate r1: four uploads streaming at once, 64 open connections, the spool beside the jobs.
     assert (s.max_uploads, s.limit_concurrency) == (4, 64)
     assert s.spool_dir == Path.cwd() / "jobs" / ".spool"
+    # Gate r2: one client holds at most two of the four slots; a body must keep moving (32 KiB per 30 s window
+    # for an upload; a JSON body of at most 4 MiB, whole, within 20 s).
+    assert (s.max_uploads_per_client, s.min_upload_rate) == (2, 32 * 1024)
+    assert (s.max_json_bytes, s.body_timeout) == (4 * 1024 * 1024, 20)
 
 
 @pytest.mark.parametrize("raw", [".", "", "jobs", "./jobs/../jobs"])
@@ -60,6 +65,10 @@ def test_env_prefix(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         "PUBLIC_URL": "https://split.example",
         "MAX_UPLOADS": "2",
         "LIMIT_CONCURRENCY": "16",
+        "MAX_UPLOADS_PER_CLIENT": "1",
+        "MIN_UPLOAD_RATE": "1024",
+        "MAX_JSON_BYTES": "65536",
+        "BODY_TIMEOUT": "2.5",
     }
     for k, v in env.items():
         monkeypatch.setenv(f"PDFSPLIT_{k}", v)
@@ -70,6 +79,7 @@ def test_env_prefix(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     assert (s.min_free_gb, s.trusted_proxy, s.ip_salt, s.max_output_bytes) == (0.5, "172.18.0.2", "shared-secret", 300000)
     assert s.public_url == "https://split.example"
     assert (s.max_uploads, s.limit_concurrency) == (2, 16)
+    assert (s.max_uploads_per_client, s.min_upload_rate, s.max_json_bytes, s.body_timeout) == (1, 1024, 65536, 2.5)
 
 
 def test_unprefixed_env_is_ignored(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -20,6 +20,11 @@ x-pdfsplit-env: &pdfsplit-env
   PDFSPLIT_MIN_FREE_GB: ${PDFSPLIT_MIN_FREE_GB:-2}
   PDFSPLIT_MAX_UPLOADS: ${PDFSPLIT_MAX_UPLOADS:-4}
   PDFSPLIT_LIMIT_CONCURRENCY: ${PDFSPLIT_LIMIT_CONCURRENCY:-64}
+  # Gate r2: one client's share of the upload slots, and the floors under a body that stops arriving.
+  PDFSPLIT_MAX_UPLOADS_PER_CLIENT: ${PDFSPLIT_MAX_UPLOADS_PER_CLIENT:-2}
+  PDFSPLIT_MIN_UPLOAD_RATE: ${PDFSPLIT_MIN_UPLOAD_RATE:-32768}
+  PDFSPLIT_MAX_JSON_BYTES: ${PDFSPLIT_MAX_JSON_BYTES:-4194304}
+  PDFSPLIT_BODY_TIMEOUT: ${PDFSPLIT_BODY_TIMEOUT:-20}
   # The api's rate window keys on this; the worker gets it too because the janitor prunes those rows.
   PDFSPLIT_IP_SALT: ${PDFSPLIT_IP_SALT:?set PDFSPLIT_IP_SALT (deploy/.env) - the secret under the IP hash}
   PDFSPLIT_PUBLIC_URL: ${PDFSPLIT_PUBLIC_URL:-https://localhost}

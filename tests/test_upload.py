@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import logging
@@ -8,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from pathlib import Path
 
 import pymupdf as fitz
@@ -413,17 +415,47 @@ def never_reached(*args, **kwargs):
     raise AssertionError("the route ran: the guard let the body through")
 
 
+class Reading:
+    """Around the whole app: counts the body messages and bytes the app took from `receive`. "Refused before the
+    body is read" means both stay at zero — the spool directory could never show it, since Starlette's spool file
+    is an unnamed `O_TMPFILE` (gate r2)."""
+
+    def __init__(self, app) -> None:
+        self.app, self.messages, self.bytes = app, 0, 0
+
+    async def __call__(self, scope, receive, send) -> None:
+        async def counting():
+            message = await receive()
+            if message["type"] == "http.request":
+                self.messages += 1
+                self.bytes += len(message.get("body", b""))
+            return message
+
+        await self.app(scope, counting, send)
+
+
+def reading_client(settings: Settings) -> tuple[TestClient, Reading]:
+    reading = Reading(create_app(settings))
+    return TestClient(reading), reading
+
+
+def assert_unread(reading: Reading) -> None:
+    assert (reading.messages, reading.bytes) == (0, 0), f"the app read {reading.bytes} bytes of body"
+
+
 def test_oversized_content_length_is_refused_before_the_body_is_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A declared size past the cap (plus the multipart envelope) is 413 from the headers alone: the route never
-    runs, nothing is spooled, no slot is spent, and the connection is told to close so the client stops sending."""
+    runs, not a byte of body is taken from the socket, no slot is spent, and the connection is told to close so
+    the client stops sending."""
     settings = Settings(jobs_dir=tmp_path / "jobs", max_bytes=1000)
     monkeypatch.setattr(upload, "_accept", never_reached)
-    with TestClient(create_app(settings)) as client:
+    client, reading = reading_client(settings)
+    with client:
         # 2 MiB: past Starlette's 1 MiB in-memory spool, so a parsed body would have hit the temporary directory.
         r = post(client, b"%PDF-" + b"0" * (2 * 1024 * 1024))
         assert_rejected(r, settings, 413, "too_large")
         assert r.headers["connection"] == "close"
-        assert list(settings.spool_dir.iterdir()) == []
+        assert_unread(reading)
     assert rate_rows(settings) == 0
     # Just above the cap but inside the envelope allowance: the guard passes it, the streaming copy decides.
     monkeypatch.setattr(upload, "_accept", lambda *a, **k: upload.reject("too_large"))
@@ -456,17 +488,43 @@ def test_uploads_without_a_content_length_or_not_multipart_are_refused_unread(se
 
 def test_the_rate_slot_is_taken_before_the_body_is_read_and_only_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     settings = Settings(jobs_dir=tmp_path / "jobs", rate_per_hour=1)
-    with TestClient(create_app(settings)) as client:
-        assert post(client, pdf_bytes()).status_code == 201
-        # One upload, one slot: the route did not claim a second one on top of the guard's.
+    client, reading = reading_client(settings)
+    with client:
+        data = pdf_bytes()
+        assert post(client, data).status_code == 201
+        # One upload, one slot: the route did not claim a second one on top of the guard's. The accepted upload
+        # is what the counter sees: the whole multipart body, so a zero afterwards means something.
         assert rate_rows(settings) == 1
+        assert reading.messages >= 1 and reading.bytes > len(data)
+        reading.messages = reading.bytes = 0
         monkeypatch.setattr(upload, "_accept", never_reached)
         r = post(client, pdf_bytes())
         assert r.status_code == 429, r.text
         assert 3500 < int(r.headers["retry-after"]) <= 3600
         assert r.headers["connection"] == "close"
-        assert list(settings.spool_dir.iterdir()) == []
+        assert_unread(reading)
     assert rate_rows(settings) == 1 and job_count(settings) == 1
+
+
+def test_the_reading_counter_catches_a_guard_that_drains_the_body_first(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The instrument behind the two tests above, proven: a guard that took the body before refusing (what the
+    spool-directory check could not see) moves the counter, and `assert_unread` fails."""
+    settings = Settings(jobs_dir=tmp_path / "jobs", max_bytes=1000)
+    real = upload.UploadGuard.__call__
+
+    async def draining(self, scope, receive, send):
+        while scope["type"] == "http" and (await receive()).get("more_body"):
+            pass
+        await real(self, scope, receive, send)
+
+    monkeypatch.setattr(upload.UploadGuard, "__call__", draining)
+    monkeypatch.setattr(upload, "_accept", never_reached)
+    client, reading = reading_client(settings)
+    with client:
+        assert post(client, b"%PDF-" + b"0" * (2 * 1024 * 1024)).status_code == 413
+    assert reading.messages == 1 and reading.bytes > 2 * 1024 * 1024
+    with pytest.raises(AssertionError, match="read .* bytes of body"):
+        assert_unread(reading)
 
 
 def test_uploads_beyond_the_in_flight_cap_are_503_overloaded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -504,6 +562,170 @@ def test_uploads_beyond_the_in_flight_cap_are_503_overloaded(tmp_path: Path, mon
         assert statuses == [201, 201]
         assert post(client, pdf_bytes(), headers={"X-Forwarded-For": "203.0.113.4"}).status_code == 201
     assert job_count(settings) == 3
+
+
+def test_one_client_holds_at_most_max_uploads_per_client_and_never_all_the_slots(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Gate r2: two uploads held inside the route from one /64; a third from the same /64 is 429 at once with no
+    slot spent, while another client still gets one of the server's remaining slots — so one address can no
+    longer pin every slot and lock everyone else out."""
+    settings = Settings(jobs_dir=tmp_path / "jobs", max_uploads=4, max_uploads_per_client=2, trusted_proxy="testclient")
+    entered, release, holding = threading.Semaphore(0), threading.Event(), True
+    real = upload.run_preflight
+
+    def slow_preflight(*args, **kwargs):
+        # Only the two uploads started while `holding` wait; the ones sent afterwards run through.
+        if holding:
+            entered.release()
+            assert release.wait(30)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(upload, "run_preflight", slow_preflight)
+    statuses: list[int] = []
+    with TestClient(create_app(settings)) as client:
+
+        def attempt(xff: str) -> None:
+            statuses.append(post(client, pdf_bytes(), headers={"X-Forwarded-For": xff}).status_code)
+
+        held = [threading.Thread(target=attempt, args=(a,)) for a in ("2001:db8:1:2::1", "2001:db8:1:2::2")]
+        for t in held:
+            t.start()
+        for _ in held:
+            assert entered.acquire(timeout=30)
+        holding = False
+        r = post(client, pdf_bytes(), headers={"X-Forwarded-For": "2001:db8:1:2::3"})
+        assert r.status_code == 429, r.text
+        assert r.json() == {"code": "rate_limited", "message": upload.MESSAGES["rate_limited"]}
+        assert r.headers["retry-after"] == upload.RETRY_AFTER_OVERLOADED
+        assert r.headers["connection"] == "close"
+        assert rate_rows(settings) == 2
+        # Two of four slots are taken; a client elsewhere gets one of the other two.
+        assert post(client, pdf_bytes(), headers={"X-Forwarded-For": "203.0.113.5"}).status_code == 201
+        assert rate_rows(settings) == 3
+        release.set()
+        for t in held:
+            t.join(30)
+        assert statuses == [201, 201]
+        # The cap frees with the uploads: the same /64 is welcome again.
+        assert post(client, pdf_bytes(), headers={"X-Forwarded-For": "2001:db8:1:2::3"}).status_code == 201
+    assert job_count(settings) == 4
+
+
+# --- the watchdog (gate r2): a body that stops arriving is abandoned --------------------------------
+
+
+class Clock:
+    def __init__(self) -> None:
+        self.t = 0.0
+
+    def __call__(self) -> float:
+        return self.t
+
+
+class Sink:
+    """What the guard wraps in these tests, standing in for the multipart parser: reads the whole body, then
+    answers 201 — the answer the guard must drop once it has sent a 408 of its own."""
+
+    def __init__(self) -> None:
+        self.got, self.disconnected = 0, False
+
+    async def __call__(self, scope, receive, send) -> None:
+        while True:
+            message = await receive()
+            if message["type"] == "http.disconnect":
+                self.disconnected = True
+                break
+            self.got += len(message["body"])
+            if not message.get("more_body"):
+                break
+        await send({"type": "http.response.start", "status": 201, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+
+
+def upload_scope(length: int) -> dict:
+    return {
+        "type": "http", "http_version": "1.1", "method": "POST", "path": "/api/jobs", "scheme": "http",
+        "query_string": b"", "server": ("test", 80), "client": ("203.0.113.9", 1234),
+        "headers": [(b"content-type", b"multipart/form-data; boundary=x"), (b"content-length", str(length).encode())],
+    }
+
+
+def trickling(clock: Clock, steps: list[tuple]):
+    """A `receive` that plays `steps` — advance the clock by `dt`, then hand over `body` (the last step of a
+    complete body says `False` for more) — and, past a `None` body, a client that never sends another byte
+    (blocks until the guard's wait gives up)."""
+    it, silent = iter(steps), False
+
+    async def receive():
+        nonlocal silent
+        if not silent:
+            dt, body, *more = next(it)
+            clock.t += dt
+            if body is not None:
+                return {"type": "http.request", "body": body, "more_body": more[0] if more else True}
+            silent = True
+        await asyncio.Event().wait()
+
+    return receive
+
+
+def guarded(tmp_path: Path, clock, **overrides):
+    settings = Settings(jobs_dir=tmp_path / "jobs", **overrides)
+    settings.jobs_dir.mkdir()
+    store = Store(settings.db_path)
+    store.init()
+    store.close()
+    sink, sent = Sink(), []
+
+    async def send(message):
+        sent.append(message)
+
+    return upload.UploadGuard(sink, settings, clock=clock), sink, sent, send
+
+
+def statuses(sent: list) -> list[int]:
+    return [m["status"] for m in sent if m["type"] == "http.response.start"]
+
+
+def test_an_upload_that_keeps_moving_streams_to_the_app_untouched(tmp_path: Path) -> None:
+    """40 KiB every 10 s clears 32 KiB per 30 s window: three windows pass, the app gets every byte, one 201."""
+    clock = Clock()
+    guard, sink, sent, send = guarded(tmp_path, clock)
+    chunk = b"0" * (40 * 1024)
+    receive = trickling(clock, [(10.0, chunk)] * 8 + [(10.0, chunk, False)])
+    asyncio.run(guard(upload_scope(len(chunk) * 9), receive, send))
+    assert sink.got == len(chunk) * 9 and not sink.disconnected
+    assert statuses(sent) == [201]
+    assert guard.in_flight == 0 and guard.per_client == {}
+
+
+def test_an_upload_under_the_rate_floor_is_408_too_slow_and_frees_its_slots(tmp_path: Path) -> None:
+    """100 bytes in 31 s: the window closes with too little, so that chunk is never handed on — the guard answers
+    408 itself (Connection: close), tells the parser the client is gone and drops the parser's own answer. The
+    slot the window spent stays spent — a trickler pays with their own hour — but the in-flight counts are freed."""
+    clock = Clock()
+    guard, sink, sent, send = guarded(tmp_path, clock)
+    receive = trickling(clock, [(31.0, b"0" * 100), (1.0, b"0" * 100)])
+    asyncio.run(guard(upload_scope(1000), receive, send))
+    assert sink.disconnected and sink.got == 0
+    assert statuses(sent) == [408]
+    headers = {k.decode(): v.decode() for k, v in sent[0]["headers"]}
+    assert headers["connection"] == "close"
+    assert json.loads(sent[1]["body"]) == {"code": "too_slow", "message": upload.MESSAGES["too_slow"]}
+    assert guard.in_flight == 0 and guard.per_client == {}
+    assert rate_rows(guard.settings) == 1
+
+
+def test_a_silent_client_is_408_when_the_wait_itself_times_out(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The other path to the same answer: nothing arrives at all, so it is the wait that gives up (a 50 ms
+    window on the real clock, so the test waits milliseconds, not 30 s). A first window with enough in it
+    (100 bytes ≥ a floor of 1) rolls over; the empty one after it refuses."""
+    monkeypatch.setattr(upload, "UPLOAD_WINDOW", 0.05)
+    guard, sink, sent, send = guarded(tmp_path, time.monotonic, min_upload_rate=1)
+    receive = trickling(Clock(), [(0.0, b"0" * 100), (0.0, None)])
+    asyncio.run(guard(upload_scope(1000), receive, send))
+    assert sink.disconnected and sink.got == 100
+    assert statuses(sent) == [408]
+    assert guard.in_flight == 0 and guard.per_client == {}
 
 
 def test_the_app_spools_uploads_under_the_jobs_dir_while_it_runs(settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
