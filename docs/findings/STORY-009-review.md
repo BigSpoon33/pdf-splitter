@@ -18,3 +18,6 @@ Refuted: 1 (version guard works; but trailing-space loss mid-typing is real UX �
 Verified: all 6 findings + 3 additions work (3000-plan randomized override property test clean; live browser checks); every new test fails on 784b31d.
 
 1. [correctness, regression] editor.svelte.ts:257-263 (+ :100-102, :267; api.ts:242-249) — `sendBeforeUnload` always uses fetch keepalive; Chromium refuses keepalive bodies > ~64 KiB and `unsent` is already cleared, so a refused send is never retried; `onVisibility` routes an ordinary tab switch through it. Maciocia "Any level" = 1654 sections (142 KB): tab switch → "Could not reach the server", later close → rename lost (784b31d saved it). CONFIRMED (Chromium cutoff between 65,536 and 70,000 B).
+
+## Round 3 (re-review of c04f2e8, standing-policy auto-fix) — PASSED
+Auto-review trail: r1 6 confirmed (+3 orchestrator additions) → fixed 9e29032; r2 1 confirmed (keepalive size regression) → auto-fixed c04f2e8; r3 CLEAN. Live on Maciocia 142 KB plan: tab switch → ordinary PUT saved; close → exactly one PUT, saved; beforeunload prompt only while dirty and never for a gone job; small plan keepalive; failed send retried. Doc nits (not findings): bigPlanOf is 222 KB; 9e29032 run = 8 failed/19 passed; Chromium's 64 KiB keepalive limit counts the body only; KICKOFF-010 cites some 9e29032 editor line numbers.

@@ -1,9 +1,8 @@
 {
   "mode": "auto",
-  "active_story": "STORY-009",
+  "active_story": "STORY-010",
   "loop_phase": "implement",
   "queue": [
-    "STORY-009",
     "STORY-010",
     "STORY-011",
     "STORY-012",
@@ -20,7 +19,8 @@
     "STORY-005",
     "STORY-006",
     "STORY-007",
-    "STORY-008"
+    "STORY-008",
+    "STORY-009"
   ],
   "attempts": {
     "STORY-001": 1,
@@ -31,7 +31,8 @@
     "STORY-006": 3,
     "STORY-007": 3,
     "STORY-008": 2,
-    "STORY-009": 3
+    "STORY-009": 3,
+    "STORY-010": 1
   },
   "failed": {},
   "consecutive_failures": 0,
@@ -41,13 +42,13 @@
   },
   "baseline": {
     "engine_tests": "150 passed at v0.4.1 (8e52cc3)",
-    "web_tests": "332 passed after STORY-007 (6ff7d01)",
-    "web_spa_tests": "68 passed after STORY-008 (c3bc2e5)"
+    "web_tests": "335 passed",
+    "web_spa_tests": "153 passed after STORY-009 (c04f2e8)"
   },
   "run": {
     "started": "2026-09-25",
     "runner": "in-session background subagent (tmux --dangerously-skip-permissions route denied by the auto-mode classifier)",
-    "active": "STORY-009 (2b: auto-fix, keepalive size)"
+    "active": "STORY-010"
   },
   "last_updated": "2026-09-25",
   "exceptions": {
@@ -60,7 +61,9 @@
     "engine: index cache keyed on full profile hash \u2192 11\u201314 s re-index on any layout change (tight vs 20 s preview window); a geometry-free key fixes it",
     "engine: Book.open mkdir(parents=True) on read-only preview (API sweep covers it)",
     "engine: verify flags 2 'leaks' on Maciocia outline cuts (running heads?) and span-clamped on the last section \u2014 investigate",
-    "suggest(): outline level 1 = parts/front matter on Maciocia (chapters are L2) \u2014 STORY-009 level picker shows all levels"
+    "suggest(): outline level 1 = parts/front matter on Maciocia (chapters are L2) \u2014 STORY-009 level picker shows all levels",
+    "heading re-detection under user wrap gap / smaller bands needs a /detect route",
+    "picker state not persisted in the Plan (reload starts from suggested)"
   ],
   "engine_release": "v0.4.1 (8e52cc3) on origin+gitea; engine main still 6fd22fc \u2014 ff-merge feature/web-mode at sprint end",
   "policy": {

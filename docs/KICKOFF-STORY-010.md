@@ -207,3 +207,14 @@ keyboard nudge), the commits (on both remotes), and what STORY-011 (cut/download
 poll again after `POST /cut`, where the manifest badges come from, and the download endpoints' contracts
 (`::test_end_to_end_upload_analyze_plan_cut_download`, `::test_section_pdf_comes_from_the_zip_by_plan_index`,
 `::test_delete_marks_the_row_before_removing_the_directory`).
+
+## Orchestrator addendum
+
+- `editor.svelte.ts` line numbers cited above are partly from 9e29032 — search by symbol
+  (`rename`, `setSetting`, `flush`, `destroy`, `picker`, `rows`, `draft`) rather than trusting lines.
+- The preview API's 410 contract (STORY-007) applies: any 410 from a preview = the job is gone →
+  show the expired state; never retry-loop.
+- Draggable cut/gutter/band lines must be keyboard-operable (AC-5) and announce their value
+  (e.g. role=slider with aria-valuenow in pt). `bun run check` stays at 0 warnings.
+- Coordinates: PNG px ↔ PDF pt must honour a non-zero CropBox origin and page rotation if the
+  analysis/preview exposes them; test the conversions (AC-6).
