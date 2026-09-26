@@ -280,3 +280,11 @@ One commit on the feature/mvp tip:
    allocator failures mapping to `resources`.
 Correct the as-built text only if anything still differs. Update findings ("Gate r2 fixes") and
 KICKOFF-STORY-016 if it cites these.
+
+## Attempt 2c — test gap (standing auto-fix policy) — READ THIS FIRST
+
+One commit, TEST ONLY (no src change): `test: STORY-012 - an allocator failure inside the cut stays resources`
+Add a runner-level test (~2 s): a RANGES plan over `tests/fixtures/hostile.py:link_uri_bomb` run through
+the real Runner + sandbox (real RLIMIT_AS) → row `failed/cut/resources` (the `insert_pdf` malloc failure
+passes through `_within_budget`). Prove it: with `cut.py`'s `if not hit_file_limit(e): raise` removed in a
+scratch copy the test FAILS (too_large_output); restore byte-for-byte. Note it in findings ("Gate r3").

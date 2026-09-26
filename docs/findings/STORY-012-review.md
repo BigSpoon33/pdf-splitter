@@ -16,3 +16,7 @@ Verified live: 30/50/120-request bursts from one client → exactly 6; 0 × "dat
 
 1. [correctness] ratelimit.py:62-64 (+ store.py:275-277) — the clock (and so the hash set) is read BEFORE `BEGIN IMMEDIATE`; a 23:59:59 reader committing after 00:00:00 readers counts only yesterday's hash → a burst straddling midnight gets up to 2× the limit (deterministic 12/12 at limit 6; live 7–8). CONFIRMED.
 2. [contract-divergence] Architecture.md:240 / KICKOFF-STORY-016.md:30-32 vs cut.py:116-130 — PyMuPDF's section-write EFBIG is FzErrorSystem('code=2: cannot fwrite: File too large'), not OSError; `_within_budget` misses it → `resources`, truncated section left in work/. CONFIRMED (sandboxed repro).
+
+## Round 3 (re-review of 802fdfc) — 1 test-gap (code correct) → auto-fix per standing policy (vacuous/insufficient test of the fix)
+Verified live: 64 straddling bursts → exactly 6 each (old: up to 10); ~7,000 requests, 0 × 500 / locked, no latency regression; EFBIG form stable across 19 fsize values; hit_file_limit has no false positives; section EFBIG → too_large_output on both paths.
+1. [test-gap] cut.py:140-142 — nothing pins that a NON-EFBIG MuPDF error inside `_within_budget` (allocator failure) stays `resources`; deleting the `hit_file_limit` guard keeps all 426 tests green while a link_uri_bomb ranges job would report too_large_output. Mutation-proven by the reviewer.
