@@ -127,3 +127,21 @@ writable (the sandbox launcher runs `sys.executable -m pdf_splitter.worker.sandb
 - `page_size(sheet)` for a sheet outside the index falls back to sheet 0's size (pre-existing); `Book.rects` is only
   called for in-range plans (`_plan_view`, `preview.py:69`), and a plan off the book is `missing`, never cut.
 - Rotated pages: `page.rect` already normalises them (story § Out of Scope) — nothing added.
+
+## Gate r1
+Review (`docs/findings/STORY-016-review.md`) confirmed one test gap: `test_review_pngs_are_drawn_in_each_sheets_size`
+checked only the PNGs' pixel size (set by the page itself), so reverting `render.py:43`/`:48` to sheet-0 geometry stayed
+green. Fixed test-only in the engine, `4f1644a test: STORY-016 - review PNGs hatch each sheet in its own size`
+(`feature/web-mode`, pushed to `origin` + `gitea`; no src change, no new tag — `v0.4.2` = `116a4bb` ships the same code,
+`v0.4.1` unmoved). The test now samples the 72-dpi last-sheet PNG (1 px = 1 pt) of the AC-2 mixed fixture:
+- every hatched row below the end cut is red exactly over x 340–699 (`int(column_split × 700)` … the sheet's edge, 360 px);
+- no red under any of Alpha's 12 kept tail lines (their own x0–x1, 7 px under each line's top);
+- the end-cut label's red pixels (the 9 rows above `endCut`) all sit at x ≥ 700 − 70.
+
+Mutation proof, in a scratch copy of the engine (`git ls-files` copy + the new test; `render.py` sha256-checked back to
+the original after each run):
+- `:43` → `cut_rects(p, doc[0].rect.width, doc[0].rect.height, prof)`: FAILS — row 65 hatched `(253, 523, 271)` ≠ `(340, 699, 360)`.
+- `:48` → `w, h = doc[0].rect.width, doc[0].rect.height`: FAILS — label min x 453 < 630.
+- restored: `tests/test_mixed_sizes.py` 6 passed.
+
+Engine suite: `uv run --group dev pytest -q` → **156 passed** (count unchanged — assertions added to the existing test).
