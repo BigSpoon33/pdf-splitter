@@ -14,3 +14,6 @@ Verified: client clock ±25 h never decides; count-out → one poll → 410 → 
 
 1. [correctness, incomplete F1] Expiry.svelte:32,47,51 + JobPage.svelte:46 — countdown and count-out timer run only on performance.now(), which stops during OS suspend on Chromium/Linux; no wake/visibility re-check → after a laptop sleep the page overstates time left by the sleep length (24.5 h sleep past TTL: API 410, page "23 h" + links, 0 polls). CONFIRMED live.
 2. [correctness, F3 regression] Download.svelte:52 (via :44) — `requestedOn` released only by a cut status whose state ≠ review; cut done + edit saved (done→review) before the first post-202 poll → first status is review/cut → Split disabled until reload; `cuts` never bumped so the list keeps old names. CONFIRMED (api.log corroboration).
+
+## Round 3 (re-review of d1b4ce5, standing-policy auto-fix) — PASSED
+Auto-review trail: r1 3 confirmed → fixed 9eeb9a2; r2 2 confirmed (suspend drift, stranded Split) → auto-fixed d1b4ce5; r3 CLEAN. Live: event-less suspend → 1 poll → server figure or deleted; bfcache/online/visibility re-checks; no storms (11 min idle = 2 polls; NTP step = 1 re-check; ±25 h client clock = 0 extra polls); single 1.5 s loop during a running cut; one POST per click; stranded-Split scenarios recover with the new manifest.
