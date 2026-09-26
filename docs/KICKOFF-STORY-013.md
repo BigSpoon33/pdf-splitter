@@ -272,3 +272,14 @@ Attempt 1 (`cce9bd1`, findings `7e34206`) failed with 3 CONFIRMED findings + 1 o
 ISOLATION rules from the addendum still apply (unique project, subnets 172.27.x / a ULA, high ports,
 touch nothing else, `docker ps` before/after identical). Update findings ("Gate r1 fixes"),
 Architecture ADR-005/ADR-008 as-built, README § Deploy, and the STORY-014 handoff.
+
+## Attempt 2b — regression from 6ef0253 (standing auto-fix policy) — READ THIS FIRST
+
+6ef0253 added the error code `overloaded` to `src/pdf_splitter/errors.py` without a message in
+`web/src/lib/errors.ts`; the SPA parity test (errors.test.ts reads errors.py) now fails: 2 failed / 283.
+One commit: `fix: STORY-013 - the SPA knows the overloaded code`
+- Add `overloaded` to `web/src/lib/errors.ts` (message like "The service is busy right now — try again in
+  a few seconds.") and to the `JobErrorCode`/api types if they enumerate codes; honour `Retry-After`
+  nowhere new (just the message). DropZone shows it in place like other upload errors.
+- `cd web && bun run check && bun run test && bun run build` all green (expect 285+ passing, 0 warnings);
+  `uv run pytest -q` still green. Note it in findings ("Gate r1 fixes" addendum). Push to origin + gitea.
