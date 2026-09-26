@@ -7,10 +7,12 @@ The product lives in two repos:
 
 - **Web (you write code here):** `~/Documents/Repos/pdf-splitter` (GitHub `BigSpoon33/pdf-splitter` = `origin`,
   Gitea mirror = `gitea`), branch **`feature/mvp`**. Stay on that branch. STORY-010 landed as
-  `e0a10cd feat: STORY-010 - page preview with hatched cuts and draggable cut, gutter and band lines` and its docs
-  commit `docs: STORY-010 - findings + KICKOFF-STORY-011`. Anything after those is the orchestrator's gate work; check
-  `git log --oneline -8`. **Baselines:** `cd web && bun run test` → **183 pass** (13 files, ≈ 3.5 s), `bun run check`
-  0 errors 0 warnings (320 files), `bun run build` ≈ 92 kB JS (33.3 kB gzip); `uv run pytest` → **335 pass** (≈ 80 s),
+  `e0a10cd feat: STORY-010 - page preview with hatched cuts and draggable cut, gutter and band lines`, its docs
+  commit `7fd52c2`, then the gate r1 fix `fix: STORY-010 - gate r1: preview plans the list on screen, per-sheet
+  geometry, focus on drag, errors scoped to the selection` (the preview route now takes the client's section list —
+  `docs/findings/STORY-010-findings.md` § Gate r1 fixes). Anything after those is the orchestrator's gate work; check
+  `git log --oneline -8`. **Baselines:** `cd web && bun run test` → **190 pass** (13 files, ≈ 3.5 s), `bun run check`
+  0 errors 0 warnings (320 files), `bun run build` ≈ 92 kB JS (33.3 kB gzip); `uv run pytest` → **344 pass** (≈ 80 s),
   `uv run ruff check` clean. `docs/loop-state.json` belongs to the orchestrator: never stage it. Line numbers below
   are as of `e0a10cd`; search by symbol if they drift.
 - **Engine (read-only):** `~/Documents/Repos/monograph-splitter`, pinned at `v0.4.1`. You should not need it.
@@ -50,10 +52,14 @@ Toolchain: the SPA is **Bun only** (`bun install` / `bun run dev|check|test|buil
   serving the last ZIP's rows) but the status must read `review`. Key it off `editor.saves`/`editor.edited` or poll
   once after a save — decide and record it in findings.
 - **The preview** `web/src/components/PagePreview.svelte` — nothing to do here; it asks the engine again on
-  `editor.saves`, so a re-cut changes nothing in it. It sets `editor.gone`/`editor.error` on a 410 from a preview.
+  `editor.saves` (only when the body it would send differs from the last one: it sends the LOCAL settings, override
+  AND section list — `SectionPlanRequest.sections`, gate r1), so a re-cut changes nothing in it. It sets
+  `editor.gone`/`editor.error` on a 410 `expired` / 404 `not_found` from a preview; a 422 (`no_section`) is its own
+  inline message. Every sheet is drawn in its own `analysis.size[n-1]`.
 - **Types and client** `web/src/lib/api.ts`: `JobStatus` (:11, `expires_at` ISO string — AC-3's "files deleted in
   23 h" comes from it), `getJob`, `getManifest` (:258, `ManifestRow` :218: `index, name, file, flags, notes, leaks,
-  bytes`), `isGone`, `ApiError.userMessage` (`errors.ts` table: `not_ready`, `busy`, `expired`, `not_found`…),
+  bytes`), `isGone`, `ApiError.userMessage` (`errors.ts` table: `not_ready`, `busy`, `expired`, `not_found`,
+  `no_section`… — `errors.test.ts` counts the API's codes, 14 today),
   `request()`/`fetchOk()` (:107/:95). **Add:** `postCut(id)` (202 `{id, state:'queued'}`), `deleteJob(id)` (204),
   `resultUrl(id)` / `sectionUrl(id, i)` — downloads are plain `<a href download>` to the API (an attachment response;
   same-origin through the Vite proxy / Caddy), NOT fetched into blobs (a 56 MB ZIP is not for memory). `api.test.ts`

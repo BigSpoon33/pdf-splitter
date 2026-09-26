@@ -20,6 +20,7 @@ export const MESSAGES = {
   not_ready: 'The job is not ready for this yet.',
   busy: 'The job is being processed. Try again when it has finished.',
   invalid: 'The request is not valid.',
+  no_section: 'There is no section with that number in the list.',
   preview_failed: 'The preview could not be rendered.',
   internal: 'Something went wrong on our side. Try again.',
   // Client-side only: the request never got an answer.

@@ -637,8 +637,11 @@ def test_section_plan_under_other_settings(settings: Settings, seeded: Path) -> 
 @pytest.mark.parametrize(
     ("i", "body", "status", "code"),
     [
-        ("3", {}, 404, "not_found"),
-        ("-1", {}, 404, "not_found"),
+        # An index past the list is a bad request, never the job-level 404 (the SPA stops on 404 — gate r1 F1).
+        ("3", {}, 422, "no_section"),
+        ("-1", {}, 422, "no_section"),
+        ("0", {"sections": []}, 422, "no_section"),
+        ("1", {"sections": [{"name": "Only", "page": 1}]}, 422, "no_section"),
         ("x", {}, 422, "invalid"),
         ("0", {"override": {"startCut": 9000}}, 422, "invalid"),
         ("0", {"override": {"startCol": "up"}}, 422, "invalid"),
@@ -646,6 +649,11 @@ def test_section_plan_under_other_settings(settings: Settings, seeded: Path) -> 
         ("0", {"settings": {"column_split": "NaN"}}, 422, "invalid"),
         ("0", {"other": 1}, 422, "invalid"),
         ("0", [1], 422, "invalid"),
+        ("0", {"sections": [{"name": "Past the book", "page": 7}]}, 422, "invalid"),
+        ("0", {"sections": [{"name": "", "page": 1}]}, 422, "invalid"),
+        ("0", {"sections": [{"name": "Extra key", "page": 1, "level": 1}]}, 422, "invalid"),
+        ("0", {"sections": [{"name": f"S{k}", "page": 1} for k in range(2001)]}, 422, "invalid"),
+        ("0", {"sections": [{"name": "Low", "page": 1}], "override": {"startCut": 9000}}, 422, "invalid"),
     ],
 )
 def test_section_plan_validates_index_settings_and_override(
@@ -654,6 +662,56 @@ def test_section_plan_validates_index_settings_and_override(
     with api(settings) as client:
         r = client.post(f"/api/jobs/{DASH_ID}/sections/{i}/plan", json=body)
     assert_error(r, status, code)
+    if code == "invalid" and isinstance(body, dict) and "sections" in body:
+        # Field errors name the list (or the override) the way PUT /plan's do.
+        expected = ["body", "override"] if "override" in body else ["body", "sections"]
+        assert locs(r)[0][:2] == expected
+
+
+def test_section_plan_plans_the_list_in_the_body_not_the_saved_one(settings: Settings, seeded: Path) -> None:
+    """Gate r1 F1/F2: the SPA previews its LOCAL list (a section just inserted or deleted, its save still on the
+    way), so the route plans the list it is given; the saved plan is only the default and is never modified."""
+    plan_before = (seeded / "plan.json").read_bytes()
+    saved = read_json(seeded / "plan.json")["sections"]
+    inserted = [saved[0], {"name": "  Inserted  ", "page": 2, "heading": ""}, *saved[1:]]
+    with api(settings) as client:
+        as_saved = client.post(f"/api/jobs/{DASH_ID}/sections/1/plan").json()
+        assert as_saved["pages"] == [3, 4]
+        # Index 2 of the body's list is the saved list's section 1: the same view, under the new numbering.
+        r = client.post(f"/api/jobs/{DASH_ID}/sections/2/plan", json={"sections": inserted})
+        assert r.status_code == 200, r.text
+        assert r.json() == as_saved
+        # Index 1 is the inserted section itself: sheet 2 up to where Chapter Two starts (the top of sheet 3).
+        r = client.post(f"/api/jobs/{DASH_ID}/sections/1/plan", json={"sections": inserted})
+        assert r.status_code == 200, r.text
+        assert r.json()["pages"] == [2, 2] and r.json()["endCut"] is None
+        assert (seeded / "plan.json").read_bytes() == plan_before
+        # The saved override is applied by the same index in whichever list is planned; `heading` is optional
+        # and duplicate names are made distinct exactly as PUT /plan does, so the engine still finds each entry.
+        plan = read_json(seeded / "plan.json")
+        plan["overrides"] = {"1": {"startCut": 150}}
+        assert client.put(f"/api/jobs/{DASH_ID}/plan", json=plan).status_code == 200
+        twins = [{"name": "Same", "page": s["page"], "heading": s["heading"]} for s in saved]
+        r = client.post(f"/api/jobs/{DASH_ID}/sections/1/plan", json={"sections": twins})
+        assert r.status_code == 200, r.text
+        assert r.json()["pages"] == [3, 4] and r.json()["startCut"] == 150.0 and "override" in r.json()["flags"]
+        r = client.post(f"/api/jobs/{DASH_ID}/sections/2/plan", json={"sections": twins, "override": None})
+        assert r.status_code == 200, r.text
+        assert r.json()["pages"] == [4, 6] and "override" not in r.json()["flags"]
+        assert client.get(f"/api/jobs/{DASH_ID}/plan").json() == plan
+    assert read_json(seeded / "work" / OVERRIDES_NAME) == {}
+    assert row(settings, DASH_ID)["state"] == "review"
+
+
+def test_a_section_plan_of_a_body_list_after_a_delete_is_410_not_500(
+    settings: Settings, seeded: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    preview_in_process(monkeypatch, lambda: delete_now(settings))
+    body = {"sections": [{"name": "Only", "page": 1}]}
+    with api(settings) as client:
+        assert_error(client.post(f"/api/jobs/{DASH_ID}/sections/0/plan", json=body), 410, "expired")
+    assert not seeded.exists()
+    assert row(settings, DASH_ID)["state"] == "deleted"
 
 
 # ── AC-5: downloads ────────────────────────────────────────────────────────────────────────────────────

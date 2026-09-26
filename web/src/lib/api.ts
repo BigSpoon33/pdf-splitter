@@ -288,11 +288,15 @@ export interface SectionPlan {
 
 /**
  * Absent `settings` = the saved plan's; absent `override` = the saved one for that section, an explicit `null`
- * the engine's own plan (`::test_section_plan_uses_the_saved_override_unless_told_otherwise`). Nothing is persisted.
+ * the engine's own plan (`::test_section_plan_uses_the_saved_override_unless_told_otherwise`); absent `sections` =
+ * the saved list, else `i` names a section of THIS list (`::test_section_plan_plans_the_list_in_the_body_not_the_saved_one`
+ * — the local list, so a preview never waits for a save). An `i` past the list is 422 `no_section`, never the
+ * job-level 404. Nothing is persisted.
  */
 export interface SectionPlanRequest {
   settings?: PlanSettings
   override?: Override | null
+  sections?: Section[]
 }
 
 export function getSectionPlan(id: string, i: number, body: SectionPlanRequest = {}, signal?: AbortSignal): Promise<SectionPlan> {

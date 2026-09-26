@@ -106,6 +106,21 @@ def _heights(info: ValidationInfo) -> list[float] | None:
     return [float(s["H"]) for s in sizes] if sizes else None
 
 
+def dedupe_names(sections: list[Section]) -> None:
+    """Duplicates are allowed in the UI (Architecture); the saved plan — and a list the preview plans — makes
+    them distinct with a counter, so every display name maps to one section (the engine looks entries up by
+    name)."""
+    used: set[str] = set()
+    for s in sections:
+        name, k = s.name, 2
+        while name in used:
+            suffix = f" ({k})"
+            name = s.name[: MAX_SECTION_NAME - len(suffix)].rstrip() + suffix
+            k += 1
+        used.add(name)
+        s.name = name
+
+
 class Plan(_Strict):
     source: Source
     settings: PlanSettings = Field(default_factory=PlanSettings)
@@ -130,17 +145,7 @@ class Plan(_Strict):
 
     @model_validator(mode="after")
     def _dedupe_names(self) -> Plan:
-        # Duplicates are allowed in the UI (Architecture); the saved plan makes them distinct with a counter,
-        # so every display name maps to one section.
-        used: set[str] = set()
-        for s in self.sections:
-            name, k = s.name, 2
-            while name in used:
-                suffix = f" ({k})"
-                name = s.name[: MAX_SECTION_NAME - len(suffix)].rstrip() + suffix
-                k += 1
-            used.add(name)
-            s.name = name
+        dedupe_names(self.sections)
         return self
 
     def dump(self) -> dict[str, Any]:
@@ -155,18 +160,18 @@ class Plan(_Strict):
 
 class PreviewRequest(_Strict):
     """`POST /sections/{i}/plan`: settings default to the saved plan's; an absent `override` means the saved
-    one, an explicit `null` the engine's own plan."""
+    one, an explicit `null` the engine's own plan; `sections` is the list to plan `i` in — the client's local
+    list, which may be ahead of the saved one — else the saved list. The override's bounds depend on which
+    list `i` names a section of, so the route checks them (`check_override`) once it knows."""
 
     settings: PlanSettings | None = None
     override: Override | None = None
+    sections: list[Section] | None = Field(default=None, max_length=MAX_SECTIONS)
 
     @model_validator(mode="after")
-    def _bounded(self, info: ValidationInfo) -> PreviewRequest:
-        ctx = info.context or {}
-        if self.override is not None and "height" in ctx:
-            why = check_override(self.override, ctx["height"], ctx["max_height"])
-            if why:
-                raise ValueError(f"override: {why}")
+    def _dedupe_names(self) -> PreviewRequest:
+        if self.sections is not None:
+            dedupe_names(self.sections)
         return self
 
 
@@ -175,4 +180,6 @@ def validate_plan(raw: Any, *, pages: int, sizes: list[dict[str, float]]) -> Pla
     return Plan.model_validate(raw, context={"pages": pages, "sizes": sizes})
 
 
-__all__ = ["Override", "Plan", "PlanSettings", "PreviewRequest", "Section", "ValidationError", "validate_plan"]
+__all__ = [
+    "Override", "Plan", "PlanSettings", "PreviewRequest", "Section", "ValidationError", "check_override", "validate_plan",
+]

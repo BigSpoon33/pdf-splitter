@@ -3,22 +3,25 @@
    * The selected section's first and last sheet with the engine's plan drawn over them (AC-1), and the lines the
    * visitor can drag or nudge: the start/end cuts (an override on this section, AC-2/AC-5), the gutter and the
    * header/footer bands (settings for the whole book, AC-3). The overlay is an SVG in page POINTS (`viewBox`
-   * = the page), scaled with the image, so nothing here converts to pixels; `geometry.ts` maps the pointer back.
+   * = the page — each sheet its own size), scaled with the image, so nothing here converts to pixels;
+   * `geometry.ts` maps the pointer back through the frame of the sheet the event came from.
    *
    * The engine is asked again (`POST /sections/{i}/plan`, nothing persisted) when the selection changes, when a
-   * drag is released, and when a save lands — the route plans against the SAVED section list, so a delete or an
-   * insert shows up once the server has it. Requests that would repeat the last one are skipped: a drag's own
-   * request already covers the save that follows it, and a settings change costs a re-index on the server.
+   * drag is released, and when a save lands. The request carries the LOCAL plan — settings, this section's
+   * override and the whole section list — so the answer always describes the list on screen, whether or not its
+   * save has landed yet (gate r1). Requests that would repeat the last one are skipped: a drag's own request
+   * already covers the save that follows it, and a settings change costs a re-index on the server.
    */
   import { ApiError, getSectionPlan, getSheet, isGone, type Analysis, type Col, type Cut, type Override, type SectionPlan, type SectionPlanRequest, type SheetDpi } from '../lib/api'
   import { PREVIEW_DPI } from '../lib/config'
   import type { PlanEditor } from '../lib/editor.svelte'
-  import { clamp, colAt, colSpan, frameOf, gutterX, halfPoint, nudgeFor, pointerToPoint } from '../lib/geometry'
+  import { clamp, colAt, colSpan, frameOf, halfPoint, nudgeFor, pointerToPoint } from '../lib/geometry'
   import { flagLabel } from '../lib/plan'
   import { untrack } from 'svelte'
 
   type Which = 'start' | 'end'
   type Handle = Which | 'gutter' | 'header' | 'footer'
+  type Size = { W: number; H: number }
 
   interface Props {
     editor: PlanEditor
@@ -41,8 +44,8 @@
   let sheetError = $state<ApiError | null>(null)
   /** Object URLs of the sheets on show, by 1-based sheet. */
   let sheetUrls = $state<Record<number, string>>({})
-  /** A line being dragged: its live value in points, and for a cut the column the drag started in. */
-  let drag = $state<{ kind: Handle; value: number; col: Col } | null>(null)
+  /** A line being dragged: its live value in the points of the sheet it is dragged on, and for a cut the column the drag started in. */
+  let drag = $state<{ kind: Handle; value: number; col: Col; sheet: number } | null>(null)
   /** Bumped when a release wants the engine's view now rather than after the save. */
   let refresh = $state(0)
 
@@ -59,15 +62,19 @@
 
   function requestFor(i: number): SectionPlanRequest {
     const plan = $state.snapshot(editor.plan)
-    // The local plan is the truth the visitor sees: its settings, and its override for this section (`null` =
-    // the engine's own plan, which is what an absent key means — a key sent as absent would mean "the saved one").
-    return { settings: plan.settings, override: plan.overrides[String(i)] ?? null }
+    // The local plan is the truth the visitor sees: its settings, its list (so `i` names the section on screen
+    // even while a delete or an insert is still on its way to the server), and its override for this section
+    // (`null` = the engine's own plan, which is what an absent key means — sent as absent it would mean "the
+    // saved one").
+    return { settings: plan.settings, override: plan.overrides[String(i)] ?? null, sections: plan.sections }
   }
 
   function fail(err: unknown): ApiError {
     const apiErr = err instanceof ApiError ? err : new ApiError(0, 'network')
     if (isGone(apiErr)) {
-      // A preview answers 410 when the job was deleted during the render: the whole page is over, not just this one.
+      // A preview answers 410 when the job was deleted during the render, 404 when it never existed: the whole
+      // page is over, not just this one. Anything about the request itself (a 422 such as `no_section`) is
+      // this preview's message alone.
       editor.gone = true
       editor.error = apiErr
     }
@@ -84,6 +91,7 @@
         ctrl = null
         view = null
         viewError = null
+        sheetError = null
         loading = false
         lastKey = null
       })
@@ -91,14 +99,17 @@
     }
     untrack(() => {
       const body = requestFor(i)
-      const key = JSON.stringify([i, editor.plan.sections.map((s) => [s.page, s.heading]), body])
+      const key = JSON.stringify([i, body])
       if (key === lastKey) return
       lastKey = key
       ctrl?.abort()
       const mine = new AbortController()
       ctrl = mine
       loading = true
+      // Errors belong to the request they came from: a new one starts clean (a sheet that failed under the
+      // previous section may not even be on show any more).
       viewError = null
+      sheetError = null
       if (viewIndex !== i) view = null
       loadSectionPlan(id, i, body, mine.signal).then(
         (v) => {
@@ -173,20 +184,15 @@
     return { y, col }
   }
 
-  const split = $derived(drag?.kind === 'gutter' ? drag.value : gutterX(settings, W()))
-  const headerY = $derived(drag?.kind === 'header' ? drag.value : settings.header_band)
-  const footerY = $derived(drag?.kind === 'footer' ? drag.value : settings.footer_band)
-
-  /** The first sheet's size stands for the section: the engine plans every cut in it (`Book.page_size(sheet0)`). */
-  function sizeOf(n: number): { W: number; H: number } {
+  /** Every sheet has its own size (a mixed-size book): the engine's cuts and `rects` are in the points of the sheet they sit on. */
+  function sizeOf(n: number): Size {
     return analysis.size[n - 1] ?? analysis.size[0] ?? { W: 1, H: 1 }
   }
-  function W(): number {
-    return sizeOf(view?.pages[0] ?? section?.page ?? 1).W
-  }
-  function H(): number {
-    return sizeOf(view?.pages[0] ?? section?.page ?? 1).H
-  }
+
+  /** The gutter as a fraction of the page width: one setting, a different x on every sheet width. */
+  const splitFrac = $derived(drag?.kind === 'gutter' ? drag.value / sizeOf(drag.sheet).W : settings.column_split)
+  const headerY = $derived(drag?.kind === 'header' ? drag.value : settings.header_band)
+  const footerY = $derived(drag?.kind === 'footer' ? drag.value : settings.footer_band)
 
   function rectsOn(n: number): [number, number, number, number][] {
     return (view?.rects ?? []).filter(([sheet]) => sheet === n).map(([, r]) => r)
@@ -194,22 +200,22 @@
 
   // ── Dragging (AC-2/AC-3): the overlay follows the pointer; the release edits the plan once ──
 
-  function pointAt(e: PointerEvent): { x: number; y: number } {
+  function pointAt(e: PointerEvent, size: Size): { x: number; y: number } {
     const svg = (e.currentTarget as Element).closest('svg')
     const box = svg?.getBoundingClientRect() ?? { left: 0, top: 0, width: 0, height: 0 }
-    return pointerToPoint(frameOf({ W: W(), H: H() }, dpi), { x: e.clientX, y: e.clientY }, box)
+    return pointerToPoint(frameOf(size, dpi), { x: e.clientX, y: e.clientY }, box)
   }
 
-  function valueFor(kind: Handle, p: { x: number; y: number }): number {
+  function valueFor(kind: Handle, p: { x: number; y: number }, size: Size): number {
     switch (kind) {
       case 'gutter':
-        return clamp(p.x, SPLIT_MIN * W(), SPLIT_MAX * W())
+        return clamp(p.x, SPLIT_MIN * size.W, SPLIT_MAX * size.W)
       case 'header':
         return clamp(halfPoint(p.y), 0, MAX_BAND)
       case 'footer':
-        return clamp(halfPoint(H() - p.y), 0, MAX_BAND)
+        return clamp(halfPoint(size.H - p.y), 0, MAX_BAND)
       default:
-        return clamp(halfPoint(p.y), 0, H())
+        return clamp(halfPoint(p.y), 0, size.H)
     }
   }
 
@@ -217,37 +223,43 @@
     return kind === 'start' || kind === 'end'
   }
 
-  function onDown(kind: Handle) {
+  function onDown(kind: Handle, sheet: number) {
     return (e: PointerEvent) => {
       if (e.button !== 0 || editor.gone) return
+      // The default action would start a text selection across the page; it would also move focus to the grip,
+      // so that is done by hand — the arrow keys after a drag must nudge THIS line (AC-5).
       e.preventDefault()
-      const p = pointAt(e)
+      const grip = e.currentTarget as SVGElement
+      grip.focus({ preventScroll: true })
+      const size = sizeOf(sheet)
+      const p = pointAt(e, size)
       // AC-2: the column the drag STARTS in is the cut's column; a one-column book has only full-width cuts.
-      const col = isCut(kind) ? colAt(p.x, W(), settings) : 'full'
-      drag = { kind, value: valueFor(kind, p), col }
-      ;(e.currentTarget as Element).setPointerCapture?.(e.pointerId)
+      const col = isCut(kind) ? colAt(p.x, size.W, settings) : 'full'
+      drag = { kind, value: valueFor(kind, p, size), col, sheet }
+      grip.setPointerCapture?.(e.pointerId)
     }
   }
 
   function onMove(e: PointerEvent): void {
     if (!drag) return
-    drag.value = valueFor(drag.kind, pointAt(e))
+    const size = sizeOf(drag.sheet)
+    drag.value = valueFor(drag.kind, pointAt(e, size), size)
   }
 
   function onUp(): void {
     if (!drag) return
-    const { kind, value, col } = drag
+    const { kind, value, col, sheet } = drag
     drag = null
-    commit(kind, value, col)
+    commit(kind, value, col, sizeOf(sheet))
     refresh++
   }
 
   /** One edit per release or keystroke; the editor's debounce makes a run of them one save. */
-  function commit(kind: Handle, value: number, col: Col): void {
+  function commit(kind: Handle, value: number, col: Col, size: Size): void {
     if (selected === null) return
     switch (kind) {
       case 'gutter':
-        editor.setSetting('column_split', Math.round((value / W()) * 1000) / 1000)
+        editor.setSetting('column_split', Math.round((value / size.W) * 1000) / 1000)
         break
       case 'header':
         editor.setSetting('header_band', value)
@@ -262,20 +274,21 @@
 
   // ── Keyboard (AC-5): the focused line moves 1 pt per arrow, 10 with Shift; the save's landing refreshes the view ──
 
-  function onKey(kind: Handle) {
+  function onKey(kind: Handle, sheet: number) {
     return (e: KeyboardEvent) => {
       const delta = nudgeFor(e.key, e.shiftKey, kind === 'gutter' ? 'horizontal' : 'vertical')
       if (delta === 0 || editor.gone) return
       e.preventDefault()
+      const size = sizeOf(sheet)
       if (isCut(kind)) {
         const cut = cutOf(kind)
-        const y = (cut.y ?? (kind === 'start' ? 0 : H())) + delta
-        commit(kind, valueFor(kind, { x: 0, y }), cut.col)
+        const y = (cut.y ?? (kind === 'start' ? 0 : size.H)) + delta
+        commit(kind, valueFor(kind, { x: 0, y }, size), cut.col, size)
         return
       }
       // The footer band is measured from the bottom, so the key that moves its edge up makes it bigger.
-      const p = kind === 'gutter' ? { x: split + delta, y: 0 } : { x: 0, y: (kind === 'header' ? headerY : H() - footerY) + delta }
-      commit(kind, valueFor(kind, p), 'full')
+      const p = kind === 'gutter' ? { x: splitFrac * size.W + delta, y: 0 } : { x: 0, y: (kind === 'header' ? headerY : size.H - footerY) + delta }
+      commit(kind, valueFor(kind, p, size), 'full', size)
     }
   }
 
@@ -296,9 +309,9 @@
   const colName = (col: Col) => (col === 'full' ? 'full width' : `${col} column`)
 </script>
 
-{#snippet cutLine(which: Which, cut: { y: Cut; col: Col }, size: { W: number; H: number })}
+{#snippet cutLine(which: Which, cut: { y: Cut; col: Col }, n: number, size: Size)}
   {@const y = cut.y ?? (which === 'start' ? 0 : size.H)}
-  {@const [x0, x1] = colSpan(cut.col, size.W, split)}
+  {@const [x0, x1] = colSpan(cut.col, size.W, splitFrac * size.W)}
   <line class="cut" class:absent={cut.y === null} x1={x0} y1={y} x2={x1} y2={y} />
   <!-- The grip spans the page whatever column the line is in: where the drag starts decides the column (AC-2);
        kept inside the page so a line at its very edge (an absent cut) can still be grabbed. -->
@@ -316,8 +329,8 @@
     aria-valuemax={size.H}
     aria-valuenow={y}
     aria-valuetext={cut.y === null ? `no ${which} cut (drag or press an arrow key to add one)` : `${fmt(cut.y)} pt, ${colName(cut.col)}`}
-    onpointerdown={onDown(which)}
-    onkeydown={onKey(which)}
+    onpointerdown={onDown(which, n)}
+    onkeydown={onKey(which, n)}
   />
   <text class="label" x={which === 'start' ? x0 + 4 : x1 - 4} y={which === 'start' ? y + 11 : y - 4} text-anchor={which === 'start' ? 'start' : 'end'}>
     {cut.y === null ? `no ${which} cut` : `${which} ${fmt(cut.y)} · ${colName(cut.col)}`}
@@ -363,9 +376,10 @@
     {#if view && pages}
       {@const first = pages[0]}
       {@const last = pages[1]}
-      {@const size = sizeOf(first)}
       <div class="sheets" class:updating={loading} aria-busy={loading}>
         {#each sheets as n (n)}
+          {@const size = sizeOf(n)}
+          {@const split = splitFrac * size.W}
           {@const start = n === first ? cutOf('start') : null}
           {@const end = n === last ? cutOf('end') : null}
           <figure class="sheet">
@@ -405,8 +419,8 @@
                   aria-valuemax={MAX_BAND}
                   aria-valuenow={headerY}
                   aria-valuetext="{fmt(headerY)} pt from the top"
-                  onpointerdown={onDown('header')}
-                  onkeydown={onKey('header')}
+                  onpointerdown={onDown('header', n)}
+                  onkeydown={onKey('header', n)}
                 />
                 <line class="band-edge" x1="0" y1={size.H - footerY} x2={size.W} y2={size.H - footerY} />
                 <rect
@@ -423,8 +437,8 @@
                   aria-valuemax={MAX_BAND}
                   aria-valuenow={footerY}
                   aria-valuetext="{fmt(footerY)} pt from the bottom"
-                  onpointerdown={onDown('footer')}
-                  onkeydown={onKey('footer')}
+                  onpointerdown={onDown('footer', n)}
+                  onkeydown={onKey('footer', n)}
                 />
                 {#if !settings.single_column}
                   <line class="gutter" x1={split} y1="0" x2={split} y2={size.H} />
@@ -441,17 +455,17 @@
                     aria-valuemin={Math.round(SPLIT_MIN * size.W)}
                     aria-valuemax={Math.round(SPLIT_MAX * size.W)}
                     aria-valuenow={Math.round(split)}
-                    aria-valuetext="{fmt(halfPoint(split))} pt from the left ({Math.round((split / size.W) * 100)} %)"
-                    onpointerdown={onDown('gutter')}
-                    onkeydown={onKey('gutter')}
+                    aria-valuetext="{fmt(halfPoint(split))} pt from the left ({Math.round(splitFrac * 100)} %)"
+                    onpointerdown={onDown('gutter', n)}
+                    onkeydown={onKey('gutter', n)}
                   />
                 {/if}
 
                 {#if start}
-                  {@render cutLine('start', start, size)}
+                  {@render cutLine('start', start, n, size)}
                 {/if}
                 {#if end}
-                  {@render cutLine('end', end, size)}
+                  {@render cutLine('end', end, n, size)}
                 {/if}
               </svg>
             </div>

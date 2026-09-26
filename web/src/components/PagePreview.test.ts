@@ -1,6 +1,6 @@
-import { fireEvent, render, screen } from '@testing-library/svelte'
+import { createEvent, fireEvent, render, screen } from '@testing-library/svelte'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { ApiError, type Plan, type SectionPlan, type SectionPlanRequest } from '../lib/api'
+import { ApiError, type Analysis, type Plan, type SectionPlan, type SectionPlanRequest } from '../lib/api'
 import { PlanEditor } from '../lib/editor.svelte'
 import { analysisOf, planOf } from '../lib/fixtures'
 import PagePreview from './PagePreview.svelte'
@@ -8,6 +8,8 @@ import PagePreview from './PagePreview.svelte'
 const ID = 'AbCdEfGhIjKlMnOpQrStUv'
 const SIZE = analysisOf().size[0]! // 522.7 × 789.6
 const SPLIT = 0.487 * SIZE.W
+/** What every request carries before any edit: the local settings, no override, and the local list (gate r1). */
+const LOCAL = () => ({ settings: planOf().settings, override: null, sections: planOf().sections })
 
 /**
  * The engine's views for headed_book as tests/test_api_e2e.py::test_section_plan_returns_the_engine_view_with_rects
@@ -29,17 +31,50 @@ function viewFor(i: number, body: SectionPlanRequest): SectionPlan {
 
 const page = { addEventListener() {}, removeEventListener() {} }
 
-function mount(over: { plan?: Plan; loadSheet?: (id: string, n: number) => Promise<Blob>; loadSectionPlan?: typeof defaultLoad; single?: boolean } = {}) {
-  const save = vi.fn(async (plan: Plan) => plan)
+interface MountOptions {
+  plan?: Plan
+  analysis?: Analysis
+  save?: (plan: Plan) => Promise<Plan>
+  loadSheet?: (id: string, n: number) => Promise<Blob>
+  loadSectionPlan?: typeof defaultLoad
+  single?: boolean
+}
+
+function mount(over: MountOptions = {}) {
+  const save = vi.fn(over.save ?? (async (plan: Plan) => plan))
   const plan = over.plan ?? planOf()
   if (over.single) plan.settings.single_column = true
   const editor = new PlanEditor(plan, save, { debounceMs: 20, page })
   const loadSectionPlan = vi.fn(over.loadSectionPlan ?? defaultLoad)
   const loadSheet = vi.fn(over.loadSheet ?? (async () => new Blob(['png'])))
-  const utils = render(PagePreview, { editor, analysis: analysisOf(), id: ID, loadSectionPlan, loadSheet, dpi: 72 })
+  const utils = render(PagePreview, { editor, analysis: over.analysis ?? analysisOf(), id: ID, loadSectionPlan, loadSheet, dpi: 72 })
   return { editor, save, loadSectionPlan, loadSheet, ...utils }
 }
 const defaultLoad = async (_id: string, i: number, body: SectionPlanRequest) => viewFor(i, body)
+
+/**
+ * The route as gate r1 made it (`tests/test_api_e2e.py::test_section_plan_plans_the_list_in_the_body_not_the_saved_one`):
+ * `i` names a section of the list in the body, else of the SAVED list — what the fake `save` last accepted. A
+ * view is derived from the list so a test can tell which list was planned: a section runs from its own page to
+ * the next section's. Before gate r1 the body carried no list and an index past the saved one was the job-level
+ * 404 that stopped the editor; the fake keeps that so the tests below fail against that behaviour.
+ */
+function fakeServer(initial: Plan) {
+  let saved = structuredClone(initial)
+  const save = async (plan: Plan) => {
+    saved = structuredClone(plan)
+    return structuredClone(plan)
+  }
+  const loadSectionPlan = async (_id: string, i: number, body: SectionPlanRequest): Promise<SectionPlan> => {
+    const list = body.sections ?? saved.sections
+    const s = list[i]
+    if (!s) throw body.sections ? new ApiError(422, 'no_section') : new ApiError(404, 'not_found')
+    const next = list[i + 1]
+    const view: SectionPlan = { pages: [s.page, next ? next.page : 6], startCut: null, startCol: 'full', endCut: next ? 300 : null, endCol: 'full', flags: [], notes: [], rects: [] }
+    return body.override ? { ...view, ...body.override, flags: ['override'] } : view
+  }
+  return { save, loadSectionPlan }
+}
 
 const slider = (name: string) => screen.getByRole('slider', { name }) as unknown as SVGRectElement
 const valueOf = (name: string) => Number(slider(name).getAttribute('aria-valuenow'))
@@ -77,9 +112,9 @@ describe('PagePreview (AC-1)', () => {
     await vi.waitFor(() => expect(screen.getByText('Last sheet 4')).toBeTruthy())
     expect(screen.getByText('First sheet 3')).toBeTruthy()
     expect(screen.getByText(/Section 2: 2 Chapter Two/)).toBeTruthy()
-    // The local plan is what the engine is asked about: its settings, and `null` for "no override of ours".
+    // The local plan is what the engine is asked about: its settings, its list, and `null` for "no override of ours".
     expect(loadSectionPlan).toHaveBeenCalledTimes(1)
-    expect(loadSectionPlan.mock.calls[0]?.slice(0, 3)).toEqual([ID, 1, { settings: planOf().settings, override: null }])
+    expect(loadSectionPlan.mock.calls[0]?.slice(0, 3)).toEqual([ID, 1, LOCAL()])
     expect(loadSheet.mock.calls.map((c) => c.slice(0, 3))).toEqual([
       [ID, 3, 72],
       [ID, 4, 72],
@@ -158,7 +193,7 @@ describe('PagePreview dragging (AC-2, AC-3)', () => {
     await fireEvent.pointerUp(end, { clientX: 100, clientY: 350.3, pointerId: 1 })
     expect(editor.plan.overrides).toEqual({ '1': { endCut: 350.5, endCol: 'left' } })
     expect(loadSectionPlan).toHaveBeenCalledTimes(2)
-    expect(lastRequest(loadSectionPlan)).toEqual({ settings: planOf().settings, override: { endCut: 350.5, endCol: 'left' } })
+    expect(lastRequest(loadSectionPlan)).toEqual({ ...LOCAL(), override: { endCut: 350.5, endCol: 'left' } })
     await vi.waitFor(() => expect(screen.getByText('Manual cut')).toBeTruthy()) // the view's `override` flag
     await vi.waitFor(() => expect(save).toHaveBeenCalledTimes(1))
     expect(save.mock.calls[0]?.[0].overrides).toEqual({ '1': { endCut: 350.5, endCol: 'left' } })
@@ -211,7 +246,77 @@ describe('PagePreview dragging (AC-2, AC-3)', () => {
   })
 })
 
+describe('PagePreview per-sheet geometry (gate r1 F3)', () => {
+  it('every sheet is drawn and dragged in its own size', async () => {
+    const small = { W: 700, H: 600 }
+    const size = [SIZE, SIZE, small, small, small, small]
+    // The browser lays each image out in its own aspect: a client position is a page point of THAT sheet.
+    vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function (this: Element) {
+      const n = Number(/sheet (\d+)/.exec(this.closest('svg')?.getAttribute('aria-label') ?? '')?.[1] ?? 1)
+      const s = size[n - 1]!
+      return { left: 0, top: 0, width: s.W, height: s.H, right: s.W, bottom: s.H, x: 0, y: 0, toJSON: () => ({}) }
+    })
+    const view: SectionPlan = { pages: [2, 3], startCut: 120, startCol: 'full', endCut: 290, endCol: 'right', flags: [], notes: [], rects: [[3, [340.9, 290, 700, 568]]] }
+    const { editor } = mount({ analysis: analysisOf({ size }), loadSectionPlan: async () => view })
+    editor.select(0)
+    await vi.waitFor(() => expect(screen.getByText('Last sheet 3')).toBeTruthy())
+    const [first, last] = svgs()
+    expect(first!.getAttribute('viewBox')).toBe('0 0 522.7 789.6')
+    expect(last!.getAttribute('viewBox')).toBe('0 0 700 600')
+    const frames = [...document.querySelectorAll('.frame')].map((f) => f.getAttribute('style') ?? '')
+    expect(frames[0]).toMatch(/aspect-ratio:\s*522\.7\s*\/\s*789\.6/)
+    expect(frames[1]).toMatch(/aspect-ratio:\s*700\s*\/\s*600/)
+    // One gutter fraction, a different x per width; the footer band sits above each sheet's own bottom edge.
+    expect(Number(first!.querySelector('.gutter')!.getAttribute('x1'))).toBeCloseTo(0.487 * 522.7, 6)
+    expect(Number(last!.querySelector('.gutter')!.getAttribute('x1'))).toBeCloseTo(0.487 * 700, 6)
+    expect([...last!.querySelectorAll('.band')].map((b) => b.getAttribute('y'))).toEqual(['0', String(600 - 32)])
+    expect(slider('Start cut of section 1').getAttribute('aria-valuemax')).toBe('789.6')
+    expect(slider('End cut of section 1').getAttribute('aria-valuemax')).toBe('600')
+    expect(removed(last!)).toEqual([[340.9, 290, 700 - 340.9, 568 - 290]])
+    // A drag on the 600-pt sheet lands where the pointer is in ITS points (not where 200/789.6 of the first would).
+    await drag(slider('End cut of section 1'), [500, 290], [500, 200])
+    expect(Math.abs((editor.plan.overrides['0']?.endCut ?? 0) - 200)).toBeLessThanOrEqual(2)
+    expect(editor.plan.overrides['0']?.endCol).toBe('right')
+    await drag(slider('End cut of section 1'), [500, 200], [500, 5000])
+    expect(editor.plan.overrides['0']?.endCut).toBe(600)
+    // The gutter dragged on the small sheet is a fraction of ITS width, and the other sheet follows.
+    const [gutter1, gutter3] = screen.getAllByRole('slider', { name: 'Gutter' })
+    await drag(gutter3!, [0.487 * 700, 300], [350, 300])
+    expect(editor.plan.settings.column_split).toBe(0.5)
+    expect(gutter1!.getAttribute('aria-valuenow')).toBe(String(Math.round(0.5 * 522.7)))
+    await fireEvent.keyDown(gutter3!, { key: 'ArrowRight', shiftKey: true })
+    expect(editor.plan.settings.column_split).toBeCloseTo(360 / 700, 3)
+    // The footer band grows from the small sheet's bottom; the start cut is bounded by the first sheet's height.
+    await drag(screen.getAllByRole('slider', { name: 'Footer band' })[1]!, [100, 600 - 32], [100, 600 - 50])
+    expect(editor.plan.settings.footer_band).toBe(50)
+    await drag(slider('Start cut of section 1'), [100, 120], [100, 5000])
+    expect(editor.plan.overrides['0']?.startCut).toBe(789.5)
+  })
+})
+
 describe('PagePreview keyboard (AC-5)', () => {
+  it('a press on a grip focuses it, so the arrow keys after a drag nudge that line (gate r1 F4)', async () => {
+    const { editor } = mount()
+    editor.select(1)
+    await vi.waitFor(() => expect(screen.getByText('Last sheet 4')).toBeTruthy())
+    // The section list's radio had focus (a click there is how the section was selected).
+    const radio = document.createElement('input')
+    radio.type = 'radio'
+    document.body.append(radio)
+    radio.focus()
+    const end = slider('End cut of section 2')
+    const down = createEvent.pointerDown(end, { clientX: 100, clientY: 400, button: 0, pointerId: 1 })
+    await fireEvent(end, down)
+    expect(down.defaultPrevented).toBe(true) // no text selection across the page while dragging
+    expect(document.activeElement).toBe(end)
+    await fireEvent.pointerMove(end, { clientX: 100, clientY: 380, pointerId: 1 })
+    await fireEvent.pointerUp(end, { clientX: 100, clientY: 380, pointerId: 1 })
+    expect(editor.plan.overrides['1']?.endCut).toBe(380)
+    await fireEvent.keyDown(document.activeElement!, { key: 'ArrowUp' })
+    expect(editor.plan.overrides['1']?.endCut).toBe(379)
+    radio.remove()
+  })
+
   it('arrow keys nudge the focused line by 1 pt, 10 with Shift; the view refreshes when the save lands', async () => {
     const { editor, save, loadSectionPlan } = mount()
     editor.select(1)
@@ -272,20 +377,91 @@ describe('PagePreview reset and removal (AC-4)', () => {
 })
 
 describe('PagePreview refresh and failures', () => {
-  it('asks again after a save that changed the section list, not after one that only renamed', async () => {
+  it('asks again once a save landed with a list or settings that differ from what it last sent', async () => {
     const { editor, loadSectionPlan } = mount()
     editor.select(1)
     await vi.waitFor(() => expect(loadSectionPlan).toHaveBeenCalledTimes(1))
+    // The list is what is sent, a name included: a rename asks once its save has landed, with the new list.
     editor.rename(0, 'Intro')
     await vi.waitFor(() => expect(editor.saves).toBe(1))
-    expect(loadSectionPlan).toHaveBeenCalledTimes(1)
-    editor.remove(2)
-    await vi.waitFor(() => expect(editor.saves).toBe(2))
     await vi.waitFor(() => expect(loadSectionPlan).toHaveBeenCalledTimes(2))
+    expect(lastRequest(loadSectionPlan).sections?.[0]?.name).toBe('Intro')
+    // A section removed BELOW the selection changes nothing on screen until its save lands, then the list differs.
+    editor.remove(2)
+    expect(loadSectionPlan).toHaveBeenCalledTimes(2)
+    await vi.waitFor(() => expect(editor.saves).toBe(2))
+    await vi.waitFor(() => expect(loadSectionPlan).toHaveBeenCalledTimes(3))
+    expect(lastRequest(loadSectionPlan).sections).toHaveLength(2)
     // A layout change made elsewhere reaches the preview the same way, with the new settings.
     editor.setSetting('header_band', 80)
-    await vi.waitFor(() => expect(loadSectionPlan).toHaveBeenCalledTimes(3))
+    await vi.waitFor(() => expect(loadSectionPlan).toHaveBeenCalledTimes(4))
     expect(lastRequest(loadSectionPlan).settings?.header_band).toBe(80)
+  })
+
+  it('an insert above the selection previews the section on screen at once and never stops the editor (gate r1 F1)', async () => {
+    const { editor, save, loadSectionPlan } = mount(fakeServer(planOf()))
+    editor.select(2)
+    await vi.waitFor(() => expect(screen.getByText('— sheets 4–6')).toBeTruthy())
+    // "Inserted" lands at index 1, so the selection becomes index 3 — an index the SAVED list does not have yet.
+    expect(editor.add('Inserted', 2)).toBe(1)
+    expect(editor.selected).toBe(3)
+    await vi.waitFor(() => expect(loadSectionPlan).toHaveBeenCalledTimes(2))
+    expect(loadSectionPlan.mock.calls[1]?.[1]).toBe(3)
+    expect(lastRequest(loadSectionPlan).sections?.map((s) => s.page)).toEqual([1, 2, 3, 4])
+    await vi.waitFor(() => expect(screen.getByText(/Section 4: 3 Closing Chapter/)).toBeTruthy())
+    expect(screen.getByText('— sheets 4–6')).toBeTruthy()
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(editor.gone).toBe(false)
+    // The save lands with the list already previewed: nothing to ask again, and later edits still save.
+    await vi.waitFor(() => expect(editor.saves).toBe(1))
+    expect(loadSectionPlan).toHaveBeenCalledTimes(2)
+    editor.rename(0, 'Intro')
+    await vi.waitFor(() => expect(editor.saves).toBe(2))
+    expect(save.mock.calls.at(-1)?.[0].sections[0]?.name).toBe('Intro')
+    expect(editor.gone).toBe(false)
+  })
+
+  it('a delete above the selection previews the section on screen, not the saved list’s section at that index (gate r1 F2)', async () => {
+    const { editor, loadSectionPlan } = mount(fakeServer(planOf()))
+    editor.select(1)
+    await vi.waitFor(() => expect(screen.getByText('— sheets 3–4')).toBeTruthy())
+    editor.remove(0)
+    expect(editor.selected).toBe(0)
+    await vi.waitFor(() => expect(loadSectionPlan).toHaveBeenCalledTimes(2))
+    expect(lastRequest(loadSectionPlan).sections?.map((s) => s.page)).toEqual([3, 4])
+    await vi.waitFor(() => expect(screen.getByText(/Section 1: 2 Chapter Two/)).toBeTruthy())
+    expect(screen.getByText('— sheets 3–4')).toBeTruthy()
+    await vi.waitFor(() => expect(editor.saves).toBe(1))
+    expect(loadSectionPlan).toHaveBeenCalledTimes(2)
+    expect(screen.getByText('— sheets 3–4')).toBeTruthy()
+    expect(editor.gone).toBe(false)
+  })
+
+  it('a 422 about the request (no_section) is this preview’s message with a Retry, never a gone job', async () => {
+    const loadSectionPlan = vi.fn(defaultLoad).mockRejectedValueOnce(new ApiError(422, 'no_section'))
+    const { editor } = mount({ loadSectionPlan })
+    editor.select(1)
+    await vi.waitFor(() => expect(screen.getByRole('alert').textContent).toContain('There is no section with that number in the list.'))
+    expect(editor.gone).toBe(false)
+    await fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+    await vi.waitFor(() => expect(screen.getByText('Last sheet 4')).toBeTruthy())
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  it('a sheet that failed to render is forgotten when the selection moves on (gate r1 F5)', async () => {
+    const loadSheet = vi.fn(async (_id: string, n: number) => (n === 4 ? Promise.reject(new ApiError(500, 'preview_failed')) : new Blob(['png'])))
+    const { editor } = mount({ loadSheet })
+    editor.select(1)
+    await vi.waitFor(() => expect(screen.getByRole('alert').textContent).toContain('The preview could not be rendered.'))
+    editor.select(0)
+    await vi.waitFor(() => expect(screen.getByText('Last sheet 2')).toBeTruthy())
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(document.querySelectorAll('img')).toHaveLength(2)
+    // Back on the section whose sheet fails, the failure is asked for again and shown again — it is that section's.
+    editor.select(1)
+    await vi.waitFor(() => expect(screen.getByRole('alert').textContent).toContain('The preview could not be rendered.'))
+    editor.select(null)
+    await vi.waitFor(() => expect(screen.queryByRole('alert')).toBeNull())
   })
 
   it('a 410 from a sheet render means the job is gone: the expired message, no Retry, and the editor stops', async () => {

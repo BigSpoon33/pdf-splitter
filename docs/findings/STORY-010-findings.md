@@ -6,6 +6,91 @@ Commit: `e0a10cd feat: STORY-010 - page preview with hatched cuts and draggable 
 (feature/mvp, pushed to `origin` and `gitea`). Lines below are as of that commit. Web only; nothing in
 `src/pdf_splitter/`, `tests/` or the engine changed.
 
+**Gate r1 (2026-09-25): 5 confirmed findings (`STORY-010-review.md`), fixed forward in
+`fix: STORY-010 - gate r1: preview plans the list on screen, per-sheet geometry, focus on drag, errors scoped to the
+selection`** — § Gate r1 fixes below (its lines are as of that commit; it does change the preview route and `tests/`).
+
+## Gate r1 fixes
+
+**F1 + F2 — the preview asked the SERVER's saved list by index while the user saw the LOCAL list.** One root cause:
+`POST /sections/{i}/plan` looked `i` up in `plan.json`, so an insert at/above the selection asked for an index the
+saved list did not have yet (404 `not_found` → `fail()` marked the editor `gone`, nothing saved after that), and a
+delete/merge above it showed the wrong section — and never refreshed, because the dedup key was built from the local
+list and did not change when the save landed.
+- **Route** (`src/pdf_splitter/routes/preview.py:111` `post_section_plan`): the body may carry `sections`, the list to
+  plan `i` in — `PreviewRequest.sections` (`models.py:169`; `list[Section]` under the same validation as PUT /plan:
+  page ∈ [1, pages] through the `pages` context, ≤ `MAX_SECTIONS` 2,000, names cleaned, `heading` optional, `extra`
+  forbidden) with duplicate names made distinct by the same rule as the saved plan (`dedupe_names`, `models.py:109`,
+  now shared by `Plan` — the engine looks entries up by name). Absent → the saved list, as before. `i` past the list
+  used → **422 `no_section`** (`errors.py:31`, never the job-level 404). The override's bounds are checked in the
+  route once the list is known (`check_override`, `:131`, loc `["body", "override"]`) — the model validator that did
+  it before could not know which list `i` named. Nothing is persisted. `run_preview` gets the list; the engine names
+  it the same `NNN-slug` way (`engine_entries`).
+  Tests: `tests/test_api_e2e.py::test_section_plan_plans_the_list_in_the_body_not_the_saved_one` (:671 — body list ≠
+  saved list → the answer follows the body, by index; the inserted section itself; a saved override applies by index
+  in whichever list; twins named apart; plan.json byte-identical), `::test_section_plan_validates_index_settings_and_override`
+  (:659 — 16 cases now: `3`/`-1`/an empty list/past the body list → 422 `no_section`; page 7, an empty name, an extra
+  key, 2,001 sections, an override past the page with a body list → 422 `invalid` with `loc[:2]` = `["body",
+  "sections"|"override"]`), `::test_a_section_plan_of_a_body_list_after_a_delete_is_410_not_500` (:706).
+- **SPA** (`web/src/components/PagePreview.svelte`): `requestFor` (:63) sends `sections: plan.sections` — the local
+  list, always (`SectionPlanRequest.sections`, `api.ts`); the dedup key is exactly `[i, body]` (:102), so a landed
+  save asks again only when the body it would send differs from the one last sent (a list that changed under the
+  selection, a rename — names are sent — or settings edited elsewhere) and never when the save merely echoed what
+  was already previewed; `fail()` (:72) still stops the editor only for `isGone` (job-level 404 `not_found` / 410
+  `expired`) — a 422 such as `no_section` is this preview's inline message with a Retry. `errors.ts` gained
+  `no_section` (the parity test counts 14 codes).
+  Tests (`PagePreview.test.ts`, each fails on `e0a10cd` — the stand-in server `fakeServer` plans the body's list or,
+  absent, the list the fake `save` last accepted, and answers the old 404 for an index past it): "an insert above
+  the selection previews the section on screen at once and never stops the editor (gate r1 F1)" (:401 — select 3,
+  add at sheet 2 → the request is `i = 3` with the 4-section list, "sheets 4–6" stays, no alert, `gone` false, a
+  later rename saves), "a delete above the selection previews the section on screen, not the saved list's section at
+  that index (gate r1 F2)" (:424 — select 2, delete 1 → `i = 0` with the 2-section list, "sheets 3–4" at once and
+  after the save; on `e0a10cd` the fake returns sheets 1–3), "a 422 about the request (no_section) is this preview's
+  message with a Retry, never a gone job" (:440), and the reworked "asks again once a save landed with a list or
+  settings that differ from what it last sent" (a rename now asks once, after its save; a delete below the selection
+  asks once the save lands).
+- Live (`b.pdf`, API 8010 + worker, Vite 5192, headless Chromium): select 3 → add "Inserted section" at sheet 2 →
+  ONE `POST sections/3/plan` with `sections=1,2,3,4` before the PUT, heading "Section 4: 3 Closing Chapter — sheets
+  4–6", no alert, status Saved; a rename after it → PUT lands, names on the server. Select "Chapter Two" (index 2),
+  delete section 1 → `POST sections/1/plan sections=2,3,4` at once, "Section 2: … — sheets 3–4" before AND after the
+  save (one POST, one PUT).
+
+**F3 — every sheet used the FIRST sheet's size.** `sizeOf(n)` (:188) is now read per sheet in the markup
+(`{@const size = sizeOf(n)}`, :381: `aspect-ratio`, `viewBox`, bands, gutter, `aria-valuemax`, the `cutLine`
+snippet takes `n` and `size`); the gutter is kept as a FRACTION (`splitFrac`, :193) and becomes an x per sheet
+width; a drag records the sheet it started on (`drag.sheet`) and maps the pointer through THAT sheet's frame
+(`pointAt(e, size)`, :203; `onDown(kind, sheet)` :226, `onMove` :243, `onKey(kind, sheet)` :277), clamps to that
+sheet's height and commits the gutter as `value / size.W`. Test: "every sheet is drawn and dragged in its own size"
+(:249, `analysisOf({size})` 522.7 × 789.6 then 700 × 600, `getBoundingClientRect` mocked per sheet from the analysis,
+a view on sheets 2–3: viewBox `0 0 700 600` and its aspect on the second frame, gutter x per width, footer band above
+each bottom, `aria-valuemax` 789.6/600, the end cut dragged to y = 200 of the 600-pt sheet lands within 2 pt (on
+`e0a10cd`: 200 × 789.6/600 ≈ 263), clamps at 600, the gutter dragged on the small sheet → `column_split` 0.5 on both,
+a footer drag from the small sheet's bottom, the start cut bounded by the first sheet). Live (`mixed.pdf`, the
+reviewer's 522.72 × 789.6 / 700 × 600 book): viewBoxes `0 0 522.7 789.6` and `0 0 700 600`, the PNG's natural aspect
+= the shown aspect on both (0.662/0.661, 1.167/1.168); the end cut dragged onto the visible "Beta Chapter" heading
+(289.9 pt of the 600-pt sheet) → `endCut: 290` saved; the gutter dragged to the middle of the 700-pt sheet →
+`column_split` 0.5, "261.5 pt (50 %)" on the tall sheet and "350 pt (50 %)" on the wide one.
+
+**F4 — `preventDefault()` on pointerdown kept the grip from taking focus.** `onDown` still prevents the default (no
+text selection across the page while dragging) and focuses the grip itself (`grip.focus({preventScroll: true})`,
+:233), so the arrow keys after a drag nudge THAT line. Test: "a press on a grip focuses it, so the arrow keys after a
+drag nudge that line (gate r1 F4)" (:298 — a radio has focus, pointerdown → `defaultPrevented` and
+`document.activeElement` is the grip, the drag lands at 380, ArrowUp on the active element → 379; jsdom implements
+`SVGElement.focus`). Live: focus "Select section 2" → drag the end cut → focused "End cut of section 2", no text
+selection, ArrowDown → 341 saved.
+
+**F5 — `sheetError` was never cleared on a selection change.** The section-plan effect clears `sheetError` (with
+`viewError`) whenever it sends a new request (:112) and when the selection goes (:94). Test: "a sheet that failed to
+render is forgotten when the selection moves on (gate r1 F5)" (:451 — sheet 4 fails: alert under section 2, none
+under section 1 with both images, the alert again back on section 2, none after deselecting). Live: sheet 2
+intercepted with a 500 → alert + Retry under section 1, none under section 2 (4 images), the alert again back on 1,
+gone after Retry once the sheet serves.
+
+**Counts after the fix:** `bun run test` 190 pass (13 files; +7: 5 gate tests, `no_section`, the reworked refresh
+test counts as before) · `bun run check` 320 files 0 errors 0 warnings · `bun run build` 91.96 kB JS (33.32 kB gzip) ·
+`uv run pytest` 344 pass (+9: 7 parametrized cases, 2 tests) · `ruff` clean. `document.title` stayed "PDF Splitter";
+raw job ids in api.log/worker.log: 0.
+
 ## AC Verification
 - [x] AC-1: `web/src/components/PagePreview.svelte` (mounted in `Review.svelte:128` between the section list and the
   layout panel). It reads `editor.selected`; on a selection it POSTs the section plan with the LOCAL plan's settings and
@@ -141,6 +226,12 @@ lands in `plan.overrides` on release, so the STORY-009 keepalive/beforeunload ha
 fetched, not `<img src>`-ed: the 410/500 distinction depends on that — keep it if a thumbnails strip is ever added.
 
 ## Out-of-Scope Items
+- (Gate r1) `README.md:51` still lists `POST /sections/{i}/plan` as `{settings?, override?}` — the README's API table
+  is outside this story's authority (`README § Web` only); one line for the orchestrator to align with Architecture
+  § API Interface (`sections?`, 422 `no_section`).
+- (Gate r1) A rename now costs one section-plan request once its save lands (the list is what the preview sends, names
+  included; no re-index — the engine's cache is keyed on settings). If that ever matters, send the list without names
+  and let the route name entries by index alone.
 - Cut/download/delete/expiry UX (STORY-011). `JobStatus` still does not resume polling after a cut is queued from the
   review page (STORY-009 findings § Out-of-Scope); see KICKOFF-STORY-011 for the two options.
 - A thumbnails strip / context sheets before and after the section (story § Out of Scope; the engine's editor has

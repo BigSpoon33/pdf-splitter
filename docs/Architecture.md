@@ -200,7 +200,9 @@ GET    /api/jobs/{id}/analysis         Analysis (409 until state ≥ review)
 GET    /api/jobs/{id}/plan             Plan (default = suggested source, no overrides)
 PUT    /api/jobs/{id}/plan             Plan → 200 normalized Plan | 422 with field errors
 GET    /api/jobs/{id}/sheets/{n}.png?dpi=72   PNG (dpi ∈ {48, 72, 110})
-POST   /api/jobs/{id}/sections/{i}/plan       {settings?, override?} → Section plan (not persisted)
+POST   /api/jobs/{id}/sections/{i}/plan       {settings?, override?, sections?} → Section plan (not persisted)
+                                       sections = the list to plan i in (the client's local one, validated as in PUT), else the saved list
+                                       422 no_section when i is past that list (never the job-level 404)
 POST   /api/jobs/{id}/cut              202 {state:"queued"} (uses the saved Plan) · 409 if running
 GET    /api/jobs/{id}/manifest         the last cut's manifest rows as JSON [{index, name, file, printedPages, pageCount, flags, notes, leaks, bytes} — the engine's manifest row + index/name/file] (409 before any cut; kept until the next cut replaces it)
 GET    /api/jobs/{id}/result.zip       attachment

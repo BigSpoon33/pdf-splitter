@@ -155,7 +155,7 @@ describe('Review', () => {
     expect(screen.getByText('Select a section to preview where it will be cut.')).toBeTruthy()
     await fireEvent.click(screen.getByLabelText('Select section 2'))
     await vi.waitFor(() => expect(screen.getByText('Last sheet 4')).toBeTruthy())
-    expect(loadSectionPlan).toHaveBeenCalledWith(ID, 1, { settings: planOf().settings, override: null }, expect.any(AbortSignal))
+    expect(loadSectionPlan).toHaveBeenCalledWith(ID, 1, { settings: planOf().settings, override: null, sections: planOf().sections }, expect.any(AbortSignal))
     expect(loadSheet.mock.calls.map((c) => c[1])).toEqual([3, 4])
     expect(screen.getByRole('slider', { name: 'End cut of section 2' }).getAttribute('aria-valuenow')).toBe('400')
   })

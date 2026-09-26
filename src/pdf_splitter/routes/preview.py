@@ -17,7 +17,7 @@ from ..config import Settings
 from ..deps import SettingsDep, StoreDep
 from ..errors import ApiError
 from ..files import read_json
-from ..models import PreviewRequest, ValidationError
+from ..models import PreviewRequest, ValidationError, check_override
 from ..preview import GONE
 from ..store import Store, log_id
 from ..worker import sandbox
@@ -113,23 +113,29 @@ def post_section_plan(
 ) -> dict[str, Any]:
     job = load_job(store, job_id)
     plan = saved_plan(settings, job)
-    if not 0 <= i < len(plan["sections"]):
-        raise ApiError(404, "not_found", "There is no section with that number.")
+    try:
+        req = PreviewRequest.model_validate(body or {}, context={"pages": job["pages"]})
+    except ValidationError as e:
+        raise invalid(e) from None
+    # The list `i` is looked up in: the client's (what its user sees — a save may still be on its way) or the
+    # saved one. An index past its end is a bad request, not a missing job: the SPA treats 404 as "gone".
+    sections = [s.model_dump() for s in req.sections] if req.sections is not None else plan["sections"]
+    if not 0 <= i < len(sections):
+        raise ApiError(422, "no_section")
     try:
         heights = [float(s["H"]) for s in read_json(job_dir(settings, job) / "analysis.json")["size"]]
     except FileNotFoundError:
         settled(store, settings, job)         # the directory went with a DELETE just now → 410
         raise
-    context = {"height": heights[plan["sections"][i]["page"] - 1], "max_height": max(heights)}
-    try:
-        req = PreviewRequest.model_validate(body or {}, context=context)
-    except ValidationError as e:
-        raise invalid(e) from None
+    if req.override is not None:
+        why = check_override(req.override, heights[sections[i]["page"] - 1], max(heights))
+        if why:
+            raise invalid_field(["body", "override"], f"override: {why}")
     override = req.override.dump() if req.override is not None else None
     if "override" not in req.model_fields_set:
         override = plan["overrides"].get(str(i))
     request = {
-        "sections": plan["sections"],
+        "sections": sections,
         "settings": req.settings.dump() if req.settings is not None else plan["settings"],
         "index": i,
         "override": override,

@@ -27,6 +27,8 @@ MESSAGES = {
     "not_ready": "The job is not ready for this yet.",
     "busy": "The job is being processed; try again when it has finished.",
     "invalid": "The request is not valid.",
+    # POST /sections/{i}/plan: `i` names no section of the list being planned (a 422, not the job-level 404)
+    "no_section": "There is no section with that number in the list.",
     "preview_failed": "The preview could not be rendered.",
     "internal": "Something went wrong.",
 }
