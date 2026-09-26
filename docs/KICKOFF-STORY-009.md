@@ -206,3 +206,21 @@ Orchestrator additions (not findings, but in this commit):
   candidates whose `y` is inside the current header/footer bands (use the page H from analysis.size),
   and a "max heading length" control (default 90, the analysis max_len). Both update the live count.
 Update findings ("Gate r1 fixes") and KICKOFF-STORY-010.
+
+## Attempt 2b — round-2 fix (standing auto-fix policy) — READ THIS FIRST
+
+One commit on the feature/mvp tip:
+`fix: STORY-009 - gate r2: large plans save on tab switch and are never silently lost on close`
+- `visibilitychange → hidden` is NOT an unload: flush with an ORDINARY PUT (no keepalive) — the page
+  stays alive and the request completes (this restores 784b31d's behaviour for big plans).
+- `pagehide`: send with keepalive ONLY when the JSON body ≤ 60,000 bytes; otherwise attempt an
+  ordinary PUT anyway (best effort) AND make the unsaved state visible before unload: register a
+  `beforeunload` handler that calls `preventDefault()` (the browser's "leave site?" prompt) whenever
+  there is an unsaved or in-flight edit — so a large-plan user is warned instead of losing work.
+- Never clear `unsent`/dirty before a send is known to have been accepted; a refused/failed send
+  leaves the edit pending so the next flush (or Retry, or becoming visible again) sends it.
+- Tests (prove they fail on 9e29032): a >64 KB plan + visibility hidden → an ordinary PUT is made (no
+  keepalive flag) and the edit persists; a refused keepalive (mock fetch throwing TypeError for
+  keepalive bodies > 65,536) leaves the edit pending and retries on the next flush; beforeunload
+  preventDefault is called while dirty and not when clean.
+Update findings ("Gate r2 fix") and KICKOFF-STORY-010 if it cites the unload behaviour.

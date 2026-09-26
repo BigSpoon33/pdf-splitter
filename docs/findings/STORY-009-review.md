@@ -13,3 +13,8 @@ Confirmed:
 7. editor.svelte.ts:204-207 — destroy() drops a pending debounced save (also no beforeunload/pagehide flush).
 8. SourcePicker.svelte:33-35,90 — Undo doesn't resync the picker's level/threshold controls.
 Refuted: 1 (version guard works; but trailing-space loss mid-typing is real UX → orchestrator addition), 3 (index+name badge matching is the documented conservative design; merge case → small orchestrator addition), 9 (story never asked; PRD bands/max-length heading filters unscheduled → orchestrator addition).
+
+## Round 2 (re-review of 9e29032) — FAILED (1 confirmed: fix-regression + incomplete F7) → auto-fix per standing policy
+Verified: all 6 findings + 3 additions work (3000-plan randomized override property test clean; live browser checks); every new test fails on 784b31d.
+
+1. [correctness, regression] editor.svelte.ts:257-263 (+ :100-102, :267; api.ts:242-249) — `sendBeforeUnload` always uses fetch keepalive; Chromium refuses keepalive bodies > ~64 KiB and `unsent` is already cleared, so a refused send is never retried; `onVisibility` routes an ordinary tab switch through it. Maciocia "Any level" = 1654 sections (142 KB): tab switch → "Could not reach the server", later close → rename lost (784b31d saved it). CONFIRMED (Chromium cutoff between 65,536 and 70,000 B).
