@@ -1,5 +1,21 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { ApiError, createJob, errorFromBody, getAnalysis, getJob, getManifest, getPlan, isGone, putPlan, type JobStatus, type Plan } from './api'
+import {
+  ApiError,
+  createJob,
+  errorFromBody,
+  getAnalysis,
+  getJob,
+  getManifest,
+  getPlan,
+  getSectionPlan,
+  getSheet,
+  isGone,
+  putPlan,
+  sheetUrl,
+  type JobStatus,
+  type Plan,
+  type SectionPlan,
+} from './api'
 import { MESSAGES } from './errors'
 
 // The status shape pinned by tests/test_api_e2e.py::test_job_status_shape_hides_the_requeue_marker_and_shows_failures.
@@ -167,5 +183,52 @@ describe('review payloads (STORY-009)', () => {
     await expect(getManifest('id-1')).resolves.toEqual(rows)
     stubFetch(409, JSON.stringify({ code: 'not_ready', message: 'm' }))
     await expect(getManifest('id-1')).rejects.toMatchObject({ status: 409, code: 'not_ready' })
+  })
+})
+
+describe('preview payloads (STORY-010)', () => {
+  // The view pinned by tests/test_api_e2e.py::test_section_plan_returns_the_engine_view_with_rects (section 1 of headed_book).
+  const VIEW: SectionPlan = {
+    pages: [3, 4],
+    startCut: null,
+    startCol: 'full',
+    endCut: 400,
+    endCol: 'right',
+    flags: [],
+    notes: [],
+    rects: [[4, [254.5, 400, 522.7, 757.6]]],
+  }
+
+  it('POSTs the section plan request as JSON; an empty body is `{}` (the saved settings and override)', async () => {
+    const fetchMock = stubFetch(200, JSON.stringify(VIEW))
+    await expect(getSectionPlan('id-1', 1)).resolves.toEqual(VIEW)
+    const [url, init] = fetchMock.mock.calls[0]!
+    expect(url).toBe('/api/jobs/id-1/sections/1/plan')
+    expect(init?.method).toBe('POST')
+    expect(init?.headers).toMatchObject({ 'Content-Type': 'application/json', Accept: 'application/json' })
+    expect(JSON.parse(init?.body as string)).toEqual({})
+    // An explicit null override asks for the engine's own plan (::test_section_plan_uses_the_saved_override_unless_told_otherwise).
+    await getSectionPlan('id-1', 1, { override: null })
+    expect(JSON.parse(fetchMock.mock.calls[1]?.[1]?.body as string)).toEqual({ override: null })
+  })
+
+  it('a 410 during a render is gone, a 500 is preview_failed', async () => {
+    stubFetch(410, JSON.stringify({ code: 'expired', message: 'm' }))
+    const gone = await getSectionPlan('id-1', 0).catch((e: unknown) => e)
+    expect(isGone(gone)).toBe(true)
+    stubFetch(500, JSON.stringify({ code: 'preview_failed', message: 'm', request_id: 'r-1' }))
+    await expect(getSheet('id-1', 1, 72)).rejects.toMatchObject({ status: 500, code: 'preview_failed' })
+  })
+
+  it('builds the sheet URL from the 1-based sheet and the dpi, and fetches the PNG as a Blob', async () => {
+    expect(sheetUrl('id-1', 3, 110)).toBe('/api/jobs/id-1/sheets/3.png?dpi=110')
+    const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47])
+    const fetchMock = vi.fn(async () => new Response(png, { status: 200, headers: { 'Content-Type': 'image/png' } }))
+    vi.stubGlobal('fetch', fetchMock)
+    const blob = await getSheet('id-1', 3, 110)
+    expect(blob.size).toBe(4)
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
+    expect(url).toBe('/api/jobs/id-1/sheets/3.png?dpi=110')
+    expect(init.headers).toMatchObject({ Accept: 'image/png' })
   })
 })

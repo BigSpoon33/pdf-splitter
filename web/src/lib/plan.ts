@@ -236,3 +236,13 @@ export function rowFor(rows: ManifestRow[], plan: Plan, i: number): ManifestRow 
   const s = plan.sections[i]
   return rows.find((r) => r.index === i && s !== undefined && r.name === s.name)
 }
+
+/**
+ * The badges on section `i` (AC-4): `override` when the PLAN has a manual cut for it (cut yet or not) or the last
+ * cut's row says the file was cut under one — shown once either way — then the row's other flags.
+ */
+export function badgesFor(plan: Plan, rows: ManifestRow[], i: number): string[] {
+  const fromCut = badgeFlags(rowFor(rows, plan, i), i === plan.sections.length - 1)
+  const manual = String(i) in plan.overrides || fromCut.includes('override')
+  return manual ? ['override', ...fromCut.filter((f) => f !== 'override')] : fromCut
+}

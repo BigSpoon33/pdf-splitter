@@ -1,6 +1,6 @@
 import { fireEvent, render, screen } from '@testing-library/svelte'
 import { describe, expect, it, vi } from 'vitest'
-import { ApiError, type ManifestRow, type Plan, type SaveOptions } from '../lib/api'
+import { ApiError, type ManifestRow, type Plan, type SaveOptions, type SectionPlan } from '../lib/api'
 import { analysisOf, planOf, rowOf } from '../lib/fixtures'
 import Review from './Review.svelte'
 
@@ -14,12 +14,16 @@ const ROWS = [rowOf(0, '1 Foundations of Testing', ['heading-not-found'])]
 const noCut: LoadManifest = async () => Promise.reject(new ApiError(409, 'not_ready'))
 const cut: LoadManifest = async () => ROWS
 
+const VIEW: SectionPlan = { pages: [3, 4], startCut: null, startCol: 'full', endCut: 400, endCol: 'right', flags: [], notes: [], rects: [[4, [254.5, 400, 522.7, 757.6]]] }
+
 /** Renders with fake loaders; returns the DEFAULT save mock (a test that passes its own keeps its own handle). */
 function mount(over: { jobState?: 'review' | 'done'; save?: Save; loadPlan?: LoadPlan; loadManifest?: LoadManifest } = {}) {
   const save = vi.fn<Save>(async (_id, plan) => plan)
   const loadAnalysis = vi.fn(async () => analysisOf())
   const loadPlan = vi.fn<LoadPlan>(async () => planOf())
   const loadManifest = vi.fn<LoadManifest>(over.loadManifest ?? noCut)
+  const loadSectionPlan = vi.fn(async (_id: string, _i: number) => VIEW)
+  const loadSheet = vi.fn(async (_id: string, _n: number) => new Blob(['png']))
   const utils = render(Review, {
     id: ID,
     pages: 6,
@@ -27,10 +31,12 @@ function mount(over: { jobState?: 'review' | 'done'; save?: Save; loadPlan?: Loa
     loadAnalysis,
     loadPlan: over.loadPlan ?? loadPlan,
     loadManifest,
+    loadSectionPlan,
+    loadSheet,
     save: over.save ?? save,
     debounceMs: 20,
   })
-  return { save, loadAnalysis, loadPlan, loadManifest, ...utils }
+  return { save, loadAnalysis, loadPlan, loadManifest, loadSectionPlan, loadSheet, ...utils }
 }
 
 const names = () => screen.getAllByLabelText(/^Name of section/).map((el) => (el as HTMLInputElement).value)
@@ -140,6 +146,18 @@ describe('Review', () => {
   it("shows the load error's message in place", async () => {
     mount({ loadPlan: vi.fn(async () => Promise.reject(new ApiError(410, 'expired'))) })
     await vi.waitFor(() => expect(screen.getByRole('alert').textContent).toBe('This job was deleted (files are kept 24 h).'))
+  })
+
+  it('selecting a section in the list previews it: the engine is asked with the local settings, both sheets load (STORY-010 AC-1)', async () => {
+    Object.assign(URL, { createObjectURL: () => 'blob:sheet', revokeObjectURL: () => {} })
+    const { loadSectionPlan, loadSheet } = mount()
+    await vi.waitFor(() => expect(screen.getByText('3 sections')).toBeTruthy())
+    expect(screen.getByText('Select a section to preview where it will be cut.')).toBeTruthy()
+    await fireEvent.click(screen.getByLabelText('Select section 2'))
+    await vi.waitFor(() => expect(screen.getByText('Last sheet 4')).toBeTruthy())
+    expect(loadSectionPlan).toHaveBeenCalledWith(ID, 1, { settings: planOf().settings, override: null }, expect.any(AbortSignal))
+    expect(loadSheet.mock.calls.map((c) => c[1])).toEqual([3, 4])
+    expect(screen.getByRole('slider', { name: 'End cut of section 2' }).getAttribute('aria-valuenow')).toBe('400')
   })
 
   it('sends a pending edit when the page is left rather than dropping it (gate r1 F7)', async () => {

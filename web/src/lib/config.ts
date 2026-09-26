@@ -17,3 +17,6 @@ export const UNDO_MS = 8000
  * plan larger than this goes out as an ordinary PUT on unload; a margin under 65,536 covers the headers it counts.
  */
 export const KEEPALIVE_MAX_BYTES = 60_000
+
+/** The sheet PNGs the preview shows (`GET /sheets/{n}.png?dpi=`): 110 keeps small type readable when the image is scaled down. */
+export const PREVIEW_DPI = 110 as const

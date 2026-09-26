@@ -9,11 +9,15 @@
     type ManifestRow,
     type Plan,
     type SaveOptions,
+    type SectionPlan,
+    type SectionPlanRequest,
+    type SheetDpi,
   } from '../lib/api'
   import { PlanEditor } from '../lib/editor.svelte'
   import { messageFor } from '../lib/errors'
   import { initialPicker } from '../lib/plan'
   import LayoutPanel from './LayoutPanel.svelte'
+  import PagePreview from './PagePreview.svelte'
   import SectionList from './SectionList.svelte'
   import SourcePicker from './SourcePicker.svelte'
 
@@ -25,6 +29,8 @@
     loadAnalysis?: (id: string, signal: AbortSignal) => Promise<Analysis>
     loadPlan?: (id: string, signal: AbortSignal) => Promise<Plan>
     loadManifest?: (id: string, signal: AbortSignal) => Promise<ManifestRow[]>
+    loadSectionPlan?: (id: string, i: number, body: SectionPlanRequest, signal: AbortSignal) => Promise<SectionPlan>
+    loadSheet?: (id: string, n: number, dpi: SheetDpi, signal: AbortSignal) => Promise<Blob>
     save?: (id: string, plan: Plan, opts?: SaveOptions) => Promise<Plan>
     debounceMs?: number
     undoMs?: number
@@ -37,6 +43,8 @@
     loadAnalysis = getAnalysis,
     loadPlan = getPlan,
     loadManifest = getManifest,
+    loadSectionPlan,
+    loadSheet,
     save = putPlan,
     debounceMs,
     undoMs,
@@ -114,6 +122,10 @@
 
     <section class="card">
       <SectionList {editor} {analysis} />
+    </section>
+
+    <section class="card">
+      <PagePreview {editor} {analysis} {id} {loadSectionPlan} {loadSheet} />
     </section>
 
     <section class="card">

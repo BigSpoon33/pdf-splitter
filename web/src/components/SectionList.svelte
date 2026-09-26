@@ -1,7 +1,7 @@
 <script lang="ts">
   import type { Analysis } from '../lib/api'
   import type { PlanEditor } from '../lib/editor.svelte'
-  import { badgeFlags, flagLabel, MAX_NAME, rowFor } from '../lib/plan'
+  import { badgesFor, flagLabel, MAX_NAME } from '../lib/plan'
 
   interface Props {
     editor: PlanEditor
@@ -66,7 +66,7 @@
   {#each sections as s, i (i)}
     {@const nameError = editor.errorAt('sections', i, 'name')}
     {@const pageError = editor.errorAt('sections', i, 'page')}
-    {@const flags = badgeFlags(rowFor(editor.rows, editor.plan, i), i === last)}
+    {@const flags = badgesFor(editor.plan, editor.rows, i)}
     <li class="row" class:selected={editor.selected === i}>
       <label class="select">
         <input type="radio" name="selected" value={i} aria-label="Select section {i + 1}" checked={editor.selected === i} onchange={() => editor.select(i)} />
@@ -111,7 +111,7 @@
         {/if}
       </div>
       {#if flags.length}
-        <ul class="flags" aria-label="Flags from the last cut">
+        <ul class="flags" aria-label="Flags of section {i + 1}">
           {#each flags as flag (flag)}
             <li class="badge" class:info={flag === 'override'} title={flag}>{flagLabel(flag)}</li>
           {/each}

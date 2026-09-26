@@ -126,6 +126,16 @@ describe('SectionList (AC-3)', () => {
     expect(screen.getByLabelText('Name of section 2').closest('li')!.classList.contains('selected')).toBe(true)
   })
 
+  it('badges a section whose plan has a manual cut, before any cut ran, and drops it when the override is reset (STORY-010 AC-4)', async () => {
+    const { editor } = mount(planOf({ overrides: { '1': { startCut: 200, startCol: 'left' } } }))
+    const row = () => screen.getByLabelText('Name of section 2').closest('li')!
+    expect([...row().querySelectorAll('.badge')].map((b) => b.textContent)).toEqual(['Manual cut'])
+    expect(row().querySelector('.badge')!.classList.contains('info')).toBe(true)
+    editor.setOverride(1, null)
+    await Promise.resolve()
+    expect(document.querySelectorAll('.badge')).toHaveLength(0)
+  })
+
   it('says so when the list is empty', () => {
     mount(planOf({ source: 'manual', sections: sectionsOf([]) }))
     expect(screen.getByText('0 sections')).toBeTruthy()

@@ -9,7 +9,7 @@
  * to carry after unload, otherwise best-effort — and `beforeunload` asks the browser to warn while an edit is
  * unsaved, so a large plan is never lost without the user being told.
  */
-import { ApiError, fitsKeepalive, isGone, type ManifestRow, type Plan, type PlanSettings, type Section, type Source } from './api'
+import { ApiError, fitsKeepalive, isGone, type ManifestRow, type Override, type Plan, type PlanSettings, type Section, type Source } from './api'
 import { SAVE_DEBOUNCE_MS, UNDO_MS } from './config'
 import { insertSection, mergeWithNext, removeSection, type PickerState } from './plan'
 
@@ -83,6 +83,8 @@ export class PlanEditor {
   undo = $state<UndoSnapshot | null>(null)
   /** The section the preview (STORY-010) shows; null until the user picks one. */
   selected = $state<number | null>(null)
+  /** Plans the server accepted so far: the preview asks the engine again once an edit has landed, not before. */
+  saves = $state(0)
   /** A name being typed: it reaches the plan on commit (blur/Enter/leaving), never rewritten under the cursor. */
   draft = $state<{ i: number; name: string } | null>(null)
   /** 404/410: the job will never answer again. */
@@ -223,6 +225,20 @@ export class PlanEditor {
     this.touch()
   }
 
+  /**
+   * The manual cut of section `i` (AC-2/AC-4): the whole override is replaced, so a caller keeps the keys it does
+   * not change. `null` or an empty override deletes the key — an absent key is "the engine's own plan" for the
+   * API, while `{startCut: null}` would remove a cut the engine found.
+   */
+  setOverride(i: number, override: Override | null): void {
+    if (!this.plan.sections[i]) return
+    const key = String(i)
+    if (override && Object.keys(override).length) this.plan.overrides[key] = override
+    else if (key in this.plan.overrides) delete this.plan.overrides[key]
+    else return
+    this.touch()
+  }
+
   select(i: number | null): void {
     this.selected = i
   }
@@ -304,6 +320,7 @@ export class PlanEditor {
         this.plan = saved
         this.dirty = false
       }
+      this.saves++
     } catch (err) {
       // Not accepted: the edit is pending again, so the next flush (a Retry, unload, the tab returning) carries it.
       this.unsent = true

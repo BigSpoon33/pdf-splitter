@@ -91,17 +91,22 @@ export function errorFromBody(status: number, text: string): ApiError {
   return new ApiError(status, status === 413 ? 'too_large' : 'internal')
 }
 
-async function request<T>(url: string, init?: RequestInit): Promise<T> {
+/** The response when it is 2xx; every other outcome is the `ApiError` the caller shows (the API's error body is JSON whatever `accept` says). */
+async function fetchOk(url: string, init: RequestInit | undefined, accept: string): Promise<Response> {
   let res: Response
   try {
-    res = await fetch(url, { ...init, headers: { Accept: 'application/json', ...init?.headers } })
+    res = await fetch(url, { ...init, headers: { Accept: accept, ...init?.headers } })
   } catch (err) {
     if (err instanceof DOMException && err.name === 'AbortError') throw err
     throw new ApiError(0, 'network')
   }
-  const text = await res.text()
-  if (!res.ok) throw errorFromBody(res.status, text)
-  return JSON.parse(text) as T
+  if (!res.ok) throw errorFromBody(res.status, await res.text())
+  return res
+}
+
+async function request<T>(url: string, init?: RequestInit): Promise<T> {
+  const res = await fetchOk(url, init, 'application/json')
+  return JSON.parse(await res.text()) as T
 }
 
 export function getJob(id: string, signal?: AbortSignal): Promise<JobStatus> {
@@ -198,11 +203,14 @@ export interface Section {
   heading: string
 }
 
+/** A cut's y in points, or null for no cut (the section starts at the top / ends at the bottom of its sheet). */
+export type Cut = number | null
+
 /** Only the keys sent are applied (`models.py:Override`): `startCut: null` removes a cut, an absent key keeps the engine's. */
 export interface Override {
-  startCut?: number | null
+  startCut?: Cut
   startCol?: Col
-  endCut?: number | null
+  endCut?: Cut
   endCol?: Col
 }
 
@@ -257,4 +265,58 @@ export function putPlan(id: string, plan: Plan, { signal, keepalive }: SaveOptio
 
 export function getManifest(id: string, signal?: AbortSignal): Promise<ManifestRow[]> {
   return request<ManifestRow[]>(jobUrl(id, '/manifest'), { signal })
+}
+
+// ── The preview payloads (STORY-010). Shapes: tests/test_api_e2e.py::test_section_plan_returns_the_engine_view_with_rects
+// and ::test_sheet_png_renders_through_the_sandboxed_subprocess_and_caches.
+
+/**
+ * The engine's view of one section under given settings and override (`POST /sections/{i}/plan`). `pages` are
+ * the first and last sheet (1-based, ADR-003); `rects` are the regions the cut removes, each on the ABSOLUTE
+ * sheet it sits on, in page points with the origin top-left (`y0 == endCut` on the end sheet).
+ */
+export interface SectionPlan {
+  pages: [number, number]
+  startCut: Cut
+  startCol: Col
+  endCut: Cut
+  endCol: Col
+  flags: string[]
+  notes: string[]
+  rects: [number, [number, number, number, number]][]
+}
+
+/**
+ * Absent `settings` = the saved plan's; absent `override` = the saved one for that section, an explicit `null`
+ * the engine's own plan (`::test_section_plan_uses_the_saved_override_unless_told_otherwise`). Nothing is persisted.
+ */
+export interface SectionPlanRequest {
+  settings?: PlanSettings
+  override?: Override | null
+}
+
+export function getSectionPlan(id: string, i: number, body: SectionPlanRequest = {}, signal?: AbortSignal): Promise<SectionPlan> {
+  return request<SectionPlan>(jobUrl(id, `/sections/${i}/plan`), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+    signal,
+  })
+}
+
+export type SheetDpi = 48 | 72 | 110
+
+/** `GET /sheets/{n}.png?dpi=`: sheet `n` is 1-based (ADR-003); the PNG is `W × dpi/72` by `H × dpi/72` pixels of `analysis.size[n-1]`. */
+export function sheetUrl(id: string, n: number, dpi: SheetDpi): string {
+  return jobUrl(id, `/sheets/${n}.png?dpi=${dpi}`)
+}
+
+/**
+ * The sheet's PNG as a Blob (the caller shows it through an object URL). Fetched rather than set as an `<img src>`
+ * so a 410 (the job deleted while rendering) is `isGone`, a 500 `preview_failed` is retryable, and a network drop is
+ * `network` — an image element cannot tell them apart.
+ */
+export async function getSheet(id: string, n: number, dpi: SheetDpi, signal?: AbortSignal): Promise<Blob> {
+  const res = await fetchOk(sheetUrl(id, n, dpi), { signal }, 'image/png')
+  return res.blob()
 }

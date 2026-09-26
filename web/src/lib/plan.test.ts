@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { analysisOf, planOf, rowOf, sectionsOf } from './fixtures'
 import {
   badgeFlags,
+  badgesFor,
   flagLabel,
   formatList,
   headingSections,
@@ -269,5 +270,16 @@ describe('flags', () => {
     expect(rowFor(rows, removeSection(plan, 0), 0)).toBeUndefined()
     expect(rowFor(rows, { ...plan, sections: sectionsOf([['A renamed', 1], ['B', 3]]) }, 0)).toBeUndefined()
     expect(rowFor(rows, plan, 5)).toBeUndefined()
+  })
+
+  it('badgesFor puts the plan’s override first and never twice, then the row’s flags (AC-4)', () => {
+    const plan = planOf({ sections: sectionsOf([['A', 1], ['B', 3]]), overrides: { '0': { startCut: 100 } } })
+    const rows = [rowOf(0, 'A', ['override', 'leak']), rowOf(1, 'B', ['span-clamped', 'override'])]
+    expect(badgesFor(plan, rows, 0)).toEqual(['override', 'leak'])
+    // Section 1's file was cut under an override since reset: the file still says so (until the next cut).
+    expect(badgesFor(plan, rows, 1)).toEqual(['override'])
+    expect(badgesFor(plan, [], 0)).toEqual(['override'])
+    expect(badgesFor(planOf({ sections: plan.sections }), [rowOf(0, 'A', ['leak'])], 0)).toEqual(['leak'])
+    expect(badgesFor(planOf({ sections: plan.sections }), [], 0)).toEqual([])
   })
 })

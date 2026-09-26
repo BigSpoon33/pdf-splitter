@@ -164,6 +164,42 @@ describe('PlanEditor edits (AC-3)', () => {
     await vi.advanceTimersByTimeAsync(600)
     expect(echo.mock.calls[0]?.[0].settings).toMatchObject({ heading_wrap_gap: 30, single_column: true, column_split: 0.487 })
   })
+
+  it('setOverride writes the section’s manual cut, null or {} removes it, and each landed save counts (STORY-010 AC-2/AC-4)', async () => {
+    const editor = new PlanEditor(planOf(), echo)
+    expect(editor.saves).toBe(0)
+    editor.setOverride(1, { startCut: 200, startCol: 'left' })
+    expect(editor.plan.overrides).toEqual({ '1': { startCut: 200, startCol: 'left' } })
+    expect(editor.dirty).toBe(true)
+    await vi.advanceTimersByTimeAsync(600)
+    expect(echo).toHaveBeenCalledTimes(1)
+    expect(echo.mock.calls[0]?.[0].overrides).toEqual({ '1': { startCut: 200, startCol: 'left' } })
+    expect(editor.saves).toBe(1)
+    // The engine's start cut removed, the end kept: the keys sent are the keys applied.
+    editor.setOverride(1, { startCut: null, endCut: 400, endCol: 'right' })
+    await vi.advanceTimersByTimeAsync(600)
+    expect(echo.mock.calls[1]?.[0].overrides['1']).toEqual({ startCut: null, endCut: 400, endCol: 'right' })
+    editor.setOverride(1, null)
+    expect(editor.plan.overrides).toEqual({})
+    await vi.advanceTimersByTimeAsync(600)
+    expect(echo).toHaveBeenCalledTimes(3)
+    expect(editor.saves).toBe(3)
+    // Nothing to remove and nothing to write: not an edit.
+    editor.setOverride(1, null)
+    editor.setOverride(1, {})
+    editor.setOverride(9, { startCut: 1 })
+    expect(editor.dirty).toBe(false)
+    await vi.advanceTimersByTimeAsync(600)
+    expect(echo).toHaveBeenCalledTimes(3)
+  })
+
+  it('a refused save does not count as landed', async () => {
+    const editor = new PlanEditor(planOf(), vi.fn(async () => Promise.reject(new ApiError(409, 'busy'))))
+    editor.setOverride(0, { endCut: 300 })
+    await vi.advanceTimersByTimeAsync(600)
+    expect(editor.saves).toBe(0)
+    expect(editor.error?.code).toBe('busy')
+  })
 })
 
 describe('PlanEditor source switch + undo (AC-2, AC-6)', () => {
