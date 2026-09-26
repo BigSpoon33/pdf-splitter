@@ -263,3 +263,20 @@ Fix forward, one commit on the feature/mvp tip:
    hooking the real DELETE after validate_plan.
 Update findings ("Gate r1 fixes"), Architecture (rate window note — replace the "restarts at 00:00 UTC"
 sentence), KICKOFF-STORY-016.
+
+## Attempt 2b — round-2 fixes (standing auto-fix policy) — READ THIS FIRST
+
+One commit on the feature/mvp tip:
+`fix: STORY-012 - gate r2: the rate clock is read under the lock; PyMuPDF's file-too-large is the output cap too`
+1. **Clock under the lock**: `Store.take_rate_slot` reads the clock (an injected `clock()` callable,
+   default `ratelimit.utcnow`) AFTER `BEGIN IMMEDIATE`, and computes the hash set + `since` from that
+   reading inside the transaction (pass the ip + secret / a hash-set builder in, not precomputed
+   hashes). Test: the reviewer's deterministic interleaving (readers at 00:00:00.05 then 23:59:59.9
+   in commit order) now grants exactly 6; the existing burst + midnight tests stay green.
+2. **PyMuPDF EFBIG = output cap**: `_within_budget` also converts a MuPDF error (`analyze.MUPDF_ERRORS`)
+   whose message says the write hit the file-size limit ("File too large" / "cannot fwrite" with
+   EFBIG) into `OutputTooLarge` with `_reset_outputs`. Test: real sandbox with an fsize below one
+   section on BOTH cut paths (cut_book and cut_ranges) → too_large_output, work/ empty. Keep genuine
+   allocator failures mapping to `resources`.
+Correct the as-built text only if anything still differs. Update findings ("Gate r2 fixes") and
+KICKOFF-STORY-016 if it cites these.
