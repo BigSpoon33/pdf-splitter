@@ -158,3 +158,18 @@ reloaded, a 422 rendered next to its control), how the manifest-flags question w
 remotes), and what STORY-010 (PagePreview) should know: the plan store's API, where the selected section lives, and the
 preview endpoints' contracts (`::test_section_plan_returns_the_engine_view_with_rects`,
 `::test_sheet_png_renders_through_the_sandboxed_subprocess_and_caches`, the 410-during-render tests).
+
+## Orchestrator addendum (binding — decisions already made)
+
+- **Manifest (your gotcha 2) is DECIDED**: implement `GET /api/jobs/{id}/manifest` in this story
+  (small backend route + pytest; see the Orchestrator decision in docs/stories/STORY-009.md and
+  Architecture § API Interface). Rows keyed by plan section index; 409 `not_ready` before any cut;
+  410 deleted/expired; no raw ids in logs. The SPA reads it for the flag badges. This is NOT a stop.
+- **Outline level picker**: never assume level 1 = chapters. On Maciocia, L1 = 23 parts/front matter
+  and chapters are L2 (339). Show every level with its count and a few sample titles so the user can
+  choose; keep `analysis.suggested` as the initial choice.
+- **Wrapped big titles**: the default `heading_wrap_gap` (16) splits titles ≥ 14 pt (Maciocia needs
+  ~30). Offer the wrap gap in LayoutPanel (it feeds the saved settings → both detection-preview and
+  cut). Heading candidates are pre-computed at analysis time with the default — note in findings that
+  re-detecting with a user wrap gap is a follow-up (needs an API route), don't build it now.
+- `bun run check` 0 warnings (a11y included); Bun only.
