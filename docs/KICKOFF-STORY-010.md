@@ -218,3 +218,31 @@ poll again after `POST /cut`, where the manifest badges come from, and the downl
   (e.g. role=slider with aria-valuenow in pt). `bun run check` stays at 0 warnings.
 - Coordinates: PNG px ↔ PDF pt must honour a non-zero CropBox origin and page rotation if the
   analysis/preview exposes them; test the conversions (AC-6).
+
+## Previous attempt (RETRY — read this first)
+
+Attempt 1 (`e0a10cd`, docs `7fd52c2`) failed with 5 CONFIRMED findings — `docs/findings/STORY-010-review.md`.
+Fix forward, one commit on the feature/mvp tip:
+`fix: STORY-010 - gate r1: preview plans the list on screen, per-sheet geometry, focus on drag, errors scoped to the selection`
+
+F1 + F2 (one root cause — the preview asks the SERVER's saved list by index while the user sees the LOCAL list):
+- Backend: `POST /api/jobs/{id}/sections/{i}/plan` accepts an optional `sections` array in the body
+  (same Section validation as PUT /plan incl. page range, ≤ 2,000, names cleaned); when present the
+  engine plans THAT list (engine names via the same NNN-slug rule), so the answer describes what the
+  user sees. `i` out of range of the list used → **422** with a distinct code (e.g. `no_section`),
+  never 404 `not_found`. The saved plan.json is not modified. pytest: body list ≠ saved list → answer
+  follows the body; bad index → 422 no_section; deleted job still 410.
+- SPA: the preview always sends the local `editor.plan.sections`; the dedup key covers exactly what
+  is sent; `fail()` treats only job-level 404 not_found/410 expired as gone (a section-level 422
+  just shows an inline message). Tests: the review's insert-at-selection and delete-above-selection
+  scenarios on headed_book (prove they fail on e0a10cd); a later edit still saves (editor not gone).
+- Add `no_section` to errors.py MESSAGES + errors.ts (the errors.test parity test will demand it).
+
+F3: every sheet uses its OWN size (`analysis.size[n-1]`) for aspect-ratio, viewBox, overlay and
+pointer→point mapping (map from the frame the event came from). Test with a mixed-size fixture
+(522.72×789.6 then 700×600, per the review) — dragging onto a known y on the second size lands ±2 pt.
+F4: on pointerdown focus the grip (`el.focus({preventScroll:true})`) while still preventing text
+selection; after a drag, ArrowUp nudges THAT line. Test with pointerdown→keydown on the element.
+F5: clear `sheetError` (and any per-section error) whenever the selection/request changes. Test.
+Update findings ("Gate r1 fixes"), Architecture § API Interface (the optional `sections` body +
+`no_section`), and KICKOFF-STORY-011.
