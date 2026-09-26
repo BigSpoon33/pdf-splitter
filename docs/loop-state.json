@@ -1,7 +1,7 @@
 {
   "mode": "auto",
   "active_story": "STORY-013",
-  "loop_phase": "implement",
+  "loop_phase": "halted",
   "queue": [
     "STORY-013"
   ],
@@ -55,7 +55,8 @@
   "run": {
     "started": "2026-09-25",
     "runner": "in-session background subagent (tmux --dangerously-skip-permissions route denied by the auto-mode classifier)",
-    "active": "STORY-013 (2c: auto-fix)"
+    "active": "STORY-013 (2c: auto-fix)",
+    "halt_reason": "STORY-013 r3: in-app slow-body hardening keeps introducing subtle bugs (incl. upload data loss) \u2014 design decision needed"
   },
   "last_updated": "2026-09-25",
   "exceptions": {
