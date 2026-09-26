@@ -102,3 +102,5 @@ feat: STORY-013 - containers, compose, Caddy and an end-to-end smoke test
 - [ ] AC-3
 - [ ] AC-4
 - [ ] AC-5
+
+> **Orchestrator addendum (from STORY-012 review):** uvicorn must not trust X-Forwarded-For on its own: run it with `proxy_headers=False` (the app's `PDFSPLIT_TRUSTED_PROXY` rule is the only XFF logic) and set `PDFSPLIT_TRUSTED_PROXY` to Caddy's container address in compose (a fixed IP on the compose network). Set `PDFSPLIT_IP_SALT` from an env secret (not in git). Test in smoke.sh: an upload with a spoofed XFF straight to the api port (bypassing Caddy) is counted under the real peer.

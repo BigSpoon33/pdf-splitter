@@ -240,3 +240,26 @@ Per-AC ✅/❌ with file:line (the four addenda as their own lines); counts (`uv
 `queue_position` on a queued job; a failed cut re-cut from the same page; a cut over the output cap failing cleanly);
 the commits (on both remotes); decisions taken (salt derivation, trusted-proxy rule, window semantics, janitor
 placement, how the output budget is counted); what STORY-016 should know.
+
+## Previous attempt (RETRY — read this first)
+
+Attempt 1 (`7e5af5e`, docs `8689ee5`) failed with 4 CONFIRMED findings — `docs/findings/STORY-012-review.md`.
+Fix forward, one commit on the feature/mvp tip:
+`fix: STORY-012 - gate r1: atomic rate window across midnight, output budget fits the sandbox, PUT write race is 410`
+1. **Atomic rate check**: count + insert in ONE `BEGIN IMMEDIATE` transaction (a `Store` method,
+   e.g. `take_rate_slot(hashes, since, limit, now) -> retry_after|None`); only then disk guard etc.
+   (if a later guard refuses, the slot may stay consumed — document the choice). Test: 10–20 threads
+   from ONE client released by a barrier at limit 6 → exactly 6 accepted.
+2. **Window survives midnight**: during the first hour of a UTC day also count hits under YESTERDAY's
+   hash (compute both; record under today's). Test with frozen clocks across 23:55→00:06: the 7th
+   upload in any rolling hour → 429.
+3. **Budget fits the sandbox**: cap the output budget below the task's RLIMIT_FSIZE with margin for the
+   ZIP (budget = min(current, FSIZE − 64 MiB)); import the one constant (no second source of truth).
+   And if `write_zip` still hits EFBIG, map it to `too_large_output` and `_reset_outputs` (no work/ PDFs
+   left, previous result.zip kept). Tests: budget never exceeds FSIZE; forced EFBIG in write_zip →
+   failed/too_large_output, work/ empty.
+4. **PUT /plan write race**: a FileNotFoundError from the plan.json write re-checks the row via the
+   same `vanished()` path → 410 for deleted/expired (409/500 semantics unchanged for live jobs). Test by
+   hooking the real DELETE after validate_plan.
+Update findings ("Gate r1 fixes"), Architecture (rate window note — replace the "restarts at 00:00 UTC"
+sentence), KICKOFF-STORY-016.
