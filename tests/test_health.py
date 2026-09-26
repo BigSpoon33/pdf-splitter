@@ -80,3 +80,6 @@ def test_cli_api_serves_the_app_from_env_settings(monkeypatch: pytest.MonkeyPatc
     assert (calls["host"], calls["port"]) == ("127.0.0.1", 8000)
     # uvicorn's own access log would print raw job ids; the app's redacting middleware replaces it.
     assert calls["access_log"] is False
+    # uvicorn must not rewrite the peer from X-Forwarded-For on its own: ratelimit.client_ip's trusted-proxy
+    # rule is the only XFF logic (STORY-013 addendum), so a spoofed header reaching the api port stays the peer's.
+    assert calls["proxy_headers"] is False

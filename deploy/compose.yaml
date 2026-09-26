@@ -1,0 +1,107 @@
+# The whole stack (Architecture ADR-008): caddy (TLS, the SPA, /api proxy) → api → worker, one `jobs` volume.
+#   docker compose -p pdfsplit -f deploy/compose.yaml up -d --build
+# Interpolated variables come from deploy/.env (see deploy/.env.example) or the environment; PDFSPLIT_IP_SALT
+# has no default on purpose. The fixed project name keeps a bare `docker compose` from defaulting to the
+# directory name ("deploy"), which other stacks on a shared host may already use.
+name: pdfsplit
+
+x-pdfsplit-env: &pdfsplit-env
+  PDFSPLIT_JOBS_DIR: /jobs
+  PDFSPLIT_WORKERS: ${PDFSPLIT_WORKERS:-2}
+  PDFSPLIT_RATE_PER_HOUR: ${PDFSPLIT_RATE_PER_HOUR:-6}
+  PDFSPLIT_MAX_BYTES: ${PDFSPLIT_MAX_BYTES:-209715200}
+  PDFSPLIT_TTL_HOURS: ${PDFSPLIT_TTL_HOURS:-24}
+  PDFSPLIT_MIN_FREE_GB: ${PDFSPLIT_MIN_FREE_GB:-2}
+  # The api's rate window keys on this; the worker gets it too because the janitor prunes those rows.
+  PDFSPLIT_IP_SALT: ${PDFSPLIT_IP_SALT:?set PDFSPLIT_IP_SALT (deploy/.env) - the secret under the IP hash}
+  PDFSPLIT_PUBLIC_URL: ${PDFSPLIT_PUBLIC_URL:-https://localhost}
+
+x-python: &python
+  image: pdfsplit-app:${PDFSPLIT_TAG:-local}
+  build:
+    context: ..
+    target: python
+  restart: unless-stopped
+  read_only: true
+  tmpfs:
+    # PyMuPDF and Python want a scratch directory; every real write goes to the volume.
+    - /tmp
+  cap_drop: [ALL]
+  security_opt:
+    - no-new-privileges:true
+  logging:
+    driver: json-file
+    options: { max-size: "10m", max-file: "3" }
+
+services:
+  caddy:
+    image: pdfsplit-caddy:${PDFSPLIT_TAG:-local}
+    build:
+      context: ..
+      target: caddy
+    restart: unless-stopped
+    ports:
+      - "${PDFSPLIT_HTTP_PORT:-80}:80"
+      - "${PDFSPLIT_HTTPS_PORT:-443}:443"
+    environment:
+      PUBLIC_HOST: ${PUBLIC_HOST:-localhost}
+    volumes:
+      # Certificates and the ACME account survive a rebuild; losing them means re-issuing on every deploy.
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      pdfsplit:
+        # Fixed on purpose: the api believes X-Forwarded-For only from PDFSPLIT_TRUSTED_PROXY, which must be
+        # the address the api's socket sees, and a service name is not what request.client.host reports.
+        ipv4_address: ${PDFSPLIT_CADDY_IP:-172.30.0.10}
+    depends_on:
+      api:
+        condition: service_healthy
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  api:
+    <<: *python
+    command: ["api", "--host", "0.0.0.0", "--port", "8000"]
+    # Reachable from caddy only; nothing publishes 8000 on the host (the smoke override does, on loopback).
+    expose: ["8000"]
+    environment:
+      <<: *pdfsplit-env
+      PDFSPLIT_TRUSTED_PROXY: ${PDFSPLIT_CADDY_IP:-172.30.0.10}
+    volumes:
+      - jobs:/jobs
+    networks: [pdfsplit]
+    mem_limit: 2g
+    healthcheck:
+      # The image has no curl; the venv python is on PATH.
+      test: ["CMD", "python", "-c", "import urllib.request as u; assert b'\"ok\":true' in u.urlopen('http://127.0.0.1:8000/api/health', timeout=5).read()"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+
+  worker:
+    <<: *python
+    command: ["worker"]
+    environment:
+      <<: *pdfsplit-env
+    volumes:
+      - jobs:/jobs
+    # Jobs run in rlimited subprocesses of this container (ADR-005); it fetches nothing, so it gets no network.
+    network_mode: none
+    # Two sandboxed tasks at RLIMIT_AS 2 GB each can't both be resident at once on a 4-8 GB VM.
+    mem_limit: 3g
+    depends_on: [api]
+
+volumes:
+  jobs:
+  caddy_data:
+  caddy_config:
+
+networks:
+  pdfsplit:
+    ipam:
+      config:
+        # Its own subnet, so caddy's fixed address is meaningful and never collides with another stack's bridge.
+        - subnet: ${PDFSPLIT_SUBNET:-172.30.0.0/24}

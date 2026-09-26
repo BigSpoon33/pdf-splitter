@@ -1,0 +1,31 @@
+# The site address decides TLS: a public hostname (PUBLIC_HOST on the VM) gets a Let's Encrypt certificate,
+# the local default `localhost` gets one from Caddy's internal CA (curl -k / --cacert locally).
+{$PUBLIC_HOST:localhost} {
+	encode zstd gzip
+
+	header {
+		# The SPA is one same-origin script + stylesheet; sheet PNGs come from /api and object URLs are blob:.
+		Content-Security-Policy "default-src 'self'; img-src 'self' blob:"
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+		X-Frame-Options DENY
+		-Server
+	}
+
+	# Just above the api's PDFSPLIT_MAX_BYTES (200 MiB + the multipart envelope), so an oversized upload
+	# gets the api's own 413 `too_large` message rather than a bare proxy error.
+	request_body {
+		max_size 210MB
+	}
+
+	handle /api/* {
+		reverse_proxy api:8000
+	}
+
+	# The SPA owns /, /j/<id>, /privacy and /terms: a deep-link reload must get index.html, not a 404.
+	handle {
+		root * /srv
+		try_files {path} /index.html
+		file_server
+	}
+}

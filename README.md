@@ -131,3 +131,48 @@ deleted in N h" (counting down from the status's `seconds_left`, never from the 
 (confirm → `DELETE /api/jobs/{id}`) are always on the job page; a deleted, expired or unknown job (the API's 404/410 —
 when the countdown runs out the page asks once more) turns the whole page into the deleted screen with a "Split
 another PDF" link.
+
+## Deploy
+
+One `docker compose` stack (Architecture ADR-008): **caddy** (TLS, the built SPA, `/api` proxied to the api), **api**
+and **worker** — the last two are one image (`Dockerfile` target `python`, non-root uid 10001) with different
+commands — sharing the `jobs` volume at `/jobs`. The worker has no network, a read-only root, all capabilities
+dropped, a tmpfs `/tmp` and a memory limit; the api is the same minus the network (it is reachable from caddy only;
+nothing publishes 8000). The `web` stage builds `web/dist` with Bun and the `caddy` stage copies it to `/srv`. The
+engine comes from its public GitHub tag during the build — no LAN access is needed anywhere.
+
+```bash
+cp deploy/.env.example deploy/.env       # set PDFSPLIT_IP_SALT (required) and PUBLIC_HOST
+docker compose -p pdfsplit -f deploy/compose.yaml up -d --build
+docker compose -p pdfsplit -f deploy/compose.yaml logs -f
+docker compose -p pdfsplit -f deploy/compose.yaml down          # keep -v off: the volume holds live jobs
+```
+
+Always pass `-p`: the file sets `name: pdfsplit`, but an explicit project name is what keeps two stacks on one
+host (a real one and a smoke run) apart. `deploy/.env` is read from the compose file's directory:
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `PDFSPLIT_IP_SALT` | — (required) | the secret under the daily-rotating IP hash (`openssl rand -hex 32`) |
+| `PUBLIC_HOST` | `localhost` | Caddy's site address: a public hostname gets a Let's Encrypt certificate (DNS must point at the host and 80/443 must be reachable); `localhost` gets one from Caddy's internal CA |
+| `PDFSPLIT_PUBLIC_URL` | `https://localhost` | the site's public base URL, handed to the api |
+| `PDFSPLIT_HTTP_PORT` / `PDFSPLIT_HTTPS_PORT` | `80` / `443` | the host ports caddy publishes |
+| `PDFSPLIT_SUBNET` / `PDFSPLIT_CADDY_IP` | `172.30.0.0/24` / `172.30.0.10` | the stack's own network and caddy's fixed address on it, which is also the api's `PDFSPLIT_TRUSTED_PROXY` — the one peer whose `X-Forwarded-For` names the client |
+| `PDFSPLIT_WORKERS`, `PDFSPLIT_RATE_PER_HOUR`, `PDFSPLIT_MAX_BYTES`, `PDFSPLIT_TTL_HOURS`, `PDFSPLIT_MIN_FREE_GB` | as in § Configuration | passed through to both api and worker |
+| `PDFSPLIT_TAG` | `local` | the image tag (`pdfsplit-app:<tag>`, `pdfsplit-caddy:<tag>`) |
+
+Caddy caps request bodies at 210 MB (just above the api's 200 MiB, so an oversized upload still gets the api's own
+`too_large` answer), compresses with zstd/gzip, answers `index.html` for every SPA route, and sends
+`Content-Security-Policy: default-src 'self'; img-src 'self' blob:`, `X-Content-Type-Options: nosniff`,
+`Referrer-Policy: no-referrer` and `X-Frame-Options: DENY`. Certificates live in the `caddy_data` volume.
+uvicorn runs with `proxy_headers=False`: a forwarded address is believed only by the api's own trusted-proxy rule.
+
+**Smoke test** — `./deploy/smoke.sh` needs docker compose, curl and the dev environment (uv, for the fixture book).
+It builds and starts the stack under the throwaway project `pdfsplit-smoke` (its own image tag, subnet
+`172.31.0.0/24`, host ports 18080/18443, the api on `127.0.0.1:18000` for one check, a random salt, 2 uploads per
+hour), then drives the synthetic two-column book through caddy: health, the SPA and its headers, upload → review →
+`GET`/`PUT` plan → cut → `result.zip` with three PDFs and a manifest, three uploads straight to the api with spoofed
+`X-Forwarded-For` (the third must be 429 and the `rate` rows gain at most one client hash), `DELETE` → 410. It
+always tears down with `down -v`, untags its images, and fails if anything of the project is left or any other
+container on the host changed. Override `SMOKE_PROJECT`, `SMOKE_HTTP_PORT`, `SMOKE_HTTPS_PORT`, `SMOKE_API_PORT`,
+`SMOKE_SUBNET`, `SMOKE_CADDY_IP` if those collide.

@@ -11,3 +11,6 @@ jobs/
 web/node_modules/
 web/dist/
 web/.env.local
+
+# compose (deploy/.env holds the secrets; deploy/.env.example is the template)
+.env

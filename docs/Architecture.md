@@ -46,10 +46,13 @@ pdf-splitter (this repo, github.com/BigSpoon33/pdf-splitter)
     ├── DropZone · JobStatus · SourcePicker · SectionList · LayoutPanel · PagePreview · Download
     └── api.ts (typed client)
 
+Dockerfile          (repo root; targets `web` = Bun build of web/dist, `python` = api + worker image, `caddy` = caddy + web/dist)
 deploy/
-├── Dockerfile (python: api + worker image), web build stage
-├── compose.yaml (caddy, api, worker; volume `jobs`)
-└── Caddyfile (TLS, static SPA, /api → api:8000, body size cap)
+├── compose.yaml        (`name: pdfsplit`; caddy, api, worker; volumes `jobs`, `caddy_data`, `caddy_config`; network `pdfsplit`)
+├── compose.smoke.yaml  (smoke.sh only: publishes the api on 127.0.0.1 for the spoofed-XFF check)
+├── Caddyfile           (TLS, static SPA + fallback, /api → api:8000, 210MB body cap, CSP + security headers, zstd/gzip)
+├── smoke.sh            (the stack end to end under the throwaway project `pdfsplit-smoke`)
+└── .env.example        (→ deploy/.env, gitignored: PDFSPLIT_IP_SALT, PUBLIC_HOST, ports, subnet, limits)
 ```
 
 ### Component Details
@@ -312,6 +315,16 @@ never appear in logs (logs carry a short hash).
 
 - **Status:** Accepted (Shuma, 2026-09-25)
 - **Decision:** `compose.yaml` = caddy + api + worker. Caddy enforces `request_body max_size 210MB` and gets certificates automatically. `deploy.sh` = rsync/git pull + `docker compose up -d --build` over ssh.
+- **As built (STORY-013):** one `Dockerfile` (targets `web`, `python`, `caddy`), `deploy/compose.yaml` with `name: pdfsplit`
+  (always run with an explicit `-p`). caddy publishes `${PDFSPLIT_HTTP_PORT:-80}`/`${PDFSPLIT_HTTPS_PORT:-443}` and sits at a
+  FIXED address on the stack's own network (`${PDFSPLIT_SUBNET:-172.30.0.0/24}`, `${PDFSPLIT_CADDY_IP:-172.30.0.10}`), which
+  is the api's `PDFSPLIT_TRUSTED_PROXY`: the only peer whose `X-Forwarded-For` (last hop) names the client; uvicorn runs with
+  `proxy_headers=False` so nothing else rewrites the peer. The api (`api --host 0.0.0.0 --port 8000`) is reachable from caddy
+  only; the worker has `network_mode: none`. Both are the `python` image (uid 10001) with `read_only`, `cap_drop: [ALL]`,
+  `no-new-privileges`, tmpfs `/tmp`, `mem_limit` 2g/3g, and share the `jobs` volume at `/jobs` (SQLite + WAL on it).
+  `PDFSPLIT_IP_SALT` is required from `deploy/.env` (gitignored). `{$PUBLIC_HOST:localhost}` is the site address: a public
+  hostname → Let's Encrypt (certificates in `caddy_data`), `localhost` → Caddy's internal CA. `deploy/smoke.sh` drives the
+  whole stack under the throwaway project `pdfsplit-smoke`. `deploy.sh` is STORY-014's.
 
 ---
 
