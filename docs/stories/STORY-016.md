@@ -1,6 +1,6 @@
 # STORY-016: Engine: per-sheet geometry for cut rectangles (mixed page sizes) + v0.4.2
 
-> **Status:** Pending
+> **Status:** Done (2026-09-26)
 > **Size:** S
 > **Date:** 2026-09-25
 > **Architecture ref:** `docs/Architecture.md#engine-additions-monograph-splitter-040`
@@ -22,10 +22,10 @@ STORY-010's round-2 review: `Book.rects` / `write_excerpt` (and `cut_rects` call
 
 ## Acceptance Criteria
 
-- [ ] AC-1: every redaction rectangle for sheet s uses sheet s's own `page.rect` (W, H) — gutter at `column_split × W_s`, bands/limits in that sheet's H — in `cut_rects`/`Book.rects`/`write_excerpt` and anything else computing geometry per sheet.
-- [ ] AC-2: synthetic test: a two-size book (522.72×789.6 then 700×600) with a section spanning both; the written excerpt's last page keeps exactly the right-column/left-column content the plan says (assert on text positions), and `verify` reports 0 leaks.
-- [ ] AC-3: regression gate: `monograph-splitter-diff` 0 changed on the synthetic books AND on Maciocia / Chen & Chen (uniform-size books must be byte-identical in decisions); `ENGINE_VERSION` bumped only if the index changes (it shouldn't).
-- [ ] AC-4: release `v0.4.2` (tag on both remotes; never move v0.4.1); pdf-splitter pins `@v0.4.2`, `uv lock`, full web suite green; the SPA's per-sheet hatch now matches output on mixed.pdf (manual check, screenshot).
+- [x] AC-1: every redaction rectangle for sheet s uses sheet s's own `page.rect` (W, H) — gutter at `column_split × W_s`, bands/limits in that sheet's H — in `cut_rects`/`Book.rects`/`write_excerpt` and anything else computing geometry per sheet.
+- [x] AC-2: synthetic test: a two-size book (522.72×789.6 then 700×600) with a section spanning both; the written excerpt's last page keeps exactly the right-column/left-column content the plan says (assert on text positions), and `verify` reports 0 leaks.
+- [x] AC-3: regression gate: `monograph-splitter-diff` 0 changed on the synthetic books AND on Maciocia / Chen & Chen (uniform-size books must be byte-identical in decisions); `ENGINE_VERSION` bumped only if the index changes (it shouldn't).
+- [x] AC-4: release `v0.4.2` (tag on both remotes; never move v0.4.1); pdf-splitter pins `@v0.4.2`, `uv lock`, full web suite green; the SPA's per-sheet hatch now matches output on mixed.pdf (manual check, screenshot).
 
 ## Files Affected
 
@@ -69,9 +69,9 @@ fix: STORY-016 - cut rectangles use each sheet's own size (0.4.2)
 
 ## Status
 
-**Pending**
+**Done** — 2026-09-26 (engine `116a4bb` = `v0.4.2`; pin `c410caa`; findings `docs/findings/STORY-016-findings.md`)
 
-- [ ] AC-1
-- [ ] AC-2
-- [ ] AC-3
-- [ ] AC-4
+- [x] AC-1
+- [x] AC-2
+- [x] AC-3
+- [x] AC-4
