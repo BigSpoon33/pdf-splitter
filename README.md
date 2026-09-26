@@ -48,7 +48,7 @@ PUT    /api/jobs/{id}/plan                   Plan → 200 normalized Plan · 422
                                               from done the job returns to review
 POST   /api/jobs/{id}/cut                    202 {id, state: "queued"} · 409 busy/not_ready · 422 empty plan
 GET    /api/jobs/{id}/sheets/{n}.png?dpi=72  PNG of sheet n (dpi 48|72|110), cached per (sheet, dpi, settings)
-POST   /api/jobs/{id}/sections/{i}/plan      {settings?, override?} → the Section plan (rects on 1-based sheets)
+POST   /api/jobs/{id}/sections/{i}/plan      {settings?, override?, sections?} → the Section plan (rects on 1-based sheets)
 GET    /api/jobs/{id}/result.zip             attachment (409 not_ready before the first cut)
 GET    /api/jobs/{id}/sections/{i}.pdf       attachment, straight out of result.zip
 DELETE /api/jobs/{id}                        204 (the row is marked deleted, then the directory removed)
