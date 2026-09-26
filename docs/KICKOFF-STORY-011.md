@@ -169,3 +169,23 @@ links still there; Delete now → deleted screen; a stale `/j/<id>` → deleted 
 both remotes), and what STORY-012 (rate limits, `queue_position`) should know: where the status card renders
 `queue_position` (`JobStatus.svelte`, already conditional on non-null), and which routes answer 429 `rate_limited`
 today (`tests/test_upload.py`).
+
+## Previous attempt (RETRY — read this first)
+
+Attempt 1 (`68769d3`, docs `5754c1d`) failed with 3 CONFIRMED findings — `docs/findings/STORY-011-review.md`.
+Fix forward, one commit on the feature/mvp tip:
+`fix: STORY-011 - gate r1: server decides expiry, results never outlive a failed refresh, one split per click`
+1. **Expiry is the server's call** (this corrects the kickoff's gotcha 5): `GET /api/jobs/{id}` also
+   returns `seconds_left` (integer, from the server clock; small backend change + pytest). The SPA
+   shows the countdown from `seconds_left` (anchored at the response time with a monotonic clock —
+   `performance.now()`), never from `Date.now()` vs `expires_at`. When the countdown reaches zero,
+   poll the job once; ONLY a server 404/410 shows the deleted screen. Tests: client clock +25 h / −25 h
+   (fake Date) → countdown unaffected, no deleted screen while the API answers 200; server 410 → deleted.
+2. **No stale results**: when a new cut completes, clear the old rows immediately; if the manifest
+   refresh fails with a non-gone error, show an inline error with Retry (and retry automatically once
+   after a short delay) instead of listing the previous cut's files. Test with an injected 502.
+3. **One split per click**: Split stays disabled from click until the job status shows the cut
+   finished (keep a local `cutRequested` flag until the poll reports running/done/failed for this
+   cut); a 409 busy is never shown for our own in-flight cut and any split error clears once a later
+   status arrives. Test: double-click → exactly one POST /cut; no lingering alert.
+Update findings ("Gate r1 fixes"), Architecture § API Interface (seconds_left on GET job), KICKOFF-STORY-015.
