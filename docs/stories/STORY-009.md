@@ -1,6 +1,6 @@
 # STORY-009: SPA: source picker, section list, layout panel
 
-> **Status:** Pending
+> **Status:** Done (2026-09-25)
 > **Size:** M
 > **Date:** 2026-09-25
 > **Architecture ref:** `docs/Architecture.md#web (SPA)`
@@ -30,12 +30,12 @@ The core of 'tweak the settings' (PRD scope).
 
 > **Orchestrator decision (2026-09-25, from STORY-008 findings):** flags need a JSON source, so this story also adds ONE small backend route: `GET /api/jobs/{id}/manifest` → the last cut's manifest rows (by plan section index; 409 `not_ready` before any cut; 410 for deleted/expired; ids never logged). Architecture § API Interface lists it. Pin it with a pytest test; the SPA reads it for the badges.
 
-- [ ] AC-1: SourcePicker: Outline (level select with counts; disabled with an explanation when the PDF has none) / Headings (threshold slider in ×body size, level select, live count) / Paste list (`Name, page` per line; parse errors shown per line)
-- [ ] AC-2: Switching source replaces the section list (with an undo toast); the choice + list persist via `PUT /plan` (debounced 600 ms)
-- [ ] AC-3: SectionList: rename, delete, add (name + page), change page, merge-with-next; flags from the last cut shown as badges; page shown as sheet number + printed label when available
-- [ ] AC-4: LayoutPanel: one/two columns toggle, gutter % (number input; drag lands in STORY-010), header/footer band inputs, heading size threshold
-- [ ] AC-5: 422 field errors from the API render next to the offending control
-- [ ] AC-6: Component tests: paste-list parser (good/bad lines), merge-with-next, source switch + undo
+- [x] AC-1: SourcePicker: Outline (level select with counts; disabled with an explanation when the PDF has none) / Headings (threshold slider in ×body size, level select, live count) / Paste list (`Name, page` per line; parse errors shown per line)
+- [x] AC-2: Switching source replaces the section list (with an undo toast); the choice + list persist via `PUT /plan` (debounced 600 ms)
+- [x] AC-3: SectionList: rename, delete, add (name + page), change page, merge-with-next; flags from the last cut shown as badges; page shown as sheet number + printed label when available
+- [x] AC-4: LayoutPanel: one/two columns toggle, gutter % (number input; drag lands in STORY-010), header/footer band inputs, heading size threshold
+- [x] AC-5: 422 field errors from the API render next to the offending control
+- [x] AC-6: Component tests: paste-list parser (good/bad lines), merge-with-next, source switch + undo
 
 ---
 
@@ -96,11 +96,11 @@ feat: STORY-009 - source picker, editable section list and layout panel
 
 ## Status
 
-**Pending**
+**Done** — 2026-09-25, `784b31d` (findings: `docs/findings/STORY-009-findings.md`)
 
-- [ ] AC-1
-- [ ] AC-2
-- [ ] AC-3
-- [ ] AC-4
-- [ ] AC-5
-- [ ] AC-6
+- [x] AC-1
+- [x] AC-2
+- [x] AC-3
+- [x] AC-4
+- [x] AC-5
+- [x] AC-6
