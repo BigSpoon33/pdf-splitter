@@ -222,6 +222,18 @@ in place of `too_large_output`, the unit test on `hit_file_limit` at import). `u
    WAL is already ~40 KB before the task starts and appends hit EFBIG at the first progress write) — hence the big
    book, and why the runner-level test covers one path: the row plumbing past `guarded` is path-independent.
 
+## Gate r3
+
+Round 3 found one test gap: nothing showed that an allocator failure raised INSIDE `_within_budget` (the
+page-range path's `insert_pdf`) still passes through as `resources` rather than being widened into
+`too_large_output`. Test only, no source change (`test: STORY-012 - an allocator failure inside the cut stays
+resources`): `tests/test_cut.py:480` `::test_real_ranges_cut_on_a_link_uri_bomb_stays_resources` runs a `ranges`
+plan (one span, pages 1-2) over `fixtures/hostile.py:link_uri_bomb` through the real `Runner` + sandbox (real
+RLIMIT_AS) → row `failed/cut/resources` with `MESSAGES["resources"]`, no `result.zip`, no `.tmp`, no job id in the
+log (≈ 1 s). Proof: with `cut.py`'s `if not hit_file_limit(e): raise` removed, the test FAILS (`'too_large_output'
+!= 'resources'`); the file was then restored byte-for-byte (sha256 `d8013e2e…` before and after). `uv run pytest -q`
+→ **427 passed** (was 426), `uv run ruff check` clean.
+
 ## Handoff Context for Next Session
 STORY-016 runs in the ENGINE repo (`~/Documents/Repos/monograph-splitter`, branch `feature/web-mode`, tip `8e52cc3`
 = v0.4.1) and only then touches this repo (pin bump). Nothing here depends on it except `tests/test_health.py:27`

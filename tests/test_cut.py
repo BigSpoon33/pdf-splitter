@@ -475,3 +475,29 @@ def test_real_cut_task_on_a_link_uri_bomb_is_resources(
     assert not (job_dir / "result.zip").exists() and not list(job_dir.glob("*.tmp"))
     assert "cut failed: resources" in caplog.text
     assert_id_gone(caplog.text, DASH_ID)
+
+
+def test_real_ranges_cut_on_a_link_uri_bomb_stays_resources(
+    settings: Settings, wstore: Store, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Gate r3: the page-range path copies page 2 with `insert_pdf`, whose link copy is where MuPDF's allocator
+    fails under the sandbox's RLIMIT_AS — inside `_within_budget`, which must let a failure that is not the
+    file-size limit through as `resources`, never widen it into `too_large_output`. ≈ 2 s."""
+    caplog.set_level(logging.WARNING)
+    job_dir = settings.jobs_dir / DASH_ID
+    job_dir.mkdir(parents=True)
+    link_uri_bomb(job_dir / "source.pdf")
+    write_json(job_dir / "plan.json", {
+        "source": "ranges", "settings": DEFAULT_SETTINGS, "overrides": {},
+        "sections": [{"name": "Both", "page": 1, "endPage": 2}],
+    })
+    wstore.create_job(job_id=DASH_ID, ip_hash="h", filename="b.pdf", bytes=1, pages=2, ttl_hours=24,
+                      state="queued", kind="cut")
+    assert Runner(settings, kinds=("cut",)).run_once(wstore) is True
+    job = wstore.get_job(DASH_ID)
+    assert (job["state"], job["kind"], job["error_code"], job["message"]) == (
+        "failed", "cut", "resources", runner_mod.MESSAGES["resources"]
+    )
+    assert not (job_dir / "result.zip").exists() and not list(job_dir.glob("*.tmp"))
+    assert "cut failed: resources" in caplog.text
+    assert_id_gone(caplog.text, DASH_ID)
