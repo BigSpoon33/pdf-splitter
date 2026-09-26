@@ -1,12 +1,12 @@
 {
   "mode": "auto",
-  "active_story": "STORY-010",
+  "active_story": "STORY-011",
   "loop_phase": "implement",
   "queue": [
-    "STORY-010",
     "STORY-011",
     "STORY-015",
     "STORY-012",
+    "STORY-016",
     "STORY-013"
   ],
   "held": {
@@ -21,7 +21,8 @@
     "STORY-006",
     "STORY-007",
     "STORY-008",
-    "STORY-009"
+    "STORY-009",
+    "STORY-010"
   ],
   "attempts": {
     "STORY-001": 1,
@@ -33,7 +34,8 @@
     "STORY-007": 3,
     "STORY-008": 2,
     "STORY-009": 3,
-    "STORY-010": 2
+    "STORY-010": 2,
+    "STORY-011": 1
   },
   "failed": {},
   "consecutive_failures": 0,
@@ -43,13 +45,13 @@
   },
   "baseline": {
     "engine_tests": "150 passed at v0.4.1 (8e52cc3)",
-    "web_tests": "335 passed",
-    "web_spa_tests": "153 passed after STORY-009 (c04f2e8)"
+    "web_tests": "344 passed",
+    "web_spa_tests": "190 passed after STORY-010 (7a28b6e)"
   },
   "run": {
     "started": "2026-09-25",
     "runner": "in-session background subagent (tmux --dangerously-skip-permissions route denied by the auto-mode classifier)",
-    "active": "STORY-010 (retry)"
+    "active": "STORY-011"
   },
   "last_updated": "2026-09-25",
   "exceptions": {
@@ -64,7 +66,9 @@
     "engine: verify flags 2 'leaks' on Maciocia outline cuts (running heads?) and span-clamped on the last section \u2014 investigate",
     "suggest(): outline level 1 = parts/front matter on Maciocia (chapters are L2) \u2014 STORY-009 level picker shows all levels",
     "heading re-detection under user wrap gap / smaller bands needs a /detect route",
-    "picker state not persisted in the Plan (reload starts from suggested)"
+    "picker state not persisted in the Plan (reload starts from suggested)",
+    "2,000-section preview \u224818\u201320 s (at the 20 s preview timeout)",
+    "landed rename triggers an extra preview (7\u20139 s on 1,654 sections): key/send the list without names"
   ],
   "engine_release": "v0.4.1 (8e52cc3) on origin+gitea; engine main still 6fd22fc \u2014 ff-merge feature/web-mode at sprint end",
   "policy": {

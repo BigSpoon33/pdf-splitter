@@ -10,3 +10,8 @@ Coverage highlights: overlay geometry matches engine on Maciocia two-column shee
 3. [correctness] PagePreview.svelte:366 (+184-189, 375, 380) — every sheet uses the FIRST sheet's size for aspect/viewBox/pointer mapping; mixed-size books → stretched sheet, end cut drawn/dragged ~90 pt off. CONFIRMED.
 4. [correctness] PagePreview.svelte:223 — `preventDefault()` on pointerdown stops the grip taking focus; after a drag, arrow keys go to the previously focused control (the section radio group → switches section). CONFIRMED.
 5. [correctness] PagePreview.svelte:141/159/351 — `sheetError` never cleared on selection change → stale alert over a healthy preview. CONFIRMED.
+
+## Round 2 (re-review of 7a28b6e) — PASSED
+Auto-review: 5 confirmed → fixed 7a28b6e, re-review CLEAN. Validation parity with PUT /plan (29 lists); 410 beats 422; nothing persisted; drag accuracy ≤0.1 pt on mixed sizes; focus/keys; errors per selection.
+Engine observation (scheduled as STORY-016): `Book.rects`/`write_excerpt` compute every cut rectangle in the FIRST sheet's W/H — mixed-size sections get wrong cuts in the OUTPUT PDFs.
+Perf notes (follow-ups): 2,000-section preview ≈18–20 s (at the 20 s timeout); a landed rename triggers one extra preview (7–9 s on 1,654 sections) — key/send the list without names.
