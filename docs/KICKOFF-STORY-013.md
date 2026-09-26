@@ -240,3 +240,35 @@ know (which env vars the VM needs, what `PUBLIC_HOST` does to TLS, where the vol
 - Images/build cache live under /var/lib/docker (not /tmp); still prune only your own dangling images.
 - The STORY-013 story addendum (uvicorn proxy_headers=False, PDFSPLIT_TRUSTED_PROXY = Caddy's fixed
   compose IP, PDFSPLIT_IP_SALT from an env secret, smoke test for spoofed XFF) is binding.
+
+## Previous attempt (RETRY — read this first)
+
+Attempt 1 (`cce9bd1`, findings `7e34206`) failed with 3 CONFIRMED findings + 1 orchestrator hardening —
+`docs/findings/STORY-013-review.md`. Fix forward, one commit on the feature/mvp tip:
+`fix: STORY-013 - gate r1: uploads guarded before the body is read, real IPv6 client addresses, api without egress, smoke on an empty host`
+1. **Uploads can't exhaust the api**:
+   - A tiny ASGI middleware for `POST /api/jobs` that runs BEFORE the body is parsed: reject with 413
+     `too_large` when `Content-Length` > MAX_BYTES + multipart slack (or is absent/chunked → 411/413),
+     and take the rate slot there (move `take_slot` out of `_accept`; the route must not take a second
+     slot; keep 429 + Retry-After semantics). Keep the streaming cap in `_copy_capped` as a backstop.
+   - Spool on disk, not RAM: set `TMPDIR` for the api to a directory on the jobs volume (e.g.
+     `/jobs/.spool`, created by the app at start, excluded from the janitor's orphan reaping and
+     cleaned of stale files older than 1 h), and size the remaining /tmp tmpfs (e.g. 64m).
+   - Cap concurrency: uvicorn `limit_concurrency` (config, default e.g. 64) and a small
+     in-flight-uploads cap (e.g. 4 concurrent uploads → 503 `busy`/`disk_full`-style code with Retry-After).
+   Tests (pytest): oversized Content-Length refused before any spool file exists; rate slot taken
+   before the body is read; concurrent-upload cap. Live (isolated project, swapless api like the
+   review): 8 × 300 MiB concurrent → no OOM, api stays up, requests get 413/429/503 as appropriate.
+2. **Real IPv6 addresses**: enable IPv6 on the compose network (`enable_ipv6: true`, a ULA /64 subnet,
+   Caddy fixed at a v6 address too) so Docker DNATs v6 natively; `PDFSPLIT_TRUSTED_PROXY` accepts a
+   comma-separated list (Caddy's v4 AND v6 address). If the host's Docker can't do ip6tables, document
+   the fallback (no AAAA record) in the handoff. Live: `curl -6` through Caddy → the api sees the real
+   v6 client (a distinct rate bucket from IPv4 clients). Fix the handoff text accordingly.
+3. **api without egress (orchestrator hardening)**: two networks — `edge` (caddy only, published
+   ports, outbound for ACME) and `backend` (`internal: true`; caddy + api). Worker stays
+   `network_mode: none`. Live: from inside the api, github.com and the LAN are unreachable; Caddy→api
+   still works; ACME-capable caddy still has egress.
+4. **smoke.sh** `others()` tolerant of zero containers (`|| true`); verify with a stubbed docker.
+ISOLATION rules from the addendum still apply (unique project, subnets 172.27.x / a ULA, high ports,
+touch nothing else, `docker ps` before/after identical). Update findings ("Gate r1 fixes"),
+Architecture ADR-005/ADR-008 as-built, README § Deploy, and the STORY-014 handoff.
