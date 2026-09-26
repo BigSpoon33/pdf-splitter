@@ -196,3 +196,15 @@ numbers (synthetic × 6, Maciocia, Chen & Chen); the release (tag `v0.4.2` sha o
 web pin (`pyproject.toml`, `uv.lock` resolved sha, health says `0.4.2`); the manual mixed-size check (what was compared,
 the screenshot's path); the commits on both repos and both remotes; decisions taken (how sizes are threaded, what
 happens to a plan whose sheets are out of the index's range); what STORY-013 should know.
+
+## Previous attempt (RETRY — read this first)
+
+Attempt 1 (engine `116a4bb` = v0.4.2; web `c410caa`, `a9932a9`) passed everything except ONE test gap —
+`docs/findings/STORY-016-review.md`. Engine repo, branch feature/web-mode, one TEST-ONLY commit:
+`test: STORY-016 - review PNGs hatch each sheet in its own size`
+Make `test_review_pngs_are_drawn_in_each_sheets_size` (or a new test) assert WHERE the hatching lands on the
+last-sheet PNG of the AC-2 mixed fixture (e.g. sample pixels / record `draw_rect` calls: the hatch covers
+x 340.9–700 of the 700×600 sheet and does NOT cover Alpha's kept tail). Prove it fails with render.py:43
+(and separately :48) reverted to sheet-0 geometry in a scratch copy; restore byte-for-byte. No src change,
+NO new tag (v0.4.2 ships the same code). Push the branch to origin + gitea. Note it in
+docs/findings/STORY-016-findings.md (web repo, feature/mvp) under "Gate r1".
