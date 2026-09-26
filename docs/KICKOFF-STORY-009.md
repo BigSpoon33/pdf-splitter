@@ -173,3 +173,36 @@ preview endpoints' contracts (`::test_section_plan_returns_the_engine_view_with_
   cut). Heading candidates are pre-computed at analysis time with the default — note in findings that
   re-detecting with a user wrap gap is a follow-up (needs an API route), don't build it now.
 - `bun run check` 0 warnings (a11y included); Bun only.
+
+## Previous attempt (RETRY — read this first)
+
+Attempt 1 (`784b31d`, docs `955ab62`) failed with 6 CONFIRMED findings — `docs/findings/STORY-009-review.md`.
+Fix forward, one commit on the feature/mvp tip:
+`fix: STORY-009 - gate r1: overrides follow boundaries, undo/paste/picker state, saves survive leaving, badges after reload`
+
+Confirmed findings (fix all, each with a test that fails on 784b31d):
+- **F2 overrides follow boundaries**: in removeSection(i) the section BEFORE i loses its END override
+  (its end moved) — same rule mergeWithNext already uses; in insertSection(at) the section before `at`
+  loses its END override and the new section starts with none. Keep start overrides of untouched
+  sections. Test both with the review's headed_book numbers.
+- **F4 badges after reload**: fetch the manifest whenever the job has a cut (state review OR done;
+  409 not_ready = no cut yet → no badges, no error). Show the "cut again to refresh" note whenever
+  a manifest exists and the plan changed since it (or simply whenever state is review and a manifest exists).
+- **F5 paste**: switching to "Paste a list" ALWAYS seeds the box from the CURRENT list (never stale
+  text) — i.e. switching to paste never changes the sections; only "Use this list" applies pasted text.
+- **F6 undo scope**: Undo restores source + sections + overrides only, never settings.
+- **F7 no lost saves**: destroy() flushes a pending save (fire the PUT, don't await); also flush on
+  `pagehide`/`visibilitychange→hidden` (use `fetch(..., {keepalive:true})` for the PUT there).
+- **F8 picker resync**: after Undo (or any external plan change) the picker's level/threshold
+  controls reflect the restored state; re-choosing the same option re-applies it.
+
+Orchestrator additions (not findings, but in this commit):
+- **Name drafts**: a section-name input keeps a local draft while focused; commit to the plan on
+  blur/Enter (and on destroy/pagehide). The server's normalized name is shown only after commit —
+  never rewrite a focused input mid-typing.
+- **Merge badge**: mergeWithNext drops the merged section's manifest row match (it no longer
+  describes the merged span).
+- **PRD heading filters (PRD Scope 2)**: in the Headings source, client-side filters: exclude
+  candidates whose `y` is inside the current header/footer bands (use the page H from analysis.size),
+  and a "max heading length" control (default 90, the analysis max_len). Both update the live count.
+Update findings ("Gate r1 fixes") and KICKOFF-STORY-010.
