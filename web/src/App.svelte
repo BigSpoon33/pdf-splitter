@@ -1,6 +1,6 @@
 <script lang="ts">
   import DropZone from './components/DropZone.svelte'
-  import JobStatus from './components/JobStatus.svelte'
+  import JobPage from './components/JobPage.svelte'
   import { jobPath, navigate, onNavigate, parseRoute } from './lib/route'
 
   let pathname = $state(location.pathname)
@@ -26,7 +26,7 @@
     <DropZone oncreated={(id) => navigate(jobPath(id))} />
   {:else if route.name === 'job'}
     {#key route.id}
-      <JobStatus id={route.id} />
+      <JobPage id={route.id} />
     {/key}
     <p class="again"><a href="/" onclick={home}>Split another PDF</a></p>
   {:else}

@@ -40,6 +40,15 @@ def get_result(job_id: str, settings: SettingsDep, store: StoreDep) -> FileRespo
     return FileResponse(_result_zip(settings, job), media_type="application/zip", filename=download_name(job["filename"]))
 
 
+@router.get("/api/jobs/{job_id}/manifest")
+def get_manifest(job_id: str, settings: SettingsDep, store: StoreDep) -> list[dict[str, Any]]:
+    """The last cut's rows (each with its plan `index`), read from the same ZIP the downloads come from, so
+    the flags the SPA badges are the flags of the files it can download."""
+    job = load_job(store, job_id)
+    with zipfile.ZipFile(_result_zip(settings, job)) as zf:
+        return json.loads(zf.read(MANIFEST))
+
+
 def _member(zf: zipfile.ZipFile, info: zipfile.ZipInfo) -> Iterator[bytes]:
     try:
         with zf.open(info) as f:

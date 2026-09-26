@@ -692,6 +692,81 @@ def test_delete_marks_the_row_before_removing_the_directory(settings: Settings, 
     assert row(settings, DASH_ID)["state"] == "deleted"
 
 
+# ── STORY-009: the manifest as JSON, and the optional heading_wrap_gap setting ────────────────────────
+
+
+def test_manifest_serves_the_last_cuts_rows_from_the_zip(
+    settings: Settings, analyzed_template: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """`GET /manifest` is the ZIP's `manifest.json` (rows keyed by plan `index`), 409 before any cut,
+    kept after a PUT returns the job to `review`, 410 once deleted; the id never reaches the logs."""
+    caplog.set_level(logging.DEBUG)
+    job_dir = seed_job(settings, analyzed_template, DASH_ID, state="done", kind="cut")
+    rows = [
+        {"index": 0, "name": "A", "file": "001 - A.pdf", "flags": ["heading-not-found"], "notes": [], "leaks": [], "bytes": 6},
+        {"index": 2, "name": "Ç/é", "file": "003 - Ç-é.pdf", "flags": ["span-clamped"], "notes": ["n"], "leaks": ["x"], "bytes": 6},
+    ]
+    with api(settings) as client:
+        assert_error(client.get(f"/api/jobs/{DASH_ID}/manifest"), 409, "not_ready")
+        with zipfile.ZipFile(job_dir / "result.zip", "w") as zf:
+            zf.writestr("001 - A.pdf", b"%PDF-a")
+            zf.writestr("003 - Ç-é.pdf", b"%PDF-c")
+            zf.writestr(MANIFEST, json.dumps(rows, ensure_ascii=False))
+        r = client.get(f"/api/jobs/{DASH_ID}/manifest")
+        assert r.status_code == 200 and r.headers["content-type"].startswith("application/json")
+        assert r.json() == rows
+        # Editing the plan returns the job to review; the old cut's rows stay readable until the next cut.
+        assert client.put(f"/api/jobs/{DASH_ID}/plan", json=plan_with()).status_code == 200
+        assert row(settings, DASH_ID)["state"] == "review"
+        assert client.get(f"/api/jobs/{DASH_ID}/manifest").json() == rows
+        assert client.delete(f"/api/jobs/{DASH_ID}").status_code == 204
+        assert_error(client.get(f"/api/jobs/{DASH_ID}/manifest"), 410, "expired")
+        assert_error(client.get(f"/api/jobs/{OTHER_ID}/manifest"), 404, "not_found")
+    for record in caplog.records:
+        if not record.name.startswith("httpx"):       # the test client's own lines, not the server's
+            assert_id_gone(record.getMessage(), DASH_ID)
+
+
+def test_manifest_from_a_real_cut_matches_the_zip(settings: Settings, analyzed_template: Path) -> None:
+    """The rows of a cut the real task wrote: one per plan section, in plan order."""
+    job_dir = seed_job(settings, analyzed_template, DASH_ID, state="queued", kind="cut")
+    store = Store(settings.db_path)
+    try:
+        assert Runner(settings, kinds=("analyze", "cut")).run_once(store) is True
+    finally:
+        store.close()
+    plan = read_json(job_dir / "plan.json")
+    with api(settings) as client:
+        rows = client.get(f"/api/jobs/{DASH_ID}/manifest").json()
+    assert [(m["index"], m["name"]) for m in rows] == [(i, s["name"]) for i, s in enumerate(plan["sections"])]
+    assert all({"index", "name", "file", "flags", "notes", "leaks", "bytes"} <= set(m) for m in rows)
+    with zipfile.ZipFile(job_dir / "result.zip") as zf:
+        assert rows == json.loads(zf.read(MANIFEST))
+
+
+def test_put_plan_keeps_a_heading_wrap_gap_only_when_sent(settings: Settings, seeded: Path) -> None:
+    """`heading_wrap_gap` is optional: absent → the five default keys (the analyze index cache still
+    serves the plan); sent → saved, returned and accepted by the engine; out of range → its own loc."""
+    with api(settings) as client:
+        r = client.put(f"/api/jobs/{DASH_ID}/plan", json=plan_with())
+        assert r.status_code == 200 and set(r.json()["settings"]) == set(DEFAULT_SETTINGS)
+        r = client.put(f"/api/jobs/{DASH_ID}/plan", json=plan_with(settings={**DEFAULT_SETTINGS, "heading_wrap_gap": 30}))
+        assert r.status_code == 200, r.text
+        saved = r.json()["settings"]
+        assert saved == {**DEFAULT_SETTINGS, "heading_wrap_gap": 30.0}
+        assert client.get(f"/api/jobs/{DASH_ID}/plan").json()["settings"] == saved
+        assert profile_from_dict(saved).heading_wrap_gap == 30.0
+        assert profile_from_dict(saved).sha256 != profile_from_dict(DEFAULT_SETTINGS).sha256
+        for bad in (-1, 200.5):
+            r = client.put(f"/api/jobs/{DASH_ID}/plan", json=plan_with(settings={**DEFAULT_SETTINGS, "heading_wrap_gap": bad}))
+            assert_error(r, 422, "invalid")
+            assert locs(r) == [["body", "settings", "heading_wrap_gap"]]
+        # A preview under a wrap gap goes to the engine as one settings dict it accepts.
+        r = client.post(f"/api/jobs/{DASH_ID}/sections/0/plan", json={"settings": {**DEFAULT_SETTINGS, "heading_wrap_gap": 30}})
+        assert r.status_code == 200, r.text
+        assert set(r.json()) == SECTION_PLAN_KEYS
+
+
 # ── AC-7: request ids and the 500 shape ───────────────────────────────────────────────────────────────
 
 

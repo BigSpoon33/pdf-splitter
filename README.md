@@ -92,3 +92,9 @@ bun run build                # static files in web/dist/
 `API_PORT` can also go in `web/.env.local`. `VITE_MAX_BYTES` (build time) changes the client-side size
 precheck; it should match `PDFSPLIT_MAX_BYTES`. Routes are `/` (upload) and `/j/<id>` (a job), so whatever serves
 `web/dist/` in production must answer `index.html` for `/j/*`.
+
+Once a job reaches `review`, `/j/<id>` shows the plan editor: the source picker (outline level, detected headings by
+size threshold and level, or a pasted `Name, page` list), the editable section list (rename, page, add, delete,
+merge-with-next; after a cut, the manifest's flags as badges) and the layout panel (columns, gutter, header/footer
+bands, heading size, heading wrap gap). Every edit is `PUT` to `/api/jobs/{id}/plan` 600 ms after the last
+keystroke; a 422 shows next to the field it names.

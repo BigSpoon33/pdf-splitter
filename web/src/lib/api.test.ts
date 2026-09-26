@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { ApiError, createJob, errorFromBody, getJob, isGone, type JobStatus } from './api'
+import { ApiError, createJob, errorFromBody, getAnalysis, getJob, getManifest, getPlan, isGone, putPlan, type JobStatus, type Plan } from './api'
 import { MESSAGES } from './errors'
 
 // The status shape pinned by tests/test_api_e2e.py::test_job_status_shape_hides_the_requeue_marker_and_shows_failures.
@@ -129,5 +129,43 @@ describe('createJob', () => {
     const done = createJob(pdf, undefined, make)
     FakeXhr.last.onerror?.()
     await expect(done).rejects.toMatchObject({ status: 0, code: 'network' })
+  })
+})
+
+describe('review payloads (STORY-009)', () => {
+  it('GETs the analysis and the plan', async () => {
+    const fetchMock = stubFetch(200, JSON.stringify({ pages: 6 }))
+    await expect(getAnalysis('id-1')).resolves.toEqual({ pages: 6 })
+    await getPlan('id-1')
+    expect(fetchMock.mock.calls.map((c) => c[0])).toEqual(['/api/jobs/id-1/analysis', '/api/jobs/id-1/plan'])
+    expect(fetchMock.mock.calls[0]?.[1]?.method).toBeUndefined()
+  })
+
+  it('PUTs the plan as JSON and returns the normalized one', async () => {
+    const plan: Plan = { source: 'manual', settings: { column_split: 0.5, single_column: true, header_band: 50, footer_band: 32, heading_min_size: 12.5 }, sections: [{ name: ' A ', page: 1, heading: '' }], overrides: {} }
+    const fetchMock = stubFetch(200, JSON.stringify({ ...plan, sections: [{ name: 'A', page: 1, heading: '' }] }))
+    const saved = await putPlan('id-1', plan)
+    expect(saved.sections[0]?.name).toBe('A')
+    const [url, init] = fetchMock.mock.calls[0]!
+    expect(url).toBe('/api/jobs/id-1/plan')
+    expect(init?.method).toBe('PUT')
+    expect(init?.headers).toMatchObject({ 'Content-Type': 'application/json', Accept: 'application/json' })
+    expect(JSON.parse(init?.body as string)).toEqual(plan)
+  })
+
+  it('a 422 keeps the field errors (tests/test_api_e2e.py::test_put_plan_rejects_bad_plans_with_field_errors)', async () => {
+    const errors = [{ loc: ['body', 'settings', 'column_split'], msg: 'Input should be ≤ 0.8', type: 'less_than_equal' }]
+    stubFetch(422, JSON.stringify({ code: 'invalid', message: 'The request is not valid.', errors }))
+    const err = await putPlan('id-1', {} as Plan).catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(ApiError)
+    expect(err).toMatchObject({ status: 422, code: 'invalid', errors })
+  })
+
+  it('GETs the manifest rows, and 409 before a cut is not_ready', async () => {
+    const rows = [{ index: 0, name: 'A', file: '001 - A.pdf', flags: ['leak'], notes: [], leaks: ['x'], bytes: 10 }]
+    stubFetch(200, JSON.stringify(rows))
+    await expect(getManifest('id-1')).resolves.toEqual(rows)
+    stubFetch(409, JSON.stringify({ code: 'not_ready', message: 'm' }))
+    await expect(getManifest('id-1')).rejects.toMatchObject({ status: 409, code: 'not_ready' })
   })
 })

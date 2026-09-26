@@ -138,3 +138,110 @@ export function createJob(
     xhr.send(form)
   })
 }
+
+// ── The review payloads (STORY-009). Shapes: tests/test_worker.py::test_analyze_outline_book,
+// ::test_analyze_headings_book_without_outline, ::test_default_plan_from_outline_and_headings and
+// src/pdf_splitter/models.py (the PUT side).
+
+export type Source = 'outline' | 'headings' | 'manual'
+export type Col = 'full' | 'left' | 'right'
+
+export interface OutlineItem {
+  name: string
+  /** 1-based sheet (ADR-003). */
+  page: number
+  heading: string
+  level: number
+  y?: number | null
+}
+
+export interface HeadingLevel {
+  size: number
+  count: number
+}
+
+export interface HeadingCandidate {
+  name: string
+  page: number
+  heading: string
+  size: number
+  /** 1-based; level 1 is the biggest type. */
+  level: number
+  y: number
+  col: Col
+}
+
+export interface Analysis {
+  pages: number
+  /** The printed label per sheet, `""` when the PDF has none. */
+  pageLabels: string[]
+  size: { W: number; H: number }[]
+  outline: { levels: number[]; items: OutlineItem[] }
+  headings: { body_size: number; levels: HeadingLevel[]; candidates: HeadingCandidate[] }
+  suggested: { source: Source; level: number | null }
+}
+
+export interface PlanSettings {
+  column_split: number
+  single_column: boolean
+  header_band: number
+  footer_band: number
+  heading_min_size: number
+  /** Optional: absent means the engine's own (16 pt). */
+  heading_wrap_gap?: number
+}
+
+export interface Section {
+  name: string
+  page: number
+  heading: string
+}
+
+/** Only the keys sent are applied (`models.py:Override`): `startCut: null` removes a cut, an absent key keeps the engine's. */
+export interface Override {
+  startCut?: number | null
+  startCol?: Col
+  endCut?: number | null
+  endCol?: Col
+}
+
+export interface Plan {
+  source: Source
+  settings: PlanSettings
+  sections: Section[]
+  /** Keyed by section INDEX as a decimal string. */
+  overrides: Record<string, Override>
+}
+
+/** One row of the last cut's manifest (`GET /api/jobs/{id}/manifest`, `tests/test_api_e2e.py::test_manifest_from_a_real_cut_matches_the_zip`). */
+export interface ManifestRow {
+  index: number
+  name: string
+  file: string
+  flags: string[]
+  notes: string[]
+  leaks: string[]
+  bytes: number
+}
+
+export function getAnalysis(id: string, signal?: AbortSignal): Promise<Analysis> {
+  return request<Analysis>(jobUrl(id, '/analysis'), { signal })
+}
+
+export function getPlan(id: string, signal?: AbortSignal): Promise<Plan> {
+  return request<Plan>(jobUrl(id, '/plan'), { signal })
+}
+
+/** 200 returns the NORMALIZED plan (names trimmed, duplicates suffixed); 422 carries `errors[].loc` per field. */
+export function putPlan(id: string, plan: Plan, signal?: AbortSignal): Promise<Plan> {
+  return request<Plan>(jobUrl(id, '/plan'), {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(plan),
+    signal,
+  })
+}
+
+export function getManifest(id: string, signal?: AbortSignal): Promise<ManifestRow[]> {
+  return request<ManifestRow[]>(jobUrl(id, '/manifest'), { signal })
+}

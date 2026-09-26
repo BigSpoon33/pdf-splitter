@@ -38,12 +38,20 @@ class PlanSettings(_Strict):
     header_band: float = Field(default=DEFAULT_SETTINGS["header_band"], ge=0, le=200)
     footer_band: float = Field(default=DEFAULT_SETTINGS["footer_band"], ge=0, le=200)
     heading_min_size: float = Field(default=DEFAULT_SETTINGS["heading_min_size"], ge=4, le=72)
+    # Optional (STORY-009): a wrapped title's lines are one heading when their tops sit within this many
+    # points; the engine's 16 splits titles from about 14 pt up, a big-type book needs ~30. Left out of the
+    # saved plan unless the client sets it, so an untouched plan keeps its five keys and the index cache.
+    heading_wrap_gap: float | None = Field(default=None, ge=0, le=200)
+
+    def dump(self) -> dict[str, Any]:
+        """The settings as `plan.json` carries them and `profile_from_dict` reads them."""
+        return self.model_dump(exclude={"heading_wrap_gap"} if self.heading_wrap_gap is None else set())
 
     @model_validator(mode="after")
     def _engine_accepts(self) -> PlanSettings:
         # The ranges above sit inside the engine's own, so this only catches drift between the two.
         try:
-            profile_from_dict(self.model_dump())
+            profile_from_dict(self.dump())
         except ProfileError as e:
             raise ValueError(str(e)) from e
         return self
@@ -139,7 +147,7 @@ class Plan(_Strict):
         """The normalized Plan as `plan.json` and the API carry it."""
         return {
             "source": self.source,
-            "settings": self.settings.model_dump(),
+            "settings": self.settings.dump(),
             "sections": [s.model_dump() for s in self.sections],
             "overrides": {k: v.dump() for k, v in self.overrides.items()},
         }

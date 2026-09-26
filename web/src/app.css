@@ -93,3 +93,102 @@ a {
   white-space: nowrap;
   border: 0;
 }
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.field > span:first-child,
+label.field {
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+
+input[type='text'],
+input[type='number'],
+select,
+textarea {
+  font: inherit;
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.4rem 0.55rem;
+  max-width: 100%;
+}
+
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+button:focus-visible {
+  outline: none;
+  box-shadow: var(--focus);
+}
+
+input[aria-invalid='true'],
+textarea[aria-invalid='true'] {
+  border-color: var(--danger);
+}
+
+.field-error {
+  color: var(--danger);
+  font-size: 0.85rem;
+  margin: 0;
+}
+
+button {
+  font: inherit;
+  color: var(--fg);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.35rem 0.7rem;
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.badge {
+  display: inline-block;
+  font-size: 0.75rem;
+  line-height: 1.4;
+  padding: 0 0.45rem;
+  border-radius: 999px;
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.badge.info {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.toast {
+  position: sticky;
+  bottom: 1rem;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-top: 1rem;
+  padding: 0.6rem 0.9rem;
+  border-radius: var(--radius);
+  background: var(--fg);
+  color: var(--bg);
+}
+
+.toast button {
+  color: inherit;
+  background: transparent;
+  border-color: currentColor;
+}

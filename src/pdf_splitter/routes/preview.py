@@ -130,7 +130,7 @@ def post_section_plan(
         override = plan["overrides"].get(str(i))
     request = {
         "sections": plan["sections"],
-        "settings": req.settings.model_dump() if req.settings is not None else plan["settings"],
+        "settings": req.settings.dump() if req.settings is not None else plan["settings"],
         "index": i,
         "override": override,
     }

@@ -7,9 +7,11 @@
     id: string
     load?: (id: string, signal: AbortSignal) => Promise<JobStatus>
     pollMs?: number
+    /** Every status the poll receives, so the page can mount the review UI once the job is in `review`/`done`. */
+    onstatus?: (job: JobStatus) => void
   }
 
-  let { id, load = getJob, pollMs = POLL_MS }: Props = $props()
+  let { id, load = getJob, pollMs = POLL_MS, onstatus }: Props = $props()
 
   let job = $state<JobStatus | null>(null)
   /** A final error: the job is gone or the address is wrong. Nothing more to poll. */
@@ -27,6 +29,7 @@
         if (ctrl.signal.aborted) return
         job = next
         hiccup = null
+        onstatus?.(next)
         if (TERMINAL_STATES.has(next.state)) return
       } catch (err) {
         if (ctrl.signal.aborted) return
