@@ -7,7 +7,9 @@ One pass, in this order, each step on its own so a failure in one job never stop
   2. every `deleted` row's directory, should a late write have brought it back (a defence, so cheap it runs
      every pass);
   3. directories under the jobs dir with no row at all, unless they are younger than `ORPHAN_GRACE` — an upload
-     makes its directory BEFORE its row exists (upload.py) and must not lose it mid-copy;
+     makes its directory BEFORE its row exists (upload.py) and must not lose it mid-copy; the api's spool
+     directory (`config.SPOOL`) is never a candidate, only files inside it older than the same grace are
+     (a spooled part outlives its request only if the api died mid-upload);
   4. `rate` rows out of the window, and `deleted` rows older than `KEEP_DELETED` (their directories went in 1–2).
 Everything takes `now`, so the tests never sleep. Job ids reach the log only as `log_id` (ADR-007).
 """
@@ -19,7 +21,7 @@ import shutil
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from .config import Settings
+from .config import SPOOL, Settings
 from .ratelimit import WINDOW
 from .store import Store, log_id
 
@@ -27,7 +29,7 @@ log = logging.getLogger(__name__)
 
 KEEP_DELETED = timedelta(days=7)
 ORPHAN_GRACE = timedelta(hours=1)
-COUNTS = ("expired", "recreated", "orphans", "rate", "rows")
+COUNTS = ("expired", "recreated", "orphans", "spool", "rate", "rows")
 
 
 def sweep(store: Store, settings: Settings, now: datetime | None = None) -> dict[str, int]:
@@ -44,6 +46,7 @@ def sweep(store: Store, settings: Settings, now: datetime | None = None) -> dict
         if path.is_dir() and _rmtree(path, job["id"]):
             counts["recreated"] += 1
     counts["orphans"] = _reap_orphans(store, settings, now)
+    counts["spool"] = _reap_spool(settings, now)
     counts["rate"] = _prune(store.prune_rate, now - WINDOW, "rate rows")
     counts["rows"] = _prune(store.prune_deleted, now - KEEP_DELETED, "deleted rows")
     if any(counts.values()):
@@ -80,18 +83,42 @@ def _reap_orphans(store: Store, settings: Settings, now: datetime) -> int:
         log.warning("janitor: jobs dir not listed: %s", type(e).__name__)
         return 0
     for path in entries:
-        # `jobs.db`, its WAL and shm are files, never candidates; only directories can be jobs.
-        if not path.is_dir():
+        # `jobs.db`, its WAL and shm are files, never candidates; only directories can be jobs, and the spool
+        # directory is the api's, not a job's.
+        if not path.is_dir() or path.name == SPOOL:
             continue
-        try:
-            age = now - datetime.fromtimestamp(path.stat().st_mtime, tz=UTC)
-        except OSError:
-            continue
-        if age < ORPHAN_GRACE or store.get_job(path.name) is not None:
+        if _age(path, now) < ORPHAN_GRACE or store.get_job(path.name) is not None:
             continue
         if _rmtree(path, path.name):
             removed += 1
     return removed
+
+
+def _reap_spool(settings: Settings, now: datetime) -> int:
+    removed = 0
+    try:
+        entries = list(settings.spool_dir.iterdir())
+    except OSError:
+        # No spool directory yet (the api makes it at start) is the common case on a worker-only host.
+        return 0
+    for path in entries:
+        if path.is_dir() or _age(path, now) < ORPHAN_GRACE:
+            continue
+        try:
+            path.unlink()
+        except OSError as e:
+            log.warning("janitor: stale spool file not removed: %s", type(e).__name__)
+            continue
+        removed += 1
+    return removed
+
+
+def _age(path: Path, now: datetime) -> timedelta:
+    try:
+        return now - datetime.fromtimestamp(path.stat().st_mtime, tz=UTC)
+    except OSError:
+        # Gone between the listing and the stat: as good as young, the next pass decides.
+        return timedelta(0)
 
 
 def _prune(prune, before: datetime, what: str) -> int:

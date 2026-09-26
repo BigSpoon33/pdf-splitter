@@ -13,6 +13,7 @@ from .config import Settings
 from .deps import SettingsDep, StoreDep, get_settings, get_store
 from .routes import download, plan, preview
 from .store import Store
+from .upload import UploadGuard, spooling_to
 from .upload import router as upload_router
 
 __all__ = ["SettingsDep", "StoreDep", "create_app", "get_settings", "get_store"]
@@ -30,10 +31,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             store.init()
         finally:
             store.close()
-        yield
+        with spooling_to(settings.spool_dir):
+            yield
 
     app = FastAPI(title="pdf-splitter", lifespan=lifespan)
     app.state.settings = settings
+    # Added first, so the access log wraps it: a refusal the guard sends without reading the body is still
+    # logged, with an X-Request-ID.
+    app.add_middleware(UploadGuard, settings=settings)
     app.middleware("http")(access_log)
     errors.install(app)
     for router in (upload_router, plan.router, preview.router, download.router):

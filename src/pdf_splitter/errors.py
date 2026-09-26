@@ -24,6 +24,8 @@ MESSAGES = {
     # STORY-012: the limits (Architecture § janitor, § API Interface)
     "rate_limited": "Too many uploads from your network. Wait a while and try again.",
     "disk_full": "The server has no room for new uploads right now. Try again later.",
+    # STORY-013 gate r1: the in-flight upload cap (upload.py `UploadGuard`)
+    "overloaded": "The server is busy with other uploads right now. Try again in a moment.",
     # jobs
     "not_found": "There is no such job.",
     "expired": "This job was deleted (files are kept 24 hours).",

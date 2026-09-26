@@ -81,8 +81,10 @@ All settings are environment variables with the `PDFSPLIT_` prefix (`src/pdf_spl
 | `PDFSPLIT_WORKERS` | `2` | concurrent analyze/cut jobs |
 | `PDFSPLIT_RATE_PER_HOUR` | `6` | upload attempts per client per sliding hour (the 7th is 429 with `Retry-After`) |
 | `PDFSPLIT_MIN_FREE_GB` | `2` | uploads are refused (503 `disk_full`) below this much free space on the jobs volume (decimal GB) |
-| `PDFSPLIT_TRUSTED_PROXY` | unset | the one peer address whose `X-Forwarded-For` (last hop) names the client; unset, the peer is the client |
+| `PDFSPLIT_TRUSTED_PROXY` | unset | the peer addresses (comma-separated; IPv6 in any spelling) whose `X-Forwarded-For` (last hop) names the client; unset, the peer is the client |
 | `PDFSPLIT_IP_SALT` | unset | secret under the daily-rotating IP hash; set it when more than one api process shares `jobs.db` |
+| `PDFSPLIT_MAX_UPLOADS` | `4` | uploads the api streams at once; beyond it `POST /api/jobs` is 503 `overloaded` (with `Retry-After`) before the body is read |
+| `PDFSPLIT_LIMIT_CONCURRENCY` | `64` | uvicorn's ceiling on open connections (its own 503 beyond it) |
 | `PDFSPLIT_MAX_OUTPUT_BYTES` | `2147483648` | ceiling on what one cut may write (the budget is this or 10× the upload, whichever is smaller, never under 256 MB, never over the sandbox's 1 GiB file limit less 64 MiB for the ZIP — so the default lands on 960 MiB) |
 | `PDFSPLIT_ANALYZE_TIMEOUT` | `300` | analyze job wall-clock limit, seconds |
 | `PDFSPLIT_CUT_TIMEOUT` | `600` | cut job wall-clock limit, seconds |
@@ -136,9 +138,14 @@ another PDF" link.
 
 One `docker compose` stack (Architecture ADR-008): **caddy** (TLS, the built SPA, `/api` proxied to the api), **api**
 and **worker** — the last two are one image (`Dockerfile` target `python`, non-root uid 10001) with different
-commands — sharing the `jobs` volume at `/jobs`. The worker has no network, a read-only root, all capabilities
-dropped, a tmpfs `/tmp` and a memory limit; the api is the same minus the network (it is reachable from caddy only;
-nothing publishes 8000). The `web` stage builds `web/dist` with Bun and the `caddy` stage copies it to `/srv`. The
+commands — sharing the `jobs` volume at `/jobs`. Two networks: `edge` (caddy alone: the published ports, the way
+out to the ACME servers) and `backend` (`internal`: caddy and the api, no route anywhere else — the api cannot
+resolve or reach a single host outside the stack); the worker has no network at all. Both networks carry IPv4 and
+an IPv6 ULA /64, so an IPv6 visitor is DNAT'd to caddy natively and reaches the api as their own address. The
+worker has a read-only root, all capabilities dropped, a 64 MB tmpfs `/tmp` and a memory limit with no swap; the api
+is the same. Uploads spool under `/jobs/.spool` on the volume, never in RAM, and `POST /api/jobs` refuses what it can
+from the headers alone (an oversized `Content-Length`, a fifth concurrent upload, a spent rate window) before it
+reads a byte of body. The `web` stage builds `web/dist` with Bun and the `caddy` stage copies it to `/srv`. The
 engine comes from its public GitHub tag during the build — no LAN access is needed anywhere.
 
 ```bash
@@ -157,8 +164,10 @@ host (a real one and a smoke run) apart. `deploy/.env` is read from the compose 
 | `PUBLIC_HOST` | `localhost` | Caddy's site address: a public hostname gets a Let's Encrypt certificate (DNS must point at the host and 80/443 must be reachable); `localhost` gets one from Caddy's internal CA |
 | `PDFSPLIT_PUBLIC_URL` | `https://localhost` | the site's public base URL, handed to the api |
 | `PDFSPLIT_HTTP_PORT` / `PDFSPLIT_HTTPS_PORT` | `80` / `443` | the host ports caddy publishes |
-| `PDFSPLIT_SUBNET` / `PDFSPLIT_CADDY_IP` | `172.30.0.0/24` / `172.30.0.10` | the stack's own network and caddy's fixed address on it, which is also the api's `PDFSPLIT_TRUSTED_PROXY` — the one peer whose `X-Forwarded-For` names the client |
-| `PDFSPLIT_WORKERS`, `PDFSPLIT_RATE_PER_HOUR`, `PDFSPLIT_MAX_BYTES`, `PDFSPLIT_TTL_HOURS`, `PDFSPLIT_MIN_FREE_GB` | as in § Configuration | passed through to both api and worker |
+| `PDFSPLIT_SUBNET` / `PDFSPLIT_SUBNET6` | `172.30.0.0/24` / `fd30:5eaf:9a13::/64` | the `backend` network (internal: caddy + api) |
+| `PDFSPLIT_CADDY_IP` / `PDFSPLIT_CADDY_IP6` | `172.30.0.10` / `fd30:5eaf:9a13::10` | caddy's fixed addresses on `backend`; together they are the api's `PDFSPLIT_TRUSTED_PROXY` — the only peer whose `X-Forwarded-For` names the client (caddy may connect over either family) |
+| `PDFSPLIT_EDGE_SUBNET` / `PDFSPLIT_EDGE_SUBNET6` | `172.30.1.0/24` / `fd30:5eaf:9a13:1::/64` | the `edge` network (caddy alone: published ports, ACME) |
+| `PDFSPLIT_WORKERS`, `PDFSPLIT_RATE_PER_HOUR`, `PDFSPLIT_MAX_BYTES`, `PDFSPLIT_TTL_HOURS`, `PDFSPLIT_MIN_FREE_GB`, `PDFSPLIT_MAX_UPLOADS`, `PDFSPLIT_LIMIT_CONCURRENCY` | as in § Configuration | passed through to both api and worker |
 | `PDFSPLIT_TAG` | `local` | the image tag (`pdfsplit-app:<tag>`, `pdfsplit-caddy:<tag>`) |
 
 Caddy caps request bodies at 210 MB (just above the api's 200 MiB, so an oversized upload still gets the api's own
@@ -166,13 +175,23 @@ Caddy caps request bodies at 210 MB (just above the api's 200 MiB, so an oversiz
 `Content-Security-Policy: default-src 'self'; img-src 'self' blob:`, `X-Content-Type-Options: nosniff`,
 `Referrer-Policy: no-referrer` and `X-Frame-Options: DENY`. Certificates live in the `caddy_data` volume.
 uvicorn runs with `proxy_headers=False`: a forwarded address is believed only by the api's own trusted-proxy rule.
+The api listens on IPv4 inside its container; caddy resolves `api` to both families and falls back to v4 at once
+when the v6 dial is refused, so the v6 entry in `PDFSPLIT_TRUSTED_PROXY` costs nothing and covers a dual-stack
+listener later.
 
-**Smoke test** — `./deploy/smoke.sh` needs docker compose, curl and the dev environment (uv, for the fixture book).
-It builds and starts the stack under the throwaway project `pdfsplit-smoke` (its own image tag, subnet
-`172.31.0.0/24`, host ports 18080/18443, the api on `127.0.0.1:18000` for one check, a random salt, 2 uploads per
-hour), then drives the synthetic two-column book through caddy: health, the SPA and its headers, upload → review →
-`GET`/`PUT` plan → cut → `result.zip` with three PDFs and a manifest, three uploads straight to the api with spoofed
-`X-Forwarded-For` (the third must be 429 and the `rate` rows gain at most one client hash), `DELETE` → 410. It
-always tears down with `down -v`, untags its images, and fails if anything of the project is left or any other
-container on the host changed. Override `SMOKE_PROJECT`, `SMOKE_HTTP_PORT`, `SMOKE_HTTPS_PORT`, `SMOKE_API_PORT`,
-`SMOKE_SUBNET`, `SMOKE_CADDY_IP` if those collide.
+**Smoke test** — `./deploy/smoke.sh` needs docker compose, curl and the dev environment (uv, for the fixture book
+and the hash arithmetic). It builds and starts the stack under the throwaway project `pdfsplit-smoke` (its own image
+tag, subnets `172.27.13.0/24` + `fd27:5eaf:9a13::/64` and `172.27.14.0/24` + `fd27:5eaf:9a13:1::/64`, host ports
+18080/18443, a random salt, 6 uploads per hour), then drives the synthetic two-column book through caddy: health,
+the SPA and its headers, upload → review → `GET`/`PUT` plan → cut → `result.zip` with three PDFs and a manifest.
+Then the checks the gate asked for: the api can reach neither `github.com` nor the host nor a public resolver while
+caddy reaches the ACME directory; straight at the api from a one-off client on `backend` (`deploy/smoke_client.py`
+in the app image — nothing publishes the api, and Docker binds no port on an internal network), a flood of 8 × 300 MiB
+uploads is 8 × 413 with under 2 MB of body read each and no slot spent, 6 × 60 MiB at once is 4 spooled to
+`/jobs/.spool` + 2 × 503 `overloaded`, and three uploads with spoofed `X-Forwarded-For` are 201 201 429 under the
+client's own hash; a client on `edge` uploading to caddy over IPv6 and the host reaching the published port at the
+edge network's v6 gateway (the netfilter DNAT path a visitor takes) are each recorded under exactly their own
+address; `DELETE` → 410. It always tears down with `down -v`, untags its images, and fails if anything of the
+project is left or any other container on the host changed. Override `SMOKE_PROJECT`, `SMOKE_HTTP_PORT`,
+`SMOKE_HTTPS_PORT`, `SMOKE_SUBNET`, `SMOKE_SUBNET6`, `SMOKE_CADDY_IP`, `SMOKE_CADDY_IP6`, `SMOKE_EDGE_SUBNET`,
+`SMOKE_EDGE_SUBNET6` if those collide.

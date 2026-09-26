@@ -9,7 +9,8 @@ from pdf_splitter.config import Settings
 
 def test_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in ("JOBS_DIR", "MAX_BYTES", "MAX_PAGES", "TTL_HOURS", "WORKERS", "RATE_PER_HOUR", "MIN_FREE_GB",
-                 "TRUSTED_PROXY", "IP_SALT", "MAX_OUTPUT_BYTES", "ANALYZE_TIMEOUT", "CUT_TIMEOUT", "PUBLIC_URL"):
+                 "TRUSTED_PROXY", "IP_SALT", "MAX_OUTPUT_BYTES", "ANALYZE_TIMEOUT", "CUT_TIMEOUT", "PUBLIC_URL",
+                 "MAX_UPLOADS", "LIMIT_CONCURRENCY"):
         monkeypatch.delenv(f"PDFSPLIT_{name}", raising=False)
     s = Settings()
     assert s.jobs_dir == Path.cwd() / "jobs"
@@ -26,6 +27,9 @@ def test_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert s.cut_timeout == 600
     assert s.public_url == "http://localhost:8000"
     assert s.db_path == Path.cwd() / "jobs" / "jobs.db"
+    # STORY-013 gate r1: four uploads streaming at once, 64 open connections, the spool beside the jobs.
+    assert (s.max_uploads, s.limit_concurrency) == (4, 64)
+    assert s.spool_dir == Path.cwd() / "jobs" / ".spool"
 
 
 @pytest.mark.parametrize("raw", [".", "", "jobs", "./jobs/../jobs"])
@@ -54,6 +58,8 @@ def test_env_prefix(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         "ANALYZE_TIMEOUT": "30",
         "CUT_TIMEOUT": "60",
         "PUBLIC_URL": "https://split.example",
+        "MAX_UPLOADS": "2",
+        "LIMIT_CONCURRENCY": "16",
     }
     for k, v in env.items():
         monkeypatch.setenv(f"PDFSPLIT_{k}", v)
@@ -63,6 +69,7 @@ def test_env_prefix(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     assert (s.rate_per_hour, s.analyze_timeout, s.cut_timeout) == (60, 30, 60)
     assert (s.min_free_gb, s.trusted_proxy, s.ip_salt, s.max_output_bytes) == (0.5, "172.18.0.2", "shared-secret", 300000)
     assert s.public_url == "https://split.example"
+    assert (s.max_uploads, s.limit_concurrency) == (2, 16)
 
 
 def test_unprefixed_env_is_ignored(monkeypatch: pytest.MonkeyPatch) -> None:

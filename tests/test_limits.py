@@ -85,6 +85,25 @@ def test_client_ip_believes_x_forwarded_for_only_from_the_trusted_proxy() -> Non
     assert ratelimit.client_ip(request_from("172.18.0.2"), "172.18.0.2") == "172.18.0.2"
 
 
+def test_the_trusted_proxy_setting_is_a_list_and_ipv6_spellings_match(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Caddy has an IPv4 and an IPv6 address on the compose network and may connect over either (gate r1), so
+    the setting names both; an IPv6 address matches however it is spelled, and the forwarded client may be v6."""
+    both = "172.30.0.10, fd30:5eaf:9a13:0:0:0:0:10"
+    assert ratelimit.trusted_proxies(both) == frozenset({"172.30.0.10", "fd30:5eaf:9a13::10"})
+    assert ratelimit.trusted_proxies(None) == ratelimit.trusted_proxies(" , ") == frozenset()
+    assert ratelimit.client_ip(request_from("172.30.0.10", "198.51.100.7"), both) == "198.51.100.7"
+    assert ratelimit.client_ip(request_from("fd30:5eaf:9a13::10", "2001:db8::7"), both) == "2001:db8::7"
+    assert ratelimit.client_ip(request_from("fd30:5eaf:9a13::10", "198.51.100.7"), both) == "198.51.100.7"
+    # Any other peer, v4 or v6, is the client whatever it forwards.
+    assert ratelimit.client_ip(request_from("fd30:5eaf:9a13::11", "2001:db8::7"), both) == "fd30:5eaf:9a13::11"
+    assert ratelimit.client_ip(request_from("172.30.0.11", "2001:db8::7"), both) == "172.30.0.11"
+    # Distinct hashes for distinct v6 clients: a v6 visitor gets a bucket of their own (the review saw them share one).
+    assert ratelimit.ip_hash("2001:db8::7", T0, "s") != ratelimit.ip_hash("2001:db8::8", T0, "s")
+    # Through Settings, from the environment, as compose sets it.
+    monkeypatch.setenv("PDFSPLIT_TRUSTED_PROXY", both)
+    assert ratelimit.trusted_proxies(Settings().trusted_proxy) == ratelimit.trusted_proxies(both)
+
+
 def test_ip_hash_is_salted_shared_by_secret_and_rotates_daily() -> None:
     a = ratelimit.ip_hash("198.51.100.7", T0, "secret")
     assert len(a) == 64 and "198" not in a
@@ -160,7 +179,8 @@ def test_parallel_uploads_from_one_client_get_exactly_the_limit(settings: Settin
     n, barrier = 12, threading.Barrier(12)
     statuses: list[int] = []
     lock = threading.Lock()
-    with TestClient(create_app(settings)) as client:
+    # The in-flight cap (STORY-013 gate r1) would answer 503 to most of the burst; this test is about the window.
+    with TestClient(create_app(settings.model_copy(update={"max_uploads": n}))) as client:
 
         def attempt() -> None:
             barrier.wait()
@@ -393,6 +413,30 @@ def test_orphan_directories_are_removed_after_a_grace_and_the_database_never(set
     assert sorted(p.name for p in settings.jobs_dir.iterdir() if p.is_file()) == before
     assert janitor.sweep(jstore, settings, now=T0 + janitor.ORPHAN_GRACE)["orphans"] == 1
     assert not young.exists()
+
+
+def test_the_spool_directory_is_never_reaped_only_stale_files_inside_it(settings: Settings, jstore: Store) -> None:
+    """`<jobs>/.spool` has no row and can be hours old, yet it is the api's, not an orphan; a spooled part that
+    outlived its request (the api died mid-upload) goes after the same grace, a fresh one stays."""
+    spool = settings.spool_dir
+    spool.mkdir()
+    stale, fresh, sub = spool / "tmpabc", spool / "tmpdef", spool / "dir"
+    stale.write_bytes(b"x")
+    fresh.write_bytes(b"y")
+    sub.mkdir()
+    old, recent = (T0 - timedelta(hours=2)).timestamp(), (T0 - timedelta(minutes=5)).timestamp()
+    for p in (spool, stale, sub):
+        os.utime(p, (old, old))
+    os.utime(fresh, (recent, recent))
+    counts = janitor.sweep(jstore, settings, now=T0)
+    assert (counts["orphans"], counts["spool"]) == (0, 1)
+    assert spool.is_dir() and not stale.exists() and fresh.exists() and sub.is_dir()
+    assert janitor.sweep(jstore, settings, now=T0)["spool"] == 0
+    assert janitor.sweep(jstore, settings, now=T0 + janitor.ORPHAN_GRACE)["spool"] == 1
+    assert not fresh.exists()
+    # No spool directory at all (a worker-only host) is not an error.
+    shutil.rmtree(spool)
+    assert janitor.sweep(jstore, settings, now=T0)["spool"] == 0
 
 
 def test_rate_rows_out_of_the_window_and_week_old_deleted_rows_are_pruned(settings: Settings, jstore: Store) -> None:

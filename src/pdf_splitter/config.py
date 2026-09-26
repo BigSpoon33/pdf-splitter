@@ -6,6 +6,9 @@ from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 MB = 1024 * 1024
+# Under the jobs dir: where the api spools an upload's multipart part (upload.py `spooling_to`). The janitor never
+# treats it as a job directory.
+SPOOL = ".spool"
 
 
 class Settings(BaseSettings):
@@ -22,8 +25,14 @@ class Settings(BaseSettings):
     rate_per_hour: int = 6
     # Uploads are refused (503) while the jobs volume has less than this free (Architecture § janitor).
     min_free_gb: float = 2
-    # The one peer whose X-Forwarded-For is believed (Caddy on the same VM, STORY-013); unset, the peer IS the client.
+    # The peers whose X-Forwarded-For is believed, comma-separated (Caddy's IPv4 AND IPv6 address on the compose
+    # network, STORY-013: it may reach the api over either); unset, the peer IS the client.
     trusted_proxy: str | None = None
+    # Uploads the api streams at once; beyond it `POST /api/jobs` is 503 `overloaded` before a byte is read, so a
+    # burst holds at most this many spool files open (upload.py `UploadGuard`).
+    max_uploads: int = 4
+    # uvicorn's own ceiling on open connections (503 beyond it): polls and downloads count too.
+    limit_concurrency: int = 64
     # The secret under the daily-rotating IP hash (ADR-007). Unset, each api process draws its own at start, which
     # is fine for the one uvicorn process the CLI runs; several processes must share one so the window is shared.
     ip_salt: str | None = None
@@ -45,3 +54,7 @@ class Settings(BaseSettings):
     @property
     def db_path(self) -> Path:
         return self.jobs_dir / "jobs.db"
+
+    @property
+    def spool_dir(self) -> Path:
+        return self.jobs_dir / SPOOL

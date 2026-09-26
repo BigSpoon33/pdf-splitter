@@ -11,6 +11,7 @@ are dated, so a reading taken before the lock could count under the wrong day.
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import secrets
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -24,11 +25,26 @@ WINDOW = timedelta(hours=1)
 _PROCESS_SECRET = secrets.token_hex(16)
 
 
+def canonical(address: str) -> str:
+    """One spelling per address: an IPv6 peer arrives however the socket prints it (`fd00::10`), the setting
+    however the operator typed it (`fd00:0:0:0::10`). Anything that is not an IP is compared as written."""
+    try:
+        return str(ipaddress.ip_address(address))
+    except ValueError:
+        return address
+
+
+def trusted_proxies(setting: str | None) -> frozenset[str]:
+    """`PDFSPLIT_TRUSTED_PROXY`, comma-separated: the proxy has one address per network family and may connect
+    over either."""
+    return frozenset(canonical(p.strip()) for p in (setting or "").split(",") if p.strip())
+
+
 def client_ip(request: Request, trusted_proxy: str | None) -> str:
-    """The peer address, or — only when the peer IS the trusted proxy — the last hop in its `X-Forwarded-For`
-    (the one the proxy itself appended; anything before it is client-supplied)."""
+    """The peer address, or — only when the peer IS one of the trusted proxies — the last hop in its
+    `X-Forwarded-For` (the one the proxy itself appended; anything before it is client-supplied)."""
     peer = request.client.host if request.client else "unknown"
-    if trusted_proxy and peer == trusted_proxy:
+    if trusted_proxy and canonical(peer) in trusted_proxies(trusted_proxy):
         hops = [h.strip() for h in request.headers.get("x-forwarded-for", "").split(",") if h.strip()]
         if hops:
             return hops[-1]

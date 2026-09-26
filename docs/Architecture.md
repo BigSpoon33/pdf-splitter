@@ -48,11 +48,12 @@ pdf-splitter (this repo, github.com/BigSpoon33/pdf-splitter)
 
 Dockerfile          (repo root; targets `web` = Bun build of web/dist, `python` = api + worker image, `caddy` = caddy + web/dist)
 deploy/
-├── compose.yaml        (`name: pdfsplit`; caddy, api, worker; volumes `jobs`, `caddy_data`, `caddy_config`; network `pdfsplit`)
-├── compose.smoke.yaml  (smoke.sh only: publishes the api on 127.0.0.1 for the spoofed-XFF check)
+├── compose.yaml        (`name: pdfsplit`; caddy, api, worker; volumes `jobs`, `caddy_data`, `caddy_config`;
+│                        networks `edge` (caddy: ports, ACME) + `backend` (internal: caddy + api), both v4 + v6 ULA)
 ├── Caddyfile           (TLS, static SPA + fallback, /api → api:8000, 210MB body cap, CSP + security headers, zstd/gzip)
 ├── smoke.sh            (the stack end to end under the throwaway project `pdfsplit-smoke`)
-└── .env.example        (→ deploy/.env, gitignored: PDFSPLIT_IP_SALT, PUBLIC_HOST, ports, subnet, limits)
+├── smoke_client.py     (smoke.sh's upload client, run in the app image on the stack's networks: flood, cap, XFF, v6)
+└── .env.example        (→ deploy/.env, gitignored: PDFSPLIT_IP_SALT, PUBLIC_HOST, ports, subnets, limits)
 ```
 
 ### Component Details
@@ -109,13 +110,20 @@ deploy/
 - **Responsibility:** the HTTP surface, input validation, rate limiting, job state transitions,
   and serving outputs. It never runs a full analysis or cut in-process.
 - **Inputs:** multipart uploads (streamed to disk), JSON Plans, job ids.
+- **Upload guard** (`upload.UploadGuard`, STORY-013 gate r1): an ASGI layer around `POST /api/jobs` that answers
+  from the headers alone — 413 for a `Content-Length` past `MAX_BYTES` + a 64 KiB envelope, 411/415 for a chunked
+  or non-multipart body, 503 `overloaded` past `MAX_UPLOADS` in flight, 429 when the client's rate slot is spent,
+  503 `disk_full` — before Starlette's multipart parser reads a byte, and closes the connection on a refusal. The
+  route inherits the client's hash and never takes a slot of its own. What does get parsed spools under
+  `<jobs>/.spool` on the volume (`upload.spooling_to` sets `tempfile`/`TMPDIR` for the app's lifetime), not the
+  container's tmpfs; uvicorn's `limit_concurrency` caps connections.
 - **Outputs:** JSON, PNG, PDF, ZIP.
 - **Preview calls** (`/sheets/{n}.png`, `/sections/{i}/plan`) run the engine *read-only* in a
   subprocess from a small pool (`preview_timeout = 20 s`, same rlimits as the worker), using the
   index the analyze job cached. A PNG render is cached on disk per (sheet, dpi, settings-hash).
 - **Failure mode:** each rejection is a specific 4xx with a `code` (`too_large`, `too_many_pages`,
-  `encrypted`, `not_pdf`, `no_text_layer`, `rate_limited`, `disk_full`, `expired`). Unexpected errors → 500
-  with a request id. Nothing leaks internal paths.
+  `encrypted`, `not_pdf`, `no_text_layer`, `rate_limited`, `disk_full`, `overloaded`, `expired`). Unexpected
+  errors → 500 with a request id. Nothing leaks internal paths.
 
 #### worker
 
@@ -297,6 +305,12 @@ never appear in logs (logs carry a short hash).
 - **Status:** Accepted
 - **Context:** MuPDF parses hostile input, and has had CVEs. Pathological PDFs can loop or balloon memory.
 - **Decision:** A fresh subprocess per job with rlimits + wall timeout. The worker container has `network_mode: none`, a read-only root, runs non-root and drops all caps. The API container's preflight also opens the PDF, but only reads the trailer/page count/first-pages text under a 10 s timeout in a subprocess.
+- **As built (STORY-013, gate r1 hardening):** the api container has no egress either. Its only network is
+  `backend` (`internal: true`; caddy and the api), so a preflight or preview subprocess that MuPDF turned hostile
+  can resolve nothing and route nowhere (`deploy/smoke.sh` proves `github.com`, the host's other bridges and a public
+  resolver unreachable from inside it); caddy alone sits on `edge` for the published ports and ACME. Both python
+  containers run `read_only`, `cap_drop: [ALL]`, `no-new-privileges`, a 64 MB tmpfs `/tmp`, `mem_limit` with
+  `memswap_limit` equal to it (no swap: a runaway is killed and restarted, never paged).
 - **Alternatives:** gVisor/Firecracker (overkill for v1; could be added later as a runtime flag).
 
 ### ADR-006: Svelte + Vite + TypeScript SPA, built with Bun, served by Caddy
@@ -316,15 +330,24 @@ never appear in logs (logs carry a short hash).
 - **Status:** Accepted (Shuma, 2026-09-25)
 - **Decision:** `compose.yaml` = caddy + api + worker. Caddy enforces `request_body max_size 210MB` and gets certificates automatically. `deploy.sh` = rsync/git pull + `docker compose up -d --build` over ssh.
 - **As built (STORY-013):** one `Dockerfile` (targets `web`, `python`, `caddy`), `deploy/compose.yaml` with `name: pdfsplit`
-  (always run with an explicit `-p`). caddy publishes `${PDFSPLIT_HTTP_PORT:-80}`/`${PDFSPLIT_HTTPS_PORT:-443}` and sits at a
-  FIXED address on the stack's own network (`${PDFSPLIT_SUBNET:-172.30.0.0/24}`, `${PDFSPLIT_CADDY_IP:-172.30.0.10}`), which
-  is the api's `PDFSPLIT_TRUSTED_PROXY`: the only peer whose `X-Forwarded-For` (last hop) names the client; uvicorn runs with
-  `proxy_headers=False` so nothing else rewrites the peer. The api (`api --host 0.0.0.0 --port 8000`) is reachable from caddy
-  only; the worker has `network_mode: none`. Both are the `python` image (uid 10001) with `read_only`, `cap_drop: [ALL]`,
-  `no-new-privileges`, tmpfs `/tmp`, `mem_limit` 2g/3g, and share the `jobs` volume at `/jobs` (SQLite + WAL on it).
-  `PDFSPLIT_IP_SALT` is required from `deploy/.env` (gitignored). `{$PUBLIC_HOST:localhost}` is the site address: a public
-  hostname → Let's Encrypt (certificates in `caddy_data`), `localhost` → Caddy's internal CA. `deploy/smoke.sh` drives the
-  whole stack under the throwaway project `pdfsplit-smoke`. `deploy.sh` is STORY-014's.
+  (always run with an explicit `-p`). Two networks, each with an IPv4 subnet and an IPv6 ULA /64 (`enable_ipv6`):
+  `edge` (`${PDFSPLIT_EDGE_SUBNET:-172.30.1.0/24}`, `${PDFSPLIT_EDGE_SUBNET6:-fd30:5eaf:9a13:1::/64}`) carries caddy alone —
+  it publishes `${PDFSPLIT_HTTP_PORT:-80}`/`${PDFSPLIT_HTTPS_PORT:-443}` there and reaches the ACME servers; `backend`
+  (`internal: true`; `${PDFSPLIT_SUBNET:-172.30.0.0/24}`, `${PDFSPLIT_SUBNET6:-fd30:5eaf:9a13::/64}`) carries caddy and the
+  api. caddy sits at FIXED addresses on `backend` (`${PDFSPLIT_CADDY_IP:-172.30.0.10}`, `${PDFSPLIT_CADDY_IP6:-fd30:5eaf:9a13::10}`),
+  which together are the api's `PDFSPLIT_TRUSTED_PROXY` (a comma-separated list; `ratelimit.trusted_proxies` compares
+  canonical addresses): the only peers whose `X-Forwarded-For` (last hop) names the client; uvicorn runs with
+  `proxy_headers=False` so nothing else rewrites the peer. With IPv6 on the networks Docker DNATs a v6 visitor to caddy's
+  own v6 address and caddy forwards their real address, so v6 visitors no longer all arrive as the bridge gateway (gate r1
+  finding 2; the fallback, should a host's Docker lack `ip6tables`, is to publish no AAAA record). The api
+  (`api --host 0.0.0.0 --port 8000`, IPv4 inside its container — caddy falls back from the refused v6 dial at once) is
+  reachable from caddy only; the worker has `network_mode: none`. Both are the `python` image (uid 10001) with `read_only`,
+  `cap_drop: [ALL]`, `no-new-privileges`, a 64 MB tmpfs `/tmp` (uploads spool on the volume, § api), `mem_limit` 2g/3g with
+  `memswap_limit` the same, and share the `jobs` volume at `/jobs` (SQLite + WAL on it). `PDFSPLIT_IP_SALT` is required from
+  `deploy/.env` (gitignored). `{$PUBLIC_HOST:localhost}` is the site address: a public hostname → Let's Encrypt (certificates
+  in `caddy_data`), `localhost` → Caddy's internal CA. `deploy/smoke.sh` drives the whole stack under the throwaway project
+  `pdfsplit-smoke`, reaching the unpublished api from a one-off client on `backend` (`deploy/smoke_client.py`). `deploy.sh`
+  is STORY-014's.
 
 ---
 

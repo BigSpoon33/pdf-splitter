@@ -1,6 +1,0 @@
-# Override for deploy/smoke.sh only: publishes the api on loopback so the spoofed-X-Forwarded-For check can
-# bypass caddy. The production file keeps the api unpublished.
-services:
-  api:
-    ports:
-      - "127.0.0.1:${SMOKE_API_PORT:-18000}:8000"

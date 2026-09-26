@@ -26,9 +26,16 @@ def main(argv: list[str] | None = None) -> None:
         # uvicorn's access log would print raw job ids from /api/jobs/<id> paths; app.access_log
         # logs the same line with the id hashed. proxy_headers=False: uvicorn would otherwise rewrite
         # request.client from X-Forwarded-For for any 127.0.0.1 peer, ahead of ratelimit.client_ip, whose
-        # PDFSPLIT_TRUSTED_PROXY rule must be the only place a forwarded address is believed.
+        # PDFSPLIT_TRUSTED_PROXY rule must be the only place a forwarded address is believed. limit_concurrency:
+        # a connection flood gets uvicorn's 503 instead of an unbounded task list (gate r1).
+        settings = Settings()
         uvicorn.run(
-            create_app(Settings()), host=args.host, port=args.port, access_log=False, proxy_headers=False
+            create_app(settings),
+            host=args.host,
+            port=args.port,
+            access_log=False,
+            proxy_headers=False,
+            limit_concurrency=settings.limit_concurrency,
         )
     elif args.command == "worker":
         stop = threading.Event()

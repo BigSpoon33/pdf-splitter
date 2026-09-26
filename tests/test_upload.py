@@ -3,8 +3,10 @@ from __future__ import annotations
 import io
 import json
 import logging
+import os
 import subprocess
 import sys
+import tempfile
 import threading
 from pathlib import Path
 
@@ -65,7 +67,8 @@ def job_count(settings: Settings) -> int:
 
 
 def job_dirs(settings: Settings) -> list[Path]:
-    return [p for p in settings.jobs_dir.iterdir() if p.is_dir()]
+    # The api's spool directory lives beside the jobs (config.SPOOL); only the rest are job directories.
+    return [p for p in settings.jobs_dir.iterdir() if p.is_dir() and p != settings.spool_dir]
 
 
 def assert_rejected(r, settings: Settings, status: int, code: str) -> None:
@@ -366,7 +369,8 @@ def test_concurrent_uploads_all_succeed(settings: Settings) -> None:
     lock = threading.Lock()
     data = pdf_bytes(pages=2)
     # 18 uploads would trip the 6/h window (STORY-012): each thread is its own client behind the trusted proxy.
-    settings = settings.model_copy(update={"trusted_proxy": "testclient"})
+    # Six at once is more than the in-flight cap (STORY-013 gate r1) allows by default, so it is raised here.
+    settings = settings.model_copy(update={"trusted_proxy": "testclient", "max_uploads": n_threads})
 
     with TestClient(create_app(settings), raise_server_exceptions=True) as client:
 
@@ -392,6 +396,130 @@ def test_concurrent_uploads_all_succeed(settings: Settings) -> None:
     assert len(set(ids)) == n_threads * per_thread
     assert job_count(settings) == n_threads * per_thread
     assert {p.name for p in job_dirs(settings)} == set(ids)
+
+
+# --- the guard (STORY-013 gate r1): refused before the body is read -----------------------------
+
+
+def rate_rows(settings: Settings) -> int:
+    store = Store(settings.db_path)
+    try:
+        return store.conn.execute("SELECT COUNT(*) FROM rate").fetchone()[0]
+    finally:
+        store.close()
+
+
+def never_reached(*args, **kwargs):
+    raise AssertionError("the route ran: the guard let the body through")
+
+
+def test_oversized_content_length_is_refused_before_the_body_is_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A declared size past the cap (plus the multipart envelope) is 413 from the headers alone: the route never
+    runs, nothing is spooled, no slot is spent, and the connection is told to close so the client stops sending."""
+    settings = Settings(jobs_dir=tmp_path / "jobs", max_bytes=1000)
+    monkeypatch.setattr(upload, "_accept", never_reached)
+    with TestClient(create_app(settings)) as client:
+        # 2 MiB: past Starlette's 1 MiB in-memory spool, so a parsed body would have hit the temporary directory.
+        r = post(client, b"%PDF-" + b"0" * (2 * 1024 * 1024))
+        assert_rejected(r, settings, 413, "too_large")
+        assert r.headers["connection"] == "close"
+        assert list(settings.spool_dir.iterdir()) == []
+    assert rate_rows(settings) == 0
+    # Just above the cap but inside the envelope allowance: the guard passes it, the streaming copy decides.
+    monkeypatch.setattr(upload, "_accept", lambda *a, **k: upload.reject("too_large"))
+    with TestClient(create_app(settings)) as client:
+        assert post(client, b"%PDF-" + b"0" * 1000).status_code == 413
+
+
+def test_uploads_without_a_content_length_or_not_multipart_are_refused_unread(settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(upload, "_accept", never_reached)
+    with TestClient(create_app(settings)) as client:
+        # httpx sends an iterator body chunked, without Content-Length.
+        r = client.post("/api/jobs", content=iter([b"--x\r\n", b"--x--\r\n"]),
+                        headers={"Content-Type": "multipart/form-data; boundary=x"})
+        assert (r.status_code, r.json()["code"]) == (411, "invalid"), r.text
+        # The urlencoded parser would hold the whole body in memory; only multipart streams.
+        r = client.post("/api/jobs", data={"mode": "chapters"})
+        assert (r.status_code, r.json()["code"]) == (415, "invalid"), r.text
+        r = client.post("/api/jobs", content=b"x" * 10, headers={"Content-Type": "application/pdf"})
+        assert r.status_code == 415
+        # Other methods and paths are none of the guard's business.
+        assert client.get("/api/jobs").status_code == 405
+        assert client.get("/api/health").status_code == 200
+    assert rate_rows(settings) == 0
+    # No body at all has nothing to spool: the route keeps answering it (test_not_pdf_empty_and_missing_file).
+    monkeypatch.setattr(upload, "_accept", lambda *a, **k: upload.reject("not_pdf"))
+    with TestClient(create_app(settings)) as client:
+        assert client.post("/api/jobs").status_code == 400
+    assert rate_rows(settings) == 1
+
+
+def test_the_rate_slot_is_taken_before_the_body_is_read_and_only_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = Settings(jobs_dir=tmp_path / "jobs", rate_per_hour=1)
+    with TestClient(create_app(settings)) as client:
+        assert post(client, pdf_bytes()).status_code == 201
+        # One upload, one slot: the route did not claim a second one on top of the guard's.
+        assert rate_rows(settings) == 1
+        monkeypatch.setattr(upload, "_accept", never_reached)
+        r = post(client, pdf_bytes())
+        assert r.status_code == 429, r.text
+        assert 3500 < int(r.headers["retry-after"]) <= 3600
+        assert r.headers["connection"] == "close"
+        assert list(settings.spool_dir.iterdir()) == []
+    assert rate_rows(settings) == 1 and job_count(settings) == 1
+
+
+def test_uploads_beyond_the_in_flight_cap_are_503_overloaded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two uploads held inside the route (a slow preflight), a third arrives: 503 `overloaded` with a Retry-After,
+    no slot spent on it; once the two finish, the cap is free again."""
+    settings = Settings(jobs_dir=tmp_path / "jobs", max_uploads=2, trusted_proxy="testclient")
+    entered, release = threading.Semaphore(0), threading.Event()
+    real = upload.run_preflight
+
+    def slow_preflight(*args, **kwargs):
+        entered.release()
+        assert release.wait(30)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(upload, "run_preflight", slow_preflight)
+    statuses: list[int] = []
+    with TestClient(create_app(settings)) as client:
+
+        def attempt(n: int) -> None:
+            statuses.append(post(client, pdf_bytes(), headers={"X-Forwarded-For": f"203.0.113.{n}"}).status_code)
+
+        held = [threading.Thread(target=attempt, args=(n,)) for n in (1, 2)]
+        for t in held:
+            t.start()
+        for _ in held:
+            assert entered.acquire(timeout=30)
+        r = post(client, pdf_bytes(), headers={"X-Forwarded-For": "203.0.113.3"})
+        assert r.status_code == 503, r.text
+        assert r.json() == {"code": "overloaded", "message": upload.MESSAGES["overloaded"]}
+        assert r.headers["retry-after"] == upload.RETRY_AFTER_OVERLOADED
+        assert rate_rows(settings) == 2
+        release.set()
+        for t in held:
+            t.join(30)
+        assert statuses == [201, 201]
+        assert post(client, pdf_bytes(), headers={"X-Forwarded-For": "203.0.113.4"}).status_code == 201
+    assert job_count(settings) == 3
+
+
+def test_the_app_spools_uploads_under_the_jobs_dir_while_it_runs(settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
+    """tempfile (what Starlette's multipart parser spools through) and TMPDIR (what the preflight and preview
+    subprocesses inherit) point at `<jobs>/.spool` between startup and shutdown, and at what they were before
+    afterwards."""
+    monkeypatch.setenv("TMPDIR", "/tmp")
+    monkeypatch.setattr(tempfile, "tempdir", None)
+    before = tempfile.gettempdir()
+    assert not settings.spool_dir.exists()
+    with TestClient(create_app(settings)):
+        assert settings.spool_dir.is_dir()
+        assert tempfile.gettempdir() == str(settings.spool_dir) == os.environ["TMPDIR"]
+        with tempfile.NamedTemporaryFile() as f:
+            assert Path(f.name).parent == settings.spool_dir
+    assert tempfile.gettempdir() == before and os.environ["TMPDIR"] == "/tmp"
 
 
 JOB_ID = "-bCdEfGhIjKlMnOpQrSt00"  # the token_urlsafe(16) shape, with the awkward leading `-`

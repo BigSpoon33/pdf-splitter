@@ -83,3 +83,5 @@ def test_cli_api_serves_the_app_from_env_settings(monkeypatch: pytest.MonkeyPatc
     # uvicorn must not rewrite the peer from X-Forwarded-For on its own: ratelimit.client_ip's trusted-proxy
     # rule is the only XFF logic (STORY-013 addendum), so a spoofed header reaching the api port stays the peer's.
     assert calls["proxy_headers"] is False
+    # A connection flood meets uvicorn's own 503 at PDFSPLIT_LIMIT_CONCURRENCY (STORY-013 gate r1).
+    assert calls["limit_concurrency"] == 64

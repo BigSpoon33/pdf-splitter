@@ -3,6 +3,12 @@
 # Interpolated variables come from deploy/.env (see deploy/.env.example) or the environment; PDFSPLIT_IP_SALT
 # has no default on purpose. The fixed project name keeps a bare `docker compose` from defaulting to the
 # directory name ("deploy"), which other stacks on a shared host may already use.
+#
+# Two networks (gate r1): `edge` is where caddy publishes 80/443 and reaches the ACME servers; `backend` is
+# `internal` — caddy and the api, no route out — so the api (which opens uploads in a subprocess, ADR-005) can
+# reach nothing but caddy's replies. The worker has no network at all. Both carry IPv6 (a ULA /64): a v6
+# visitor is then DNAT'd to caddy's own v6 address and forwarded as their real address, instead of every v6
+# visitor arriving from the bridge gateway and sharing one rate bucket.
 name: pdfsplit
 
 x-pdfsplit-env: &pdfsplit-env
@@ -12,6 +18,8 @@ x-pdfsplit-env: &pdfsplit-env
   PDFSPLIT_MAX_BYTES: ${PDFSPLIT_MAX_BYTES:-209715200}
   PDFSPLIT_TTL_HOURS: ${PDFSPLIT_TTL_HOURS:-24}
   PDFSPLIT_MIN_FREE_GB: ${PDFSPLIT_MIN_FREE_GB:-2}
+  PDFSPLIT_MAX_UPLOADS: ${PDFSPLIT_MAX_UPLOADS:-4}
+  PDFSPLIT_LIMIT_CONCURRENCY: ${PDFSPLIT_LIMIT_CONCURRENCY:-64}
   # The api's rate window keys on this; the worker gets it too because the janitor prunes those rows.
   PDFSPLIT_IP_SALT: ${PDFSPLIT_IP_SALT:?set PDFSPLIT_IP_SALT (deploy/.env) - the secret under the IP hash}
   PDFSPLIT_PUBLIC_URL: ${PDFSPLIT_PUBLIC_URL:-https://localhost}
@@ -24,8 +32,9 @@ x-python: &python
   restart: unless-stopped
   read_only: true
   tmpfs:
-    # PyMuPDF and Python want a scratch directory; every real write goes to the volume.
-    - /tmp
+    # Scratch only, and small: uploads spool under /jobs/.spool on the volume (upload.py `spooling_to`), so a
+    # tmpfs here can never again grow into RAM the memory limit counts.
+    - /tmp:size=64m
   cap_drop: [ALL]
   security_opt:
     - no-new-privileges:true
@@ -50,10 +59,15 @@ services:
       - caddy_data:/data
       - caddy_config:/config
     networks:
-      pdfsplit:
+      edge:
+        # Joined first, so the published ports and the default route belong to the network that has one.
+        priority: 100
+      backend:
         # Fixed on purpose: the api believes X-Forwarded-For only from PDFSPLIT_TRUSTED_PROXY, which must be
         # the address the api's socket sees, and a service name is not what request.client.host reports.
+        # Caddy resolves `api` to A and AAAA records and may connect over either, hence one address per family.
         ipv4_address: ${PDFSPLIT_CADDY_IP:-172.30.0.10}
+        ipv6_address: ${PDFSPLIT_CADDY_IP6:-fd30:5eaf:9a13::10}
     depends_on:
       api:
         condition: service_healthy
@@ -64,15 +78,18 @@ services:
   api:
     <<: *python
     command: ["api", "--host", "0.0.0.0", "--port", "8000"]
-    # Reachable from caddy only; nothing publishes 8000 on the host (the smoke override does, on loopback).
+    # Reachable from caddy only; nothing publishes 8000 on the host (Docker would not bind a port on an
+    # internal network anyway — the smoke test reaches it from a one-off container on `backend`).
     expose: ["8000"]
     environment:
       <<: *pdfsplit-env
-      PDFSPLIT_TRUSTED_PROXY: ${PDFSPLIT_CADDY_IP:-172.30.0.10}
+      PDFSPLIT_TRUSTED_PROXY: ${PDFSPLIT_CADDY_IP:-172.30.0.10},${PDFSPLIT_CADDY_IP6:-fd30:5eaf:9a13::10}
     volumes:
       - jobs:/jobs
-    networks: [pdfsplit]
+    networks: [backend]
     mem_limit: 2g
+    # No swap: a container that hits its limit is killed and restarted, not left to page the VM to a crawl.
+    memswap_limit: 2g
     healthcheck:
       # The image has no curl; the venv python is on PATH.
       test: ["CMD", "python", "-c", "import urllib.request as u; assert b'\"ok\":true' in u.urlopen('http://127.0.0.1:8000/api/health', timeout=5).read()"]
@@ -92,6 +109,7 @@ services:
     network_mode: none
     # Two sandboxed tasks at RLIMIT_AS 2 GB each can't both be resident at once on a 4-8 GB VM.
     mem_limit: 3g
+    memswap_limit: 3g
     depends_on: [api]
 
 volumes:
@@ -100,8 +118,18 @@ volumes:
   caddy_config:
 
 networks:
-  pdfsplit:
+  # Explicit subnets, v4 and v6, so caddy's fixed backend address is meaningful and neither network lands on
+  # a range another stack's bridge already uses. Change a pair together (deploy/.env).
+  edge:
+    enable_ipv6: true
     ipam:
       config:
-        # Its own subnet, so caddy's fixed address is meaningful and never collides with another stack's bridge.
+        - subnet: ${PDFSPLIT_EDGE_SUBNET:-172.30.1.0/24}
+        - subnet: ${PDFSPLIT_EDGE_SUBNET6:-fd30:5eaf:9a13:1::/64}
+  backend:
+    internal: true
+    enable_ipv6: true
+    ipam:
+      config:
         - subnet: ${PDFSPLIT_SUBNET:-172.30.0.0/24}
+        - subnet: ${PDFSPLIT_SUBNET6:-fd30:5eaf:9a13::/64}

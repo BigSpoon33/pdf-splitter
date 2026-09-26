@@ -1,18 +1,26 @@
-"""`POST /api/jobs`: stream the upload to disk under a size cap, preflight it, then queue an analyze job."""
+"""`POST /api/jobs`: refuse what can be refused from the headers alone (`UploadGuard`), stream the upload to disk
+under a size cap, preflight it, then queue an analyze job."""
 
 from __future__ import annotations
 
 import json
 import logging
+import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import unicodedata
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Form, Request, UploadFile
 from fastapi.responses import JSONResponse
+from starlette.concurrency import run_in_threadpool
+from starlette.datastructures import Headers
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from . import ratelimit
 from .config import Settings
@@ -29,13 +37,127 @@ PREFLIGHT_TIMEOUT = 10.0
 Mode = Literal["chapters", "ranges"]
 MAX_FILENAME = 120
 DEFAULT_FILENAME = "document.pdf"
+# What multipart wraps around the file — boundaries, the part headers (a long filename), the `mode` field: a
+# Content-Length past MAX_BYTES by more than this cannot be a file under the cap. The streaming copy still
+# decides the exact cap for anything that passes here.
+ENVELOPE = 64 * 1024
+UPLOAD_PATH = "/api/jobs"
+MULTIPART = "multipart/form-data"
+RETRY_AFTER_OVERLOADED = "5"
 
 # The preflight's own codes; anything else it prints is `unreadable`.
 PREFLIGHT_CODES = frozenset({"not_pdf", "encrypted", "too_many_pages", "no_text_layer", "unreadable"})
-STATUS = {"too_large": 413, "too_many_pages": 413, "rate_limited": 429, "disk_full": 503}
+STATUS = {"too_large": 413, "too_many_pages": 413, "rate_limited": 429, "disk_full": 503, "overloaded": 503}
 
 log = logging.getLogger(__name__)
 router = APIRouter()
+
+
+@contextmanager
+def spooling_to(directory: Path) -> Iterator[None]:
+    """Starlette spools every multipart part through `tempfile` (1 MiB in memory, then a temporary file), so while
+    the app runs the process's temporary directory is this one on the jobs volume: in the container `/tmp` is a
+    tmpfs the memory limit pays for, and a few big uploads in flight were enough to OOM-kill the api (gate r1).
+    Children (the preflight, previews) inherit it through TMPDIR. Restored on shutdown so nothing outlives the app."""
+    directory.mkdir(parents=True, exist_ok=True)
+    previous, previous_env = tempfile.tempdir, os.environ.get("TMPDIR")
+    tempfile.tempdir = os.environ["TMPDIR"] = str(directory)
+    try:
+        yield
+    finally:
+        tempfile.tempdir = previous
+        if previous_env is None:
+            os.environ.pop("TMPDIR", None)
+        else:
+            os.environ["TMPDIR"] = previous_env
+
+
+class UploadGuard:
+    """Pure ASGI, around the app, for `POST /api/jobs` only: everything that can refuse an upload without reading
+    it — the declared size, the in-flight cap, the client's rate slot, the disk guard — runs here, BEFORE the
+    multipart parser has spooled a byte, so a flood of big bodies costs the api a header read each. A refusal
+    closes the connection, or the client would keep sending a body nobody reads. The route gets the client's hash
+    through `request.state.client_hash` and never claims a slot of its own."""
+
+    def __init__(self, app: ASGIApp, settings: Settings) -> None:
+        self.app, self.settings = app, settings
+        self.in_flight = 0
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http" or scope["method"] != "POST" or scope["path"] != UPLOAD_PATH:
+            await self.app(scope, receive, send)
+            return
+        response = self.refuse_by_headers(Headers(scope=scope))
+        if response is None and self.in_flight >= self.settings.max_uploads:
+            response = refuse("overloaded", {"Retry-After": RETRY_AFTER_OVERLOADED})
+        if response is not None:
+            await response(scope, receive, send)
+            return
+        # Reserved before the first await: two requests must not both find room under the cap.
+        self.in_flight += 1
+        try:
+            # sqlite and statvfs block; the event loop must stay free for the bodies already streaming.
+            response = await run_in_threadpool(self.admit, Request(scope))
+            if response is not None:
+                await response(scope, receive, send)
+                return
+            await self.app(scope, receive, send)
+        finally:
+            self.in_flight -= 1
+
+    def refuse_by_headers(self, headers: Headers) -> JSONResponse | None:
+        declared = headers.get("content-length")
+        if declared is None:
+            # Chunked: the size can't be checked up front, and every real client sends one. No body at all has
+            # nothing to spool; the route answers it (`not_pdf`).
+            if "transfer-encoding" in headers:
+                return refuse("invalid", status=411, message="Uploads need a Content-Length.")
+            return None
+        if not declared.isdigit():
+            return refuse("invalid")
+        if int(declared) > self.settings.max_bytes + ENVELOPE:
+            return refuse("too_large")
+        # Only multipart streams to a spool; the urlencoded parser would hold the whole body in memory.
+        if int(declared) and not headers.get("content-type", "").lower().startswith(MULTIPART):
+            return refuse("invalid", status=415, message="Uploads are multipart/form-data.")
+        return None
+
+    def admit(self, request: Request) -> JSONResponse | None:
+        settings = self.settings
+        # The window counts the attempt (a refused file still costs a copy and a preflight), and the slot is
+        # claimed in the same transaction that counts the window, so parallel uploads from one client can't all
+        # slip past a still-empty count. It comes before the disk guard, so a slot is spent on an attempt the
+        # guard then refuses: a client retrying into a full disk burns its hour, which is the cheaper failure
+        # than a guard that lets a burst through.
+        store = Store(settings.db_path)
+        try:
+            client, wait = ratelimit.take_slot(
+                store,
+                ratelimit.client_ip(request, settings.trusted_proxy),
+                settings.rate_per_hour,
+                secret=settings.ip_salt,
+            )
+        finally:
+            store.close()
+        if wait is not None:
+            log.info("upload refused: rate limited (%s, retry after %ds)", client[:8], wait)
+            return refuse("rate_limited", {"Retry-After": str(wait)})
+        if disk_full(settings):
+            log.warning("upload refused: less than %s GB free", settings.min_free_gb)
+            return refuse("disk_full")
+        request.state.client_hash = client
+        return None
+
+
+def refuse(
+    code: str, headers: dict[str, str] | None = None, *, status: int | None = None, message: str | None = None
+) -> JSONResponse:
+    """A guard rejection: the usual body, plus `Connection: close` so the unread body stops at the socket."""
+    return JSONResponse(
+        {"code": code, "message": message or MESSAGES[code]},
+        status_code=status or STATUS.get(code, 400),
+        headers={"Connection": "close", **(headers or {})},
+    )
 
 
 def disk_full(settings: Settings) -> bool:
@@ -114,20 +236,9 @@ def _accept(
 ) -> JSONResponse:
     if file is None:
         return reject("not_pdf")
-    # Both guards before anything touches the disk: a refused upload leaves no directory and no row. The window
-    # counts the attempt (a refused file still costs a copy and a preflight), and the slot is claimed in the same
-    # transaction that counts the window, so parallel uploads from one client can't all slip past a still-empty
-    # count. It comes first, so a slot is spent on an attempt the disk guard then refuses: a client retrying into
-    # a full disk burns its hour, which is the cheaper failure than a guard that lets a burst through.
-    client, wait = ratelimit.take_slot(
-        store, ratelimit.client_ip(request, settings.trusted_proxy), settings.rate_per_hour, secret=settings.ip_salt
-    )
-    if wait is not None:
-        log.info("upload refused: rate limited (%s, retry after %ds)", client[:8], wait)
-        return reject("rate_limited", headers={"Retry-After": str(wait)})
-    if disk_full(settings):
-        log.warning("upload refused: less than %s GB free", settings.min_free_gb)
-        return reject("disk_full")
+    # The slot and the disk guard ran in UploadGuard before the body was read; claiming again here would charge
+    # every upload twice. A refused upload still leaves no directory and no row.
+    client: str = request.state.client_hash
     job_id = new_job_id()
     job_dir = settings.jobs_dir / job_id
     part = job_dir / "source.pdf.part"
