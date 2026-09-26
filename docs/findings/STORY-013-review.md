@@ -33,3 +33,6 @@ Verified: no receive() cancelled (12/12 uploads byte-identical; parent-with-watc
 1. [correctness] body_guard.py:75-76 (and the older :109 408 line) — cap-refusal log lines print the raw, unescaped scope["path"] → job ids (the credential) and forged log lines reach the api log. Reproduced.
 2. [contract-divergence] upload.py:106,113 + body_guard.py:71-76 vs ADR-007 — refusal logs print a prefix of the UNDATED client_key (never-rotating salt) → links an address across days; ADR-007 as-built line stale. Reproduced.
 Note (spec scope, → STORY-017): several /64s can also fill uvicorn's connection ceiling (8 keys × 8 bodies = 64).
+
+## Round 4b (orchestrator check of edb1040) — PASSED
+Every refusal log line uses `loggable_path` and a dated `log_tag`/`take_slot` hash; `client_key` never logged; both new tests pass (and fail on 8b0dfed per the implementer). Auto-review trail: r1 3 confirmed (+hardening) → 6ef0253/3396e1a; r2 5 confirmed → 897a94d; r3 6 findings incl. data loss → Shuma chose "simplify" → 8b0dfed; r4 2 log regressions → edb1040. Residual multi-/64 risk → STORY-017 (backlog).
