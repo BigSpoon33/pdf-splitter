@@ -175,7 +175,7 @@ janitor ──every 5 min──▶ delete expired /jobs/<id> + row
 |------|-------|---------------|----------------|
 | Job row | `{id, state, kind, created_at, expires_at, ip_hash, filename, pages, bytes, progress, total, message, error_code}` | api | api, worker, janitor |
 | Analysis | `{pages, pageLabels[], size:{W,H}[], outline:{levels:[n1,n2,n3], items:[{name,page,heading,level,y?}]}, headings:{body_size, levels:[{size,count}], candidates:[{name,page,heading,size,level,y,col}]}, suggested:{source, level}}` | worker/analyze | web |
-| Plan | `{source:"outline"\|"headings"\|"manual", settings:{column_split, single_column, header_band, footer_band, heading_min_size, heading_wrap_gap?}, sections:[{name, page, heading}], overrides:{[sectionIndex]: {startCut, startCol, endCut, endCol}}}` | web | api (validate) → worker/cut, preview |
+| Plan | `{source:"outline"\|"headings"\|"manual"\|"ranges", settings:{column_split, single_column, header_band, footer_band, heading_min_size, heading_wrap_gap?}, sections:[{name, page, heading, endPage?}], overrides:{[sectionIndex]: {startCut, startCol, endCut, endCol}}}` | web | api (validate) → worker/cut, preview |
 | Section plan (preview) | the engine's `_plan_view`: `{pages:[a,b], startCut, startCol, endCut, endCol, flags[], rects:[[sheet,[x0,y0,x1,y1]]]}` | preview subprocess | PagePreview |
 | Manifest | the engine's `manifest.json` rows + `{file}` | worker/cut | download zip |
 
@@ -381,3 +381,10 @@ STORY-014 deploy: public VM + domain + terms page + uptime ntfy    (after 013; n
   overlay math (`rects` from `cut_rects`, hatched regions, y-ruler). STORY-010 should port the
   overlay logic, not the server.
 - Reuse `index.page_lines` for heading detection, and don't add a second text-extraction path.
+
+### ADR-009: Page-range mode is a Plan source, not a new pipeline
+
+- **Status:** Accepted (Shuma, 2026-09-25 — focused product, two entry points)
+- **Context:** Visitors expect a plain "split by page ranges" next to the smart chapter split.
+- **Decision:** Same upload → analyze → review → cut → download pipeline. The Plan gets `source: "ranges"` and sections carry an optional `endPage` (inclusive). In `ranges` mode every section is a whole-page span `[page, endPage]` (no heading search, no column/band cuts, overrides ignored); ranges may leave gaps or overlap. The cut task handles `ranges` without the headings engine: it copies the page spans with PyMuPDF (`insert_pdf(from_page, to_page)`) — no redaction, no verify — and writes the same ZIP + manifest shape. The SPA's home page routes to `/j/<id>?mode=ranges` after upload; the review screen for a ranges job shows the range editor instead of the source picker/preview.
+- **Consequences:** The simple tool reuses every safety property (caps, sandbox, 24 h deletion, capability URLs). Other hub tools later follow the same pattern (a Plan source or a new job kind).

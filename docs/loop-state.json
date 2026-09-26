@@ -5,6 +5,7 @@
   "queue": [
     "STORY-010",
     "STORY-011",
+    "STORY-015",
     "STORY-012",
     "STORY-013"
   ],
@@ -68,5 +69,6 @@
   "engine_release": "v0.4.1 (8e52cc3) on origin+gitea; engine main still 6fd22fc \u2014 ff-merge feature/web-mode at sprint end",
   "policy": {
     "fix_regressions": "Shuma 2026-09-25: for the rest of this run, a retry that fails ONLY on a confirmed regression introduced by its own fix gets one more narrow fix + re-review without asking. Halt and ask if a story fails twice on anything else, or if the spec/architecture looks wrong. WIDENED 2026-09-25 (Shuma): an incomplete fix of the SAME confirmed finding, or a vacuous test of it, is also auto-fixed once. Still halt on a new kind of failure or a wrong spec/architecture."
-  }
+  },
+  "product": "Focused tool (Shuma 2026-09-25): 'split your book into chapters' in the iLovePDF/Smallpdf upload\u2192work\u2192download style; home page offers chapters + page ranges (STORY-015); hub tools = v2"
 }

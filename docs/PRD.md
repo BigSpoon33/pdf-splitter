@@ -29,6 +29,8 @@ someone who can write a TOML layout profile and a JSON entry list and run a Pyth
 
 ### In Scope
 
+- **Product framing (Shuma, 2026-09-25): a focused tool — "split your book into chapters" — in the upload → work → download → auto-delete style of iLovePDF/Smallpdf, NOT a multi-tool hub (yet).** The home page offers two entry points: **Split by chapters** (the smart, content-aware tool below) and **Split by page ranges** (the plain split people expect: ranges like `1-10, 11-25, 40-52` or every N pages; whole pages, no detection, no column cutting).
+
 - A public web page. Drag in a PDF (text-layer PDFs only), then watch upload and analysis progress.
 - **Three ways to find sections**, switchable in the UI:
   1. The **PDF outline/bookmarks**, with the user picking the outline level (chapters vs sections).
@@ -68,6 +70,7 @@ someone who can write a TOML layout profile and a JSON entry list and run a Pyth
 | AC-10 | Every upload and its outputs are deleted ≤ 24 h after upload; "Delete now" deletes immediately | Set the TTL to 1 min in staging; after the janitor runs, the job dir is gone and the job URL returns 410 |
 | AC-11 | One client cannot starve the service | The 7th upload from one IP within an hour gets 429; at most `WORKERS` jobs process concurrently and the others show "queued, position N" |
 | AC-12 | A malicious/malformed PDF cannot hang or take down the service | A PDF that makes MuPDF loop is killed at the job timeout, marked `failed`, and the next job runs |
+| AC-14 | The home page offers "Split by chapters" and "Split by page ranges"; a range job cuts whole pages exactly as typed (gaps and overlaps allowed) | Upload a 30-page PDF via page ranges, enter `1-10, 15-20, 5-7`; the ZIP holds 3 PDFs of 10, 6 and 3 pages with those pages; "every 10 pages" on the same file gives 3 PDFs |
 | AC-13 | The site is served on a public HTTPS domain from one VM, deployed by one command | `curl -I https://<domain>/` gives 200 with a valid cert; `./deploy.sh` redeploys |
 
 ## Constraints
@@ -104,7 +107,7 @@ someone who can write a TOML layout profile and a JSON entry list and run a Pyth
 
 **MVP includes:** upload → analyze (outline + heading candidates) → review (switch source, edit list, layout settings, cut preview + drag) → cut → ZIP/PDF download → 24 h deletion. Anonymous + capped, deployed on one public VM.
 
-**V2 and beyond:** OCR for scans (ocrmypdf), accounts + saved presets, paid tier (bigger caps), labels-mode "entry header block" detection for reference books, per-section Markdown/text export, an API for programmatic use, and multi-file batches.
+**V2 and beyond:** a multi-tool hub (merge, compress, rotate, extract, convert to/from Office formats — each a new job kind on the same pipeline); OCR for scans (ocrmypdf), accounts + saved presets, paid tier (bigger caps), labels-mode "entry header block" detection for reference books, per-section Markdown/text export, an API for programmatic use, and multi-file batches.
 
 ## Notes
 
