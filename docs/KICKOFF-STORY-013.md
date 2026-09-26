@@ -312,3 +312,35 @@ One commit: `fix: STORY-013 - the SPA knows the overloaded code`
    refusals spend a slot).
 All suites green (pytest, ruff, web check/test/build); ISOLATION rules unchanged (own project, subnets
 NOT 172.26.x — multica_default holds 172.26.0.0/16 — own ULAs, high ports, `docker ps` identical).
+
+## Attempt 3 — SIMPLIFY (Shuma's decision, 2026-09-26) — READ THIS FIRST
+
+Round 3 (`docs/findings/STORY-013-review.md` § Round 3) showed the in-app slow-body watchdog loses data.
+Shuma chose to simplify. One commit on the feature/mvp tip:
+`fix: STORY-013 - gate r3: slow bodies bounded at the proxy, no in-app watchdog; per-client body caps; correct host firewall rules`
+1. **Remove the in-app upload watchdog** (Progress/wait_for around receive, `too_slow` 408 from the
+   guard, MIN_UPLOAD_RATE config). The upload path must never cancel a `receive()`. Keep: Content-Length
+   pre-check, rate slot before the body, spool on the jobs volume, server cap (4) and per-client cap (2).
+   Keep the `too_slow` error code only if something still emits it; otherwise remove it from errors.py
+   AND errors.ts (keep the parity test green).
+2. **Bound bodies at Caddy**: global `servers { timeouts { read_header 15s  read_body 30m  idle 2m } }`
+   (read_body generous enough for 200 MiB at ~115 KiB/s); document the numbers and the trade-off.
+   Verify live that a steady upload at ~150 KiB/s of 64 MiB completes, and that a stalled body is cut at
+   the configured bound (use a short override in the smoke, e.g. 20 s, so the smoke stays fast).
+3. **Per-client cap across midnight**: key the in-flight caps with the same day-spanning identity the
+   rate window uses (e.g. the canonical `rate_key` salted independently of the date, or count both
+   window hashes) so 00:00 UTC never grants a fresh cap. Test with a frozen clock.
+4. **BodyGuard**: keep 4 MiB + 20 s; add a per-client concurrent-body cap (config, default 8) → 429 with
+   Retry-After, unread; on a mid-body disconnect send nothing *and* make the access_log path not log a 500
+   (e.g. return a 499-style silent close the access log treats as client-closed, or restructure so
+   call_next isn't left without a response). Tests: re-opened held PUTs from one client can't fill
+   limit_concurrency (other clients' /api/health stays 200); disconnect → no ERROR/traceback in logs.
+5. **Correct host firewall docs** (README § Deploy + findings handoff): ufw v4 in before.rules
+   `-A ufw-before-input …`, v6 in before6.rules `-A ufw6-before-input …`; nftables as a SEPARATE file
+   (e.g. /etc/nftables.d/pdfsplit.nft with its own `table inet pdfsplit` + input chain hook priority
+   filter - 1) loaded by `nft -f` of THAT file — never reload /etc/nftables.conf (its `flush ruleset`
+   wipes Docker's tables). Validate both in throwaway `unshare -rn` namespaces with the stock files.
+6. **Document the residual risk** (README/Architecture ADR-005/ADR-008 + findings): several /64s can
+   hold the 4 upload slots for up to the Caddy read_body bound; follow-up story STORY-017 (per-IP
+   connection limiting: CrowdSec/fail2ban or a Caddy rate-limit module).
+All suites green (pytest, ruff, web check/test/build). ISOLATION rules unchanged.

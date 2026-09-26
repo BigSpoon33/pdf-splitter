@@ -1,7 +1,7 @@
 {
   "mode": "auto",
   "active_story": "STORY-013",
-  "loop_phase": "halted",
+  "loop_phase": "implement",
   "queue": [
     "STORY-013"
   ],
@@ -39,7 +39,7 @@
     "STORY-015": 2,
     "STORY-012": 3,
     "STORY-016": 2,
-    "STORY-013": 3
+    "STORY-013": 4
   },
   "failed": {},
   "consecutive_failures": 0,
@@ -55,14 +55,14 @@
   "run": {
     "started": "2026-09-25",
     "runner": "in-session background subagent (tmux --dangerously-skip-permissions route denied by the auto-mode classifier)",
-    "active": "STORY-013 (2c: auto-fix)",
-    "halt_reason": "STORY-013 r3: in-app slow-body hardening keeps introducing subtle bugs (incl. upload data loss) \u2014 design decision needed"
+    "active": "STORY-013 (attempt 3: simplify, Shuma-approved)"
   },
   "last_updated": "2026-09-25",
   "exceptions": {
     "STORY-002": "third attempt approved by Shuma 2026-09-25; heuristic edge cases beyond the r2 root cause become follow-ups",
     "STORY-005": "third attempt approved by Shuma 2026-09-25",
-    "STORY-006": "third attempt approved by Shuma 2026-09-25"
+    "STORY-006": "third attempt approved by Shuma 2026-09-25",
+    "STORY-013": "Shuma 2026-09-26: simplify \u2014 proxy-bounded bodies, no in-app watchdog; residual multi-/64 risk \u2192 STORY-017 backlog"
   },
   "followups": [
     "detection tuning: 4+-line wrapped headings dropped (MAX_WRAP_LINES), size-scaled default wrap_gap feeding heading_wrap_gap (STORY-009 settings), inline big glyph promotes body line \u2014 see STORY-002-review.md r3",
@@ -73,7 +73,8 @@
     "heading re-detection under user wrap gap / smaller bands needs a /detect route",
     "picker state not persisted in the Plan (reload starts from suggested)",
     "2,000-section preview \u224818\u201320 s (at the 20 s preview timeout)",
-    "landed rename triggers an extra preview (7\u20139 s on 1,654 sections): key/send the list without names"
+    "landed rename triggers an extra preview (7\u20139 s on 1,654 sections): key/send the list without names",
+    "STORY-017 (backlog): per-IP connection limiting at the edge"
   ],
   "engine_release": "v0.4.2 (116a4bb) on origin+gitea; engine main still 6fd22fc \u2014 ff-merge feature/web-mode (tip 4f1644a) at sprint end",
   "policy": {
