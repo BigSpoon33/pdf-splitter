@@ -8,3 +8,6 @@ Coverage highlights: Bun-only (single text bun.lock, frozen install reproducible
 1. [correctness] web/src/components/JobStatus.svelte:70-71 (hiccup :37, only rendered :106-108) — before the first successful poll every transient error is swallowed: "Loading…" forever, never an error/"Retrying…" (Architecture § web Failure mode). CONFIRMED (vitest probe + headless Chromium with API down).
 2. [contract-divergence] errors.ts:12 no_text_layer wording vs PRD AC-8's example — REFUTED (AC-8's criterion is "explanatory message"; the quoted text is illustrative). Orchestrator copy decision anyway: say OCR isn't supported (see retry kickoff).
 3. [correctness] JobStatus.svelte:63,67 — `active`/aria-busy ignores `fatal`: after 404/410 following a running status, aria-busy stays "true" forever. CONFIRMED.
+
+## Round 2 (re-review of c3bc2e5) — PASSED
+Auto-review: 2 confirmed → fixed c3bc2e5, re-review CLEAN. Live headless Chromium: API down → message + Retrying… (no bare Loading…), API up → job UI; aria-busy false after 410/terminal; 0 polls after stop/unmount; OCR copy live on upload.
