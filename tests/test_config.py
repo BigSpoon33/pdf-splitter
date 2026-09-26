@@ -8,8 +8,8 @@ from pdf_splitter.config import Settings
 
 
 def test_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
-    for name in ("JOBS_DIR", "MAX_BYTES", "MAX_PAGES", "TTL_HOURS", "WORKERS", "RATE_PER_HOUR",
-                 "ANALYZE_TIMEOUT", "CUT_TIMEOUT", "PUBLIC_URL"):
+    for name in ("JOBS_DIR", "MAX_BYTES", "MAX_PAGES", "TTL_HOURS", "WORKERS", "RATE_PER_HOUR", "MIN_FREE_GB",
+                 "TRUSTED_PROXY", "IP_SALT", "MAX_OUTPUT_BYTES", "ANALYZE_TIMEOUT", "CUT_TIMEOUT", "PUBLIC_URL"):
         monkeypatch.delenv(f"PDFSPLIT_{name}", raising=False)
     s = Settings()
     assert s.jobs_dir == Path.cwd() / "jobs"
@@ -18,6 +18,10 @@ def test_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert s.ttl_hours == 24
     assert s.workers == 2
     assert s.rate_per_hour == 6
+    # STORY-012 (PRD Q-3: the caps stand): 2 GB free, no proxy, a per-process salt, 2 GB of output per cut.
+    assert s.min_free_gb == 2
+    assert s.trusted_proxy is None and s.ip_salt is None
+    assert s.max_output_bytes == 2 * 1024 * 1024 * 1024
     assert s.analyze_timeout == 300
     assert s.cut_timeout == 600
     assert s.public_url == "http://localhost:8000"
@@ -43,6 +47,10 @@ def test_env_prefix(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         "TTL_HOURS": "1",
         "WORKERS": "4",
         "RATE_PER_HOUR": "60",
+        "MIN_FREE_GB": "0.5",
+        "TRUSTED_PROXY": "172.18.0.2",
+        "IP_SALT": "shared-secret",
+        "MAX_OUTPUT_BYTES": "300000",
         "ANALYZE_TIMEOUT": "30",
         "CUT_TIMEOUT": "60",
         "PUBLIC_URL": "https://split.example",
@@ -53,6 +61,7 @@ def test_env_prefix(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     assert s.jobs_dir == tmp_path
     assert (s.max_bytes, s.max_pages, s.ttl_hours, s.workers) == (1000, 10, 1, 4)
     assert (s.rate_per_hour, s.analyze_timeout, s.cut_timeout) == (60, 30, 60)
+    assert (s.min_free_gb, s.trusted_proxy, s.ip_salt, s.max_output_bytes) == (0.5, "172.18.0.2", "shared-secret", 300000)
     assert s.public_url == "https://split.example"
 
 

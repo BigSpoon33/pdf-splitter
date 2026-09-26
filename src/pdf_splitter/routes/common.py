@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import shutil
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -10,10 +12,9 @@ from pydantic import ValidationError
 
 from ..config import Settings
 from ..errors import ApiError, field_errors
-from ..files import read_json
 from ..store import Store, now_ts
 
-EDITABLE = ("review", "done")      # the states a Plan may change in, and a cut may start from
+EDITABLE = ("review", "done")      # the states a Plan may change in, and a cut may start from; plus a failed cut
 BUSY = ("queued", "running")
 
 
@@ -47,17 +48,44 @@ def require_analyzed(job: dict[str, Any]) -> None:
         raise ApiError(409, "not_ready")
 
 
+def editable(job: dict[str, Any]) -> bool:
+    """Architecture § Job states: a failed CUT keeps its analysis and plan, so it is edited and re-cut like
+    `review`; a failed analyze has nothing to edit and stays terminal."""
+    return job["state"] in EDITABLE or (job["state"] == "failed" and job["kind"] == "cut")
+
+
 def require_editable(job: dict[str, Any]) -> None:
-    if job["state"] not in EDITABLE:
+    if not editable(job):
         raise ApiError(409, "busy" if job["state"] in BUSY else "not_ready")
 
 
-def saved_plan(settings: Settings, job: dict[str, Any]) -> dict[str, Any]:
+def read_bytes(path: Path) -> bytes:
+    return path.read_bytes()
+
+
+def vanished(store: Store, settings: Settings, job: dict[str, Any]) -> ApiError:
+    """A job file that is not there: a DELETE (or the janitor) landed after `load_job` — the row says so, and
+    whatever a late write brought back goes with it — is the 410 that DELETE earned; otherwise the job is simply
+    not that far yet."""
+    row = store.get_job(job["id"])
+    if row is not None and row["state"] == "deleted":
+        shutil.rmtree(job_dir(settings, job), ignore_errors=True)
+    if row is None or gone(row):
+        return ApiError(410, "expired")
+    return ApiError(409, "not_ready")
+
+
+def job_file(store: Store, settings: Settings, job: dict[str, Any], name: str) -> bytes:
+    """One of the job's JSON files, read — not `exists()` then read, which a DELETE in between turned into a 500."""
+    try:
+        return read_bytes(job_dir(settings, job) / name)
+    except FileNotFoundError:
+        raise vanished(store, settings, job) from None
+
+
+def saved_plan(store: Store, settings: Settings, job: dict[str, Any]) -> dict[str, Any]:
     require_analyzed(job)
-    path = job_dir(settings, job) / "plan.json"
-    if not path.exists():
-        raise ApiError(409, "not_ready")
-    return read_json(path)
+    return json.loads(job_file(store, settings, job, "plan.json").decode("utf-8"))
 
 
 def invalid(e: ValidationError, where: str = "body") -> ApiError:

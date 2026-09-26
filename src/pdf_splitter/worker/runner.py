@@ -21,6 +21,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from .. import janitor
 from ..access_log import loggable_tail
 from ..config import Settings
 from ..store import Store, log_id
@@ -33,13 +34,17 @@ TaskArgs = Callable[[str, str], list[str]]
 
 POLL_S = 1.0
 SWEEP_EVERY_S = 30.0
+JANITOR_EVERY_S = 300.0
 REQUEUED = "requeued"          # error_code marker on a row the sweep has already re-queued once
 # RLIMIT_CPU ends a process with SIGXCPU (soft) or SIGKILL (hard; also the kernel OOM killer). Python
 # ignores SIGXFSZ, but a task that re-enables it dies by it.
 RESOURCE_SIGNALS = frozenset({signal.SIGXCPU, signal.SIGKILL, signal.SIGXFSZ})
+# The task's own result codes that name a cause (worker/task.py); anything else it reports is `internal`.
+TASK_CODES = frozenset({"resources", "too_large_output"})
 MESSAGES = {
     "timeout": "The job took too long and was stopped.",
     "resources": "The PDF needed more memory or processing than allowed.",
+    "too_large_output": "The cut would write more than the output limit. Split into fewer or smaller sections.",
     "internal": "Something went wrong while processing the PDF.",
 }
 
@@ -59,8 +64,8 @@ def classify(returncode: int, stdout: bytes) -> str | None:
         return None
     if returncode < 0 and -returncode in RESOURCE_SIGNALS:
         return "resources"
-    if isinstance(result, dict) and result.get("code") == "resources":
-        return "resources"
+    if isinstance(result, dict) and result.get("code") in TASK_CODES:
+        return result["code"]
     return "internal"
 
 
@@ -114,7 +119,12 @@ class Runner:
     def _spawn(self, kind: str, job_id: str) -> tuple[str | None, int | None, bytes]:
         timeout = self.timeout(kind)
         cmd = sandbox.command(sandbox.limits(timeout), self.task(kind, job_id))
-        env = {**os.environ, "PDFSPLIT_JOBS_DIR": str(self.settings.jobs_dir)}
+        # The task reads its Settings from the environment: the two it needs beyond the defaults go with it.
+        env = {
+            **os.environ,
+            "PDFSPLIT_JOBS_DIR": str(self.settings.jobs_dir),
+            "PDFSPLIT_MAX_OUTPUT_BYTES": str(self.settings.max_output_bytes),
+        }
         # A session of its own, so a timeout kills everything the task started, not just its pid.
         proc = subprocess.Popen(
             cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
@@ -182,8 +192,27 @@ class Runner:
         finally:
             store.close()
 
+    # ── the janitor ─────────────────────────────────────────────────────────────────────────────────────
+
+    def _janitor_loop(self, stop: threading.Event) -> None:
+        """`janitor.sweep` at start and every JANITOR_EVERY_S, on its own thread and Store so a long removal never
+        delays a claim; any failure is logged and the next pass retries (Architecture: logs and continues)."""
+        store = Store(self.settings.db_path)
+        try:
+            while not stop.is_set():
+                try:
+                    janitor.sweep(store, self.settings)
+                except Exception:  # noqa: BLE001 - e.g. sqlite busy past its timeout
+                    log.error("janitor error: %s", loggable_tail(traceback.format_exc().encode()))
+                stop.wait(JANITOR_EVERY_S)
+        finally:
+            store.close()
+
+    # ── serving ─────────────────────────────────────────────────────────────────────────────────────────
+
     def serve(self, stop: threading.Event) -> None:
-        """Run `settings.workers` claim loops until `stop` is set; each finishes its current job first."""
+        """Run `settings.workers` claim loops plus the janitor until `stop` is set; each finishes its current
+        job first."""
         self.settings.jobs_dir.mkdir(parents=True, exist_ok=True)
         store = Store(self.settings.db_path)
         try:
@@ -196,9 +225,11 @@ class Runner:
             threading.Thread(target=self._loop, args=(stop,), name=f"worker-{i}", daemon=True)
             for i in range(max(1, self.settings.workers))
         ]
+        threads.append(threading.Thread(target=self._janitor_loop, args=(stop,), name="janitor", daemon=True))
         for t in threads:
             t.start()
-        log.info("worker started: %d slot(s), kinds %s", len(threads), ",".join(self.kinds))
+        log.info("worker started: %d slot(s), kinds %s, janitor every %ds", len(threads) - 1, ",".join(self.kinds),
+                 int(JANITOR_EVERY_S))
         for t in threads:
             t.join()
 

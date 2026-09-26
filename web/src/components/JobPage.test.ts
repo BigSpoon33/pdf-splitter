@@ -51,6 +51,12 @@ function fakeApi(start: Partial<JobStatus> = {}) {
      * before the page heard back (the r2 stranded-Split case).
      */
     straightTo: null as 'review' | 'done' | null,
+    /**
+     * The next cut fails with this worker code (STORY-012's recoverable failed cut, ::test_a_failed_cut_is_recut_from_the_same_page
+     * and ::test_a_failed_cut_edited_returns_to_review): the row ends `failed`/`cut` with the runner's message, the
+     * ZIP is not replaced, and a save or another cut is taken like from `review`.
+     */
+    failWith: null as 'too_large_output' | 'timeout' | null,
     load: vi.fn(async () => {
       if (deleted) throw gone()
       const next = phases.shift()
@@ -59,12 +65,22 @@ function fakeApi(start: Partial<JobStatus> = {}) {
     }),
     save: vi.fn(async (_id: string, plan: Plan) => {
       if (deleted) throw gone()
-      if (row.state === 'done') row = { ...row, state: 'review' }
+      if (row.state === 'done' || row.state === 'failed') row = { ...row, state: 'review', error_code: null, message: null }
       return plan
     }),
     cut: vi.fn(async () => {
       if (deleted) throw gone()
-      row = { ...row, state: 'queued', kind: 'cut' }
+      row = { ...row, state: 'queued', kind: 'cut', error_code: null, message: null }
+      if (api.failWith) {
+        const code = api.failWith
+        api.failWith = null
+        phases = [
+          row,
+          { ...row, state: 'running', progress: 1, total: 3, message: 'Cutting sections' },
+          { ...row, state: 'failed', progress: 1, total: 3, error_code: code, message: 'The cut would write more than the output limit. Split into fewer or smaller sections.' },
+        ]
+        return { id: ID, state: 'queued' as const }
+      }
       phases = api.straightTo
         ? [{ ...row, state: api.straightTo, progress: 3, total: 3, message: null }]
         : [
@@ -167,6 +183,19 @@ describe('JobPage', () => {
     await vi.waitFor(() => expect(screen.getByRole('heading', { name: 'Your files' })).toBeTruthy())
     expect(screen.getByText('Files deleted in 23 h.')).toBeTruthy()
     expect(screen.queryByText(/cut again to refresh the files/)).toBeNull()
+  })
+
+  it('a job reloaded after a failed cut shows the editor, the reason and a live Split (STORY-012 addendum; live run)', async () => {
+    const api = fakeApi()
+    api.load.mockImplementation(async () =>
+      status({ state: 'failed', kind: 'cut', error_code: 'timeout', message: 'The job took too long and was stopped.' }),
+    )
+    mount(api)
+    await vi.waitFor(() => expect(screen.getByLabelText('Name of section 1')).toBeTruthy())
+    expect(stateShown()).toBe('failed')
+    expect(splitButton().hasAttribute('disabled')).toBe(false)
+    expect(screen.getByText(/The last cut failed: The job took too long and was stopped\./)).toBeTruthy()
+    expect(screen.queryByRole('link', { name: 'Download all (ZIP)' })).toBeNull()
   })
 
   it('Delete now asks first; confirmed, it deletes and the whole page becomes the deleted screen (AC-3)', async () => {
@@ -294,6 +323,51 @@ describe('JobPage', () => {
     expect(screen.queryByRole('link', { name: '003 - 3 Closing Chapter.pdf' })).toBeNull()
     await vi.waitFor(() => expect(splitButton().hasAttribute('disabled')).toBe(false))
     expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  it('a failed cut keeps the editor and Split, shows the reason above Split, and is re-cut from the same page (STORY-012 addendum)', async () => {
+    const api = fakeApi()
+    api.failWith = 'too_large_output'
+    mount(api)
+    await vi.waitFor(() => expect(splitButton()).toBeTruthy())
+    await fireEvent.click(splitButton())
+    await vi.waitFor(() => expect(stateShown()).toBe('failed'))
+    // The status card and the Split section both carry the worker's message; the editor is still on the page.
+    const alerts = screen.getAllByRole('alert').map((a) => a.textContent ?? '')
+    expect(alerts.some((t) => t.startsWith('The last cut failed: The cut would write more than the output limit.'))).toBe(true)
+    expect(screen.getByLabelText('Name of section 1')).toBeTruthy()
+    await vi.waitFor(() => expect(splitButton().hasAttribute('disabled')).toBe(false))
+    expect(screen.queryByRole('link', { name: 'Download all (ZIP)' })).toBeNull()      // no ZIP was written
+
+    // An edit is saved like from `done`: the API answers review, the page polls once and says so.
+    const name = screen.getByLabelText('Name of section 3')
+    await fireEvent.input(name, { target: { value: 'Shorter' } })
+    await fireEvent.blur(name)
+    await vi.waitFor(() => expect(api.save).toHaveBeenCalledTimes(1))
+    await vi.waitFor(() => expect(stateShown()).toBe('review'))
+    expect(screen.queryByText(/The last cut failed/)).toBeNull()
+
+    // The same page cuts again, to done, and lists the files.
+    await fireEvent.click(splitButton())
+    await vi.waitFor(() => expect(stateShown()).toBe('done'))
+    await vi.waitFor(() => expect(screen.getByRole('link', { name: 'Download all (ZIP)' })).toBeTruthy())
+    expect(api.cut).toHaveBeenCalledTimes(2)
+  })
+
+  it('a failed cut is re-cut straight away, without an edit (STORY-012 addendum)', async () => {
+    const api = fakeApi()
+    api.failWith = 'timeout'
+    mount(api)
+    await vi.waitFor(() => expect(splitButton()).toBeTruthy())
+    await fireEvent.click(splitButton())
+    await vi.waitFor(() => expect(stateShown()).toBe('failed'))
+    await vi.waitFor(() => expect(splitButton().hasAttribute('disabled')).toBe(false))
+    await fireEvent.click(splitButton())
+    await vi.waitFor(() => expect(stateShown()).toBe('done'))
+    await vi.waitFor(() => expect(screen.getByRole('heading', { name: 'Your files' })).toBeTruthy())
+    expect(api.save).not.toHaveBeenCalled()
+    expect(api.cut).toHaveBeenCalledTimes(2)
+    expect(screen.queryByText(/The last cut failed/)).toBeNull()
   })
 
   describe('after a suspend (gate r2 F1)', () => {

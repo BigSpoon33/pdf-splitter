@@ -52,8 +52,8 @@ def encrypted_pdf() -> bytes:
     return pdf_bytes(encryption=fitz.PDF_ENCRYPT_AES_256, user_pw="x", owner_pw="y")
 
 
-def post(client: TestClient, data: bytes, name: str = "book.pdf"):
-    return client.post("/api/jobs", files={"file": (name, io.BytesIO(data), "application/pdf")})
+def post(client: TestClient, data: bytes, name: str = "book.pdf", headers: dict[str, str] | None = None):
+    return client.post("/api/jobs", files={"file": (name, io.BytesIO(data), "application/pdf")}, headers=headers)
 
 
 def job_count(settings: Settings) -> int:
@@ -365,21 +365,23 @@ def test_concurrent_uploads_all_succeed(settings: Settings) -> None:
     errors: list[BaseException] = []
     lock = threading.Lock()
     data = pdf_bytes(pages=2)
+    # 18 uploads would trip the 6/h window (STORY-012): each thread is its own client behind the trusted proxy.
+    settings = settings.model_copy(update={"trusted_proxy": "testclient"})
 
     with TestClient(create_app(settings), raise_server_exceptions=True) as client:
 
-        def hammer() -> None:
+        def hammer(n: int) -> None:
             try:
                 barrier.wait()
                 for _ in range(per_thread):
-                    r = post(client, data)
+                    r = post(client, data, headers={"X-Forwarded-For": f"203.0.113.{n}"})
                     assert r.status_code == 201, r.text
                     with lock:
                         ids.append(r.json()["id"])
             except BaseException as e:  # noqa: BLE001 - surfaced on the main thread
                 errors.append(e)
 
-        threads = [threading.Thread(target=hammer) for _ in range(n_threads)]
+        threads = [threading.Thread(target=hammer, args=(n,)) for n in range(n_threads)]
         for t in threads:
             t.start()
         for t in threads:

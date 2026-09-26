@@ -2,7 +2,7 @@ import { fireEvent, render, screen } from '@testing-library/svelte'
 import { describe, expect, it, vi } from 'vitest'
 import { ApiError, type CreatedJob, type JobStatus, type Plan } from '../lib/api'
 import { PlanEditor } from '../lib/editor.svelte'
-import { MESSAGES } from '../lib/errors'
+import { FALLBACK_MESSAGE, MESSAGES } from '../lib/errors'
 import { planOf, rowOf } from '../lib/fixtures'
 import Download from './Download.svelte'
 
@@ -202,9 +202,30 @@ describe('Download', () => {
     expect(splitButton().disabled).toBe(false)
   })
 
-  it('a failed cut disables Split and says the job cannot be cut again', () => {
-    mount({ job: status({ state: 'failed', kind: 'cut', error_code: 'timeout' }) })
+  it('a failed cut keeps Split live, with its reason above the button (STORY-012: recoverable failed cut)', async () => {
+    const { cut, oncut, rerender } = mount({
+      job: status({ state: 'failed', kind: 'cut', error_code: 'too_large_output', message: 'The cut would write more than the output limit.' }),
+      results: ROWS,
+      stale: true,
+    })
+    expect(splitButton().disabled).toBe(false)
+    const alert = screen.getByRole('alert').textContent ?? ''
+    expect(alert).toMatch(/The last cut failed: The cut would write more than the output limit\./)
+    expect(alert).toMatch(/split again/)
+    expect(alert).not.toMatch(/Upload the PDF again/)
+    // The previous cut's files are still there to download meanwhile.
+    expect(screen.getByRole('heading', { name: 'Files from the last cut' })).toBeTruthy()
+    await fireEvent.click(splitButton())
+    await vi.waitFor(() => expect(oncut).toHaveBeenCalledTimes(1))
+    expect(cut).toHaveBeenCalledWith(ID)
     expect(splitButton().disabled).toBe(true)
-    expect(screen.getByRole('alert').textContent).toMatch(/can't be split again/)
+    await rerender({ job: status({ state: 'queued', kind: 'cut' }) })
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  it('a failed cut with no message from the worker falls back to the generic wording', () => {
+    mount({ job: status({ state: 'failed', kind: 'cut', error_code: 'timeout', message: null }) })
+    expect(splitButton().disabled).toBe(false)
+    expect(screen.getByRole('alert').textContent).toContain(`The last cut failed: ${FALLBACK_MESSAGE}`)
   })
 })

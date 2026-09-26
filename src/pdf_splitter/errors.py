@@ -21,6 +21,9 @@ MESSAGES = {
     "too_many_pages": "The PDF has more pages than the limit.",
     "no_text_layer": "This PDF has no text layer (it looks scanned). OCR isn't supported yet — run OCR on it first, then upload it again.",
     "unreadable": "The PDF could not be read.",
+    # STORY-012: the limits (Architecture § janitor, § API Interface)
+    "rate_limited": "Too many uploads from your network. Wait a while and try again.",
+    "disk_full": "The server has no room for new uploads right now. Try again later.",
     # jobs
     "not_found": "There is no such job.",
     "expired": "This job was deleted (files are kept 24 hours).",

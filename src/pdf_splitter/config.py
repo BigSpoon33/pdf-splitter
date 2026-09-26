@@ -20,6 +20,15 @@ class Settings(BaseSettings):
     ttl_hours: int = 24
     workers: int = 2
     rate_per_hour: int = 6
+    # Uploads are refused (503) while the jobs volume has less than this free (Architecture § janitor).
+    min_free_gb: float = 2
+    # The one peer whose X-Forwarded-For is believed (Caddy on the same VM, STORY-013); unset, the peer IS the client.
+    trusted_proxy: str | None = None
+    # The secret under the daily-rotating IP hash (ADR-007). Unset, each api process draws its own at start, which
+    # is fine for the one uvicorn process the CLI runs; several processes must share one so the window is shared.
+    ip_salt: str | None = None
+    # The ceiling on what one cut may write; the per-job budget is this or ~10× the upload, whichever is smaller.
+    max_output_bytes: int = 2 * 1024 * MB
     analyze_timeout: int = 300
     cut_timeout: int = 600
     public_url: str = "http://localhost:8000"

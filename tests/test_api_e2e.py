@@ -27,6 +27,7 @@ from pdf_splitter import errors, preview
 from pdf_splitter.app import create_app
 from pdf_splitter.config import Settings
 from pdf_splitter.files import read_json
+from pdf_splitter.routes import common as common_routes
 from pdf_splitter.routes import download as download_routes
 from pdf_splitter.routes import preview as preview_routes
 from pdf_splitter.routes.plan import seconds_left
@@ -384,6 +385,151 @@ def test_cut_from_done_recuts(settings: Settings, analyzed_template: Path) -> No
     with api(settings) as client:
         assert client.post(f"/api/jobs/{DASH_ID}/cut").status_code == 202
     assert row(settings, DASH_ID)["state"] == "queued"
+
+
+# ── STORY-012 addendum: a failed cut is recoverable (Architecture § Job states) ───────────────────────
+
+
+def fail_cut(settings: Settings, analyzed_template: Path, code: str = "too_large_output") -> Path:
+    job_dir = seed_job(settings, analyzed_template, DASH_ID, state="failed", kind="cut")
+    store = Store(settings.db_path)
+    store.set_state(DASH_ID, "failed", error_code=code, message="The cut would write more than the output limit.")
+    store.close()
+    (job_dir / "result.zip").write_bytes(b"previous zip")
+    return job_dir
+
+
+def test_a_failed_cut_is_recut_from_the_same_page(settings: Settings, analyzed_template: Path) -> None:
+    """`failed` + `kind: cut` behaves like `review` for POST /cut: queued/cut, a clean progress bar, the failure
+    cleared, the previous ZIP still downloadable meanwhile; the empty-plan 422 applies as anywhere."""
+    fail_cut(settings, analyzed_template)
+    with api(settings) as client:
+        body = client.get(f"/api/jobs/{DASH_ID}").json()
+        assert (body["state"], body["kind"], body["error_code"]) == ("failed", "cut", "too_large_output")
+        assert client.get(f"/api/jobs/{DASH_ID}/result.zip").content == b"previous zip"
+        r = client.post(f"/api/jobs/{DASH_ID}/cut")
+        assert r.status_code == 202 and r.json() == {"id": DASH_ID, "state": "queued"}
+        job = row(settings, DASH_ID)
+        assert (job["state"], job["kind"], job["error_code"], job["message"]) == ("queued", "cut", None, None)
+        assert (job["progress"], job["total"]) == (0, 0)
+        assert_error(client.post(f"/api/jobs/{DASH_ID}/cut"), 409, "busy")
+
+
+def test_a_failed_cut_edited_returns_to_review(settings: Settings, analyzed_template: Path) -> None:
+    fail_cut(settings, analyzed_template, code="timeout")
+    with api(settings) as client:
+        assert client.put(f"/api/jobs/{DASH_ID}/plan", json=plan_with()).status_code == 200
+        body = client.get(f"/api/jobs/{DASH_ID}").json()
+        assert (body["state"], body["kind"], body["error_code"], body["message"]) == ("review", "cut", None, None)
+        assert client.get(f"/api/jobs/{DASH_ID}/result.zip").content == b"previous zip"
+        assert client.post(f"/api/jobs/{DASH_ID}/cut").status_code == 202
+
+
+def test_a_failed_analyze_stays_terminal(settings: Settings, analyzed_template: Path) -> None:
+    """The row-level guard too: even a direct `transition` from `failed` to a queued cut needs `kind == cut`."""
+    seed_job(settings, analyzed_template, DASH_ID, state="failed", kind="analyze")
+    with api(settings) as client:
+        assert_error(client.put(f"/api/jobs/{DASH_ID}/plan", json=plan_with()), 409, "not_ready")
+        assert_error(client.post(f"/api/jobs/{DASH_ID}/cut"), 409, "not_ready")
+    store = Store(settings.db_path)
+    try:
+        assert store.transition(DASH_ID, "failed", "queued", kind="cut", expect_kind="cut") is False
+        assert store.get_job(DASH_ID)["state"] == "failed"
+        store.set_state(DASH_ID, "failed", kind="cut")
+        assert store.transition(DASH_ID, "failed", "queued", kind="cut", expect_kind="cut") is True
+    finally:
+        store.close()
+
+
+# ── STORY-012 addendum: a job file that vanishes after the row check is 410, not 500 ─────────────────
+
+
+@pytest.fixture
+def delete_before_read(settings: Settings, monkeypatch: pytest.MonkeyPatch) -> list[Path]:
+    """The DELETE lands between `load_job` (the row was fine) and the read of a job file: every read goes
+    through `routes.common.read_bytes` / `routes.download.open_result`, hooked here."""
+    reads: list[Path] = []
+    real_read, real_open = common_routes.read_bytes, download_routes.open_result
+
+    def delete_then(real):
+        def hooked(path: Path):
+            reads.append(path)
+            assert path.exists()
+            delete_now(settings)
+            return real(path)
+        return hooked
+
+    monkeypatch.setattr(common_routes, "read_bytes", delete_then(real_read))
+    monkeypatch.setattr(download_routes, "open_result", delete_then(real_open))
+    return reads
+
+
+@pytest.mark.parametrize("call", [
+    lambda c: c.get(f"/api/jobs/{DASH_ID}/plan"),
+    lambda c: c.get(f"/api/jobs/{DASH_ID}/analysis"),
+    lambda c: c.put(f"/api/jobs/{DASH_ID}/plan", json=plan_with()),
+    lambda c: c.post(f"/api/jobs/{DASH_ID}/cut"),
+    lambda c: c.get(f"/api/jobs/{DASH_ID}/sheets/1.png?dpi=48"),
+    lambda c: c.post(f"/api/jobs/{DASH_ID}/sections/0/plan"),
+], ids=["get-plan", "get-analysis", "put-plan", "cut", "sheet", "section-plan"])
+def test_a_job_file_deleted_after_the_row_check_is_410_not_500(
+    settings: Settings, seeded: Path, delete_before_read: list[Path], call
+) -> None:
+    with api(settings) as client:
+        assert_error(call(client), 410, "expired")
+    assert delete_before_read and not seeded.exists()
+    assert row(settings, DASH_ID)["state"] == "deleted"
+
+
+@pytest.mark.parametrize("path", ["/result.zip", "/manifest", "/sections/0.pdf"], ids=["zip", "manifest", "section"])
+def test_an_output_deleted_after_the_row_check_is_410_not_500(
+    settings: Settings, analyzed_template: Path, delete_before_read: list[Path], path: str
+) -> None:
+    job_dir = seed_job(settings, analyzed_template, DASH_ID, state="done", kind="cut")
+    with zipfile.ZipFile(job_dir / "result.zip", "w") as zf:
+        zf.writestr("001 - A.pdf", b"%PDF-a")
+        zf.writestr(MANIFEST, json.dumps([{"index": 0, "name": "A", "file": "001 - A.pdf"}]))
+    with api(settings) as client:
+        assert_error(client.get(f"/api/jobs/{DASH_ID}{path}"), 410, "expired")
+    assert delete_before_read == [job_dir / "result.zip"] and not job_dir.exists()
+
+
+def test_a_missing_job_file_on_a_live_job_is_still_409(settings: Settings, seeded: Path) -> None:
+    """The same read path, nothing deleted: a file that is not there yet keeps its `not_ready`."""
+    (seeded / "plan.json").unlink()
+    with api(settings) as client:
+        assert_error(client.get(f"/api/jobs/{DASH_ID}/plan"), 409, "not_ready")
+        assert_error(client.post(f"/api/jobs/{DASH_ID}/cut"), 409, "not_ready")
+        assert_error(client.get(f"/api/jobs/{DASH_ID}/result.zip"), 409, "not_ready")
+    assert seeded.exists() and row(settings, DASH_ID)["state"] == "review"
+
+
+# ── STORY-012 AC-4: queue_position ────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("gap", [timedelta(seconds=1), timedelta(0)], ids=["a-second-apart", "same-second"])
+def test_queue_position_counts_the_same_kind_ahead_in_fifo_order(settings: Settings, seeded: Path, gap: timedelta) -> None:
+    """Live run of STORY-012: two uploads in the same second both read position 1 — timestamps are whole seconds,
+    so the insertion order (rowid) must break the tie, on both sides (`queue_position` and `claim_next`)."""
+    t0 = datetime.now(UTC) - timedelta(minutes=10)
+    store = Store(settings.db_path)
+    ids = [f"q{i}AbCdEfGhIjKlMnOpQrS{i:02d}" for i in range(3)]
+    for i, job_id in enumerate(ids):
+        store.create_job(job_id=job_id, ip_hash="h", filename="a.pdf", bytes=1, pages=1, ttl_hours=24,
+                         now=t0 + i * gap)
+    # A cut queued AFTER the analyzes is first of its kind: the workers claim per kind.
+    store.transition(DASH_ID, "review", "queued", kind="cut")
+    store.close()
+    with api(settings) as client:
+        assert [client.get(f"/api/jobs/{i}").json()["queue_position"] for i in ids] == [1, 2, 3]
+        assert client.get(f"/api/jobs/{DASH_ID}").json()["queue_position"] == 1
+        store = Store(settings.db_path)
+        assert store.claim_next("analyze")["id"] == ids[0]
+        assert client.get(f"/api/jobs/{ids[0]}").json()["queue_position"] is None       # running
+        assert [client.get(f"/api/jobs/{i}").json()["queue_position"] for i in ids[1:]] == [1, 2]
+        store.transition(ids[0], "running", "review")
+        assert client.get(f"/api/jobs/{ids[0]}").json()["queue_position"] is None
+        store.close()
 
 
 # ── AC-2: sheet PNGs ───────────────────────────────────────────────────────────────────────────────────

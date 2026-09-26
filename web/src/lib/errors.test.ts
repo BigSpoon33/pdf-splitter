@@ -16,8 +16,8 @@ function architectureUploadCodes(): string[] {
 }
 
 describe('errors.ts', () => {
-  it('reads the API table (sanity: the parser found all 14 codes)', () => {
-    expect(apiCodes()).toHaveLength(14)
+  it('reads the API table (sanity: the parser found all 16 codes)', () => {
+    expect(apiCodes()).toHaveLength(16)
     expect(architectureUploadCodes()).toEqual(
       expect.arrayContaining(['not_pdf', 'too_large', 'rate_limited', 'disk_full']),
     )

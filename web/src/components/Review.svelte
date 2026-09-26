@@ -185,13 +185,15 @@
     refresh = null
   })
 
-  // AC-2: a save from `done` puts the job back in `review` server-side; the status card should say so.
+  // AC-2: a save from `done` — or from a failed cut (STORY-012) — puts the job back in `review` server-side; the
+  // status card should say so.
   let seenSaves = 0
   $effect(() => {
     const n = editor?.saves ?? 0
     if (n <= seenSaves) return
     seenSaves = n
-    if (untrack(() => jobState) === 'done') onsaved?.()
+    const last = untrack(() => job)
+    if (untrack(() => jobState) === 'done' || (last?.kind === 'cut' && last.state === 'failed')) onsaved?.()
   })
 
   $effect(() => {

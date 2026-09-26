@@ -2,22 +2,25 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Body
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 from ..deps import SettingsDep, StoreDep
 from ..errors import ApiError
-from ..files import read_json, write_json
+from ..files import write_json
 from ..models import ValidationError, validate_plan
+from ..store import Store
 from .common import (
     BUSY,
     EDITABLE,
     invalid,
     invalid_field,
     job_dir,
+    job_file,
     load_job,
     require_analyzed,
     require_editable,
@@ -34,16 +37,17 @@ def seconds_left(job: dict[str, Any], now: datetime | None = None) -> int:
     return max(0, int(remaining.total_seconds()))
 
 
-def status_of(job: dict[str, Any]) -> dict[str, Any]:
+def status_of(job: dict[str, Any], store: Store | None = None) -> dict[str, Any]:
     """The polling shape (Architecture § API Interface). `error_code` only with `failed`: a queued or running
-    row can carry the worker's re-queue marker, which is not an error. `queue_position` is STORY-012's."""
+    row can carry the worker's re-queue marker, which is not an error. `queue_position` (1 = next of its kind)
+    needs the store and is null unless the job is queued."""
     return {
         "id": job["id"],
         "state": job["state"],
         "kind": job["kind"],
         "progress": job["progress"],
         "total": job["total"],
-        "queue_position": None,
+        "queue_position": store.queue_position(job) if store is not None else None,
         "message": job["message"],
         "error_code": job["error_code"] if job["state"] == "failed" else None,
         "expires_at": job["expires_at"],
@@ -55,25 +59,22 @@ def status_of(job: dict[str, Any]) -> dict[str, Any]:
 
 @router.get("/api/jobs/{job_id}")
 def get_job(job_id: str, store: StoreDep) -> dict[str, Any]:
-    return status_of(load_job(store, job_id))
+    return status_of(load_job(store, job_id), store)
 
 
 @router.get("/api/jobs/{job_id}/analysis")
-def get_analysis(job_id: str, settings: SettingsDep, store: StoreDep) -> FileResponse:
+def get_analysis(job_id: str, settings: SettingsDep, store: StoreDep) -> Response:
     job = load_job(store, job_id)
     require_analyzed(job)
-    path = job_dir(settings, job) / "analysis.json"
-    if not path.exists():
-        raise ApiError(409, "not_ready")
-    # The file as the worker wrote it (already UTF-8-safe), without re-encoding a large document.
-    return FileResponse(path, media_type="application/json")
+    # The bytes as the worker wrote them (already UTF-8-safe), without re-encoding a large document.
+    return Response(job_file(store, settings, job, "analysis.json"), media_type="application/json")
 
 
 @router.get("/api/jobs/{job_id}/plan")
-def get_plan(job_id: str, settings: SettingsDep, store: StoreDep) -> FileResponse:
+def get_plan(job_id: str, settings: SettingsDep, store: StoreDep) -> Response:
     job = load_job(store, job_id)
-    saved_plan(settings, job)
-    return FileResponse(job_dir(settings, job) / "plan.json", media_type="application/json")
+    require_analyzed(job)
+    return Response(job_file(store, settings, job, "plan.json"), media_type="application/json")
 
 
 @router.put("/api/jobs/{job_id}/plan")
@@ -82,16 +83,17 @@ def put_plan(
 ) -> dict[str, Any]:
     job = load_job(store, job_id)
     require_editable(job)
-    analysis = read_json(job_dir(settings, job) / "analysis.json")
+    analysis = json.loads(job_file(store, settings, job, "analysis.json"))
     try:
         plan = validate_plan(body, pages=job["pages"], sizes=analysis["size"])
     except ValidationError as e:
         raise invalid(e) from None
     data = plan.dump()
     write_json(job_dir(settings, job) / "plan.json", data)
-    if job["state"] == "done":
-        # The saved outputs no longer match the plan; they stay downloadable until the next cut replaces them.
-        store.transition(job_id, "done", "review")
+    if job["state"] in ("done", "failed"):
+        # The saved outputs no longer match the plan (they stay downloadable until the next cut replaces them),
+        # and a failed cut's reason has been acted on: either way the job is back in review.
+        store.transition(job_id, job["state"], "review")
     return data
 
 
@@ -99,10 +101,14 @@ def put_plan(
 def post_cut(job_id: str, settings: SettingsDep, store: StoreDep) -> JSONResponse:
     job = load_job(store, job_id)
     require_editable(job)
-    if not saved_plan(settings, job)["sections"]:
+    if not saved_plan(store, settings, job)["sections"]:
         raise invalid_field(["plan", "sections"], "The plan has no sections.")
-    # Conditional, so a second click or a claim in between can't queue the job twice or reset a running cut.
-    if not store.transition(job_id, EDITABLE, "queued", kind="cut"):
+    # Conditional, so a second click or a claim in between can't queue the job twice or reset a running cut. A
+    # failed cut qualifies by state AND kind: a failed analyze never re-queues.
+    queued = store.transition(job_id, EDITABLE, "queued", kind="cut") or store.transition(
+        job_id, "failed", "queued", kind="cut", expect_kind="cut"
+    )
+    if not queued:
         current = store.get_job(job_id)
         raise ApiError(409, "busy" if current and current["state"] in BUSY else "not_ready")
     return JSONResponse({"id": job_id, "state": "queued"}, status_code=202)

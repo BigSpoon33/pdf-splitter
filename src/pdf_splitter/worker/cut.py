@@ -7,6 +7,10 @@ are the engine's with the Plan's `index`, `name` and the ZIP `file`. The task (`
 
 A `ranges` plan (ADR-009) never reaches the engine: `cut_ranges` copies each whole-page span with PyMuPDF into
 the same file names and manifest shape, so the ZIP, the manifest route and the SPA cannot tell the two apart.
+
+Both paths write under an output budget (STORY-012): the bytes in `work/` are measured after every section and
+the cut stops with `OutputTooLarge` — its files removed, the previous `result.zip` untouched — the moment they
+pass it. Spans may overlap and sections may be the whole book, so nothing else bounds what a plan can write.
 """
 
 from __future__ import annotations
@@ -31,6 +35,35 @@ MANIFEST = "manifest.json"
 MSG_PREPARING = "Preparing the book"
 MSG_CUTTING = "Cutting sections"
 MSG_PACKAGING = "Packaging the sections"
+# The budget is ~10× the upload, never under the floor (a small book whose every section re-embeds its fonts is
+# honest work) and never over `Settings.max_output_bytes`.
+OUTPUT_MULTIPLIER = 10
+OUTPUT_FLOOR = 256 * 1024 * 1024
+
+
+class OutputTooLarge(Exception):
+    """The cut passed its byte budget; `task.guarded` reports it as `too_large_output`."""
+
+
+def output_budget(max_output_bytes: int, upload_bytes: int) -> int:
+    return min(max_output_bytes, max(OUTPUT_MULTIPLIER * upload_bytes, OUTPUT_FLOOR))
+
+
+def written_bytes(work: Path) -> int:
+    """What the sections written so far take on disk, whichever path wrote them."""
+    return sum(p.stat().st_size for p in work.glob("*.pdf"))
+
+
+class Budget:
+    """Checked after every section: the sizes are summed from `work/` itself, so a section written by the engine
+    counts the same as one copied by PyMuPDF, and so does anything a stale file left there."""
+
+    def __init__(self, work: Path, limit: int | None) -> None:
+        self.work, self.limit = work, limit
+
+    def check(self) -> None:
+        if self.limit is not None and written_bytes(self.work) > self.limit:
+            raise OutputTooLarge(self.limit)
 
 _NOT_SLUG = re.compile(r"[^a-z0-9]+")
 # `/` and `\` are separators in every unzip tool; the rest are refused by Windows file names.
@@ -71,18 +104,31 @@ def _reset_outputs(work: Path) -> None:
         stale.unlink(missing_ok=True)
 
 
-def cut_book(job_dir: Path, plan: dict[str, Any], progress: Progress) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Cut every section of `plan`; returns (manifest rows in plan order, the engine's `cut_all` summary)."""
+def cut_book(
+    job_dir: Path, plan: dict[str, Any], progress: Progress, limit: int | None = None
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Cut every section of `plan`; returns (manifest rows in plan order, the engine's `cut_all` summary).
+    `limit` is the output budget in bytes (None: unbounded)."""
     prof = profile_from_dict(plan["settings"])
     work = job_dir / "work"
     _reset_outputs(work)
+    budget = Budget(work, limit)
     entries = engine_entries(plan["sections"])
     progress(0, len(entries), MSG_PREPARING)
+
+    def tick(done: int, total: int, _name: str) -> None:
+        # The engine fires this right after each section's file is written: the one place to measure.
+        budget.check()
+        progress(done, total, MSG_CUTTING)
+
     book = Book.open(pdf=job_dir / "source.pdf", out=work, profile=prof, entries=entries, log=_silent)
     try:
         for key, override in plan.get("overrides", {}).items():
             book.set_override(entries[int(key)]["name"], override)
-        result = book.cut_all(progress=lambda done, total, _name: progress(done, total, MSG_CUTTING), verify=True)
+        result = book.cut_all(progress=tick, verify=True)
+    except OutputTooLarge:
+        _reset_outputs(work)
+        raise
     finally:
         book.close()
     written = {row["formula"]: row for row in result["written"]}
@@ -94,12 +140,15 @@ def cut_book(job_dir: Path, plan: dict[str, Any], progress: Progress) -> tuple[l
     return rows, result
 
 
-def cut_ranges(job_dir: Path, plan: dict[str, Any], progress: Progress) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+def cut_ranges(
+    job_dir: Path, plan: dict[str, Any], progress: Progress, limit: int | None = None
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Copy every `[page, endPage]` span of a `ranges` plan into its own PDF (no heading search, no redaction,
     no verify); returns (manifest rows in plan order, a summary in `cut_all`'s shape). Spans may overlap or
-    leave gaps: each is copied from the source on its own."""
+    leave gaps: each is copied from the source on its own. `limit` as in `cut_book`."""
     work = job_dir / "work"
     _reset_outputs(work)
+    budget = Budget(work, limit)
     sections = plan["sections"]
     total = len(sections)
     progress(0, total, MSG_PREPARING)
@@ -117,6 +166,7 @@ def cut_ranges(job_dir: Path, plan: dict[str, Any], progress: Progress) -> tuple
                 out.save(dest, garbage=4, deflate=True)
             finally:
                 out.close()
+            budget.check()
             rows.append({
                 "formula": name,
                 "file": zip_entry(i, section["name"]),
@@ -130,6 +180,9 @@ def cut_ranges(job_dir: Path, plan: dict[str, Any], progress: Progress) -> tuple
                 "name": section["name"],
             })
             progress(i + 1, total, MSG_CUTTING)
+    except OutputTooLarge:
+        _reset_outputs(work)
+        raise
     finally:
         src.close()
     return rows, {"written": rows, "missing": [], "unknown": [], "leaks": {}}

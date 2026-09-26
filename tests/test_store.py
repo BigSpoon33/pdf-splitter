@@ -41,6 +41,7 @@ def test_schema_matches_architecture(store: Store) -> None:
     assert {"jobs_queue", "jobs_expiry"} <= indexes
     rate_cols = [r["name"] for r in store.conn.execute("PRAGMA table_info(rate)")]
     assert rate_cols == ["ip_hash", "at"]
+    assert {r["name"] for r in store.conn.execute("PRAGMA index_list(rate)")} == {"rate_window"}
 
 
 def test_init_is_idempotent(store: Store) -> None:

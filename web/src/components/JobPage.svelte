@@ -36,7 +36,8 @@
   let resume = $state(0)
   /**
    * The review UI stays mounted from the first `review` on — through a cut's `queued`/`running` and a failed cut — so
-   * the editor is never destroyed mid-edit. A reload during a cut mounts it too: the analysis exists once `kind` is `cut`.
+   * the editor is never destroyed mid-edit. A reload during or after a cut mounts it too, a failed one included (the
+   * job is editable and cut again from there, STORY-012): the analysis and plan exist once `kind` is `cut`.
    */
   let reviewable = $state(false)
   /** The last of `review`/`done` seen: whether the last cut's files still match the saved plan. */
@@ -54,9 +55,9 @@
       reviewable = true
       jobState = next.state
     }
+    if (next.kind === 'cut') reviewable = true
     if (next.kind === 'cut' && active) {
       cutPending = true
-      reviewable = true
     } else if (cutPending && !active) {
       cutPending = false
       // A cut we were following that now reads `done` — or already `review`, when an edit landed between its last

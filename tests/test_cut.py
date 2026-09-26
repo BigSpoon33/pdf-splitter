@@ -19,7 +19,15 @@ from pdf_splitter.files import read_json, write_json
 from pdf_splitter.store import Store, log_id
 from pdf_splitter.worker import cut, sandbox, task
 from pdf_splitter.worker import runner as runner_mod
-from pdf_splitter.worker.cut import cut_book, engine_entries, engine_name, write_zip, zip_entry
+from pdf_splitter.worker.cut import (
+    OutputTooLarge,
+    cut_book,
+    engine_entries,
+    engine_name,
+    output_budget,
+    write_zip,
+    zip_entry,
+)
 from pdf_splitter.worker.runner import Runner, classify
 
 GUARDED = "import sys; from pdf_splitter.worker.task import guarded; "
@@ -112,6 +120,61 @@ def test_cut_book_reuses_the_analyze_index_and_leaves_stale_outputs_behind(
     assert [m["formula"] for m in read_json(work / MANIFEST_NAME)] == [e["name"] for e in engine_entries(plan["sections"])]
     assert read_json(work / OVERRIDES_NAME) == {}
     assert (work / ".book-index.json").read_bytes() == index_before      # the default settings hit the cache
+
+
+# ── STORY-012 addendum: the output budget on the engine path ──────────────────────────────────────────
+
+
+def test_output_budget_is_ten_uploads_within_a_floor_and_the_ceiling() -> None:
+    mb = 1024 * 1024
+    assert output_budget(2048 * mb, 1 * mb) == cut.OUTPUT_FLOOR                # a small book gets the floor
+    assert output_budget(2048 * mb, 100 * mb) == 1000 * mb                     # 10× the upload
+    assert output_budget(2048 * mb, 300 * mb) == 2048 * mb                     # never past the ceiling
+    assert output_budget(300_000, 100 * mb) == 300_000                         # a test-sized ceiling wins
+
+
+def test_cut_book_stops_at_the_budget_and_leaves_no_section_behind(settings: Settings, analyzed_template: Path) -> None:
+    job_dir = seed_job(settings, analyzed_template, DASH_ID)
+    work = job_dir / "work"
+    index_before = (work / ".book-index.json").read_bytes()
+    plan = read_json(job_dir / "plan.json")
+    seen, progress = ticks()
+    with pytest.raises(OutputTooLarge):
+        cut_book(job_dir, plan, progress, limit=1)
+    # The first section's file passed the budget as soon as it was written: nothing of the cut stays.
+    assert seen == [(0, 3, cut.MSG_PREPARING)]
+    assert list(work.glob("*.pdf")) == [] and not (work / MANIFEST_NAME).exists()
+    assert (work / ".book-index.json").read_bytes() == index_before
+    # Unbounded, or a budget the three sections fit in, cuts as before.
+    rows, _ = cut_book(job_dir, plan, lambda *_: None, limit=None)
+    assert len(rows) == 3
+    rows, _ = cut_book(job_dir, plan, lambda *_: None, limit=cut.written_bytes(work))
+    assert len(rows) == 3
+
+
+def test_runner_fails_a_cut_over_the_budget_as_too_large_output_then_recuts_it(
+    settings: Settings, wstore: Store, analyzed_template: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Through the real sandboxed task: `failed/too_large_output` with the runner's message, no `result.zip`,
+    no `.tmp`, no section in `work/`; the budget reaches the task through its environment. Then the same job,
+    re-queued from `failed` (the recoverable failed cut) under the default budget, cuts to `done`."""
+    caplog.set_level(logging.WARNING)
+    job_dir = seed_job(settings, analyzed_template, DASH_ID, state="queued", kind="cut")
+    capped = settings.model_copy(update={"max_output_bytes": 1})
+    assert Runner(capped, kinds=("cut",)).run_once(wstore) is True
+    job = wstore.get_job(DASH_ID)
+    assert (job["state"], job["kind"], job["error_code"]) == ("failed", "cut", "too_large_output"), job
+    assert job["message"] == runner_mod.MESSAGES["too_large_output"]
+    assert "fewer or smaller sections" in job["message"]
+    assert not (job_dir / "result.zip").exists() and not list(job_dir.glob("*.tmp"))
+    assert list((job_dir / "work").glob("*.pdf")) == []
+    assert "failed: too_large_output" in caplog.text
+    assert_id_gone(caplog.text, DASH_ID)
+    assert wstore.transition(DASH_ID, "failed", "queued", kind="cut", expect_kind="cut")
+    assert Runner(settings, kinds=("cut",)).run_once(wstore) is True
+    job = wstore.get_job(DASH_ID)
+    assert (job["state"], job["error_code"]) == ("done", None)
+    assert (job_dir / "result.zip").exists()
 
 
 # ── write_zip: atomic, and no .tmp after a failure that happens with the .tmp on disk ─────────────────

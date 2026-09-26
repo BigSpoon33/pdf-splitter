@@ -261,6 +261,44 @@ def test_runner_runs_a_ranges_cut_to_done_with_the_chapter_cuts_zip_shape(
     assert not list(job_dir.glob("*.tmp"))
 
 
+# ── STORY-012 addendum: the output budget on the ranges path ──────────────────────────────────────────
+
+
+def test_cut_ranges_stops_at_the_budget_and_leaves_no_span_behind(settings: Settings, seeded: Path) -> None:
+    whole_book = (seeded / "source.pdf").stat().st_size
+    plan = ranges_plan([(1, PAGES)] * 200)                       # 200 whole-book copies: ~200× the upload
+    seen: list[tuple[int, int, str]] = []
+    with pytest.raises(cut.OutputTooLarge):
+        cut_ranges(seeded, plan, lambda d, t, m: seen.append((d, t, m)), limit=4 * whole_book)
+    assert 3 <= len(seen) <= 8 and seen[-1][1] == 200          # stopped after a handful of spans, not 200
+    assert list((seeded / "work").glob("*.pdf")) == []
+    assert (seeded / "work" / INDEX_CACHE).exists()
+
+
+def test_a_ranges_cut_over_the_budget_fails_cleanly_and_a_smaller_plan_cuts_from_the_same_page(
+    settings: Settings, wstore: Store, seeded: Path
+) -> None:
+    """Through the API and the real runner: 200 whole-book spans → `failed/too_large_output`, no ZIP; the job is
+    still editable (a failed cut is recoverable), a 3-span plan is saved and cut to `done` on the same page."""
+    whole_book = (seeded / "source.pdf").stat().st_size
+    capped = settings.model_copy(update={"max_output_bytes": 4 * whole_book})
+    with api(capped) as client:
+        assert client.put(f"/api/jobs/{DASH_ID}/plan", json=ranges_plan([(1, PAGES)] * 200)).status_code == 200
+        assert client.post(f"/api/jobs/{DASH_ID}/cut").status_code == 202
+        assert Runner(capped, kinds=("cut",)).run_once(wstore) is True
+        body = client.get(f"/api/jobs/{DASH_ID}").json()
+        assert (body["state"], body["kind"], body["error_code"]) == ("failed", "cut", "too_large_output")
+        assert "fewer or smaller sections" in body["message"]
+        assert_error(client.get(f"/api/jobs/{DASH_ID}/result.zip"), 409, "not_ready")
+        assert not list(seeded.glob("*.tmp")) and list((seeded / "work").glob("*.pdf")) == []
+        r = client.put(f"/api/jobs/{DASH_ID}/plan", json=ranges_plan(AC14))
+        assert r.status_code == 200 and client.get(f"/api/jobs/{DASH_ID}").json()["state"] == "review"
+        assert client.post(f"/api/jobs/{DASH_ID}/cut").status_code == 202
+        assert Runner(capped, kinds=("cut",)).run_once(wstore) is True
+        assert client.get(f"/api/jobs/{DASH_ID}").json()["state"] == "done"
+        assert [m["pageCount"] for m in client.get(f"/api/jobs/{DASH_ID}/manifest").json()] == [10, 6, 3]
+
+
 # ── PRD AC-14 through the API: upload → analyze → ranges plan → cut → download ────────────────────────
 
 

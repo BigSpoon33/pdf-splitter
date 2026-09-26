@@ -4,8 +4,8 @@ import { KEEPALIVE_MAX_BYTES } from './config'
 
 export type JobState = 'queued' | 'running' | 'review' | 'done' | 'failed'
 export type JobKind = 'analyze' | 'cut'
-/** The worker's failure class; a different namespace from `ApiError.code`. */
-export type JobErrorCode = 'timeout' | 'resources' | 'internal'
+/** The worker's failure class (`worker/runner.py:MESSAGES`); a different namespace from `ApiError.code`. */
+export type JobErrorCode = 'timeout' | 'resources' | 'too_large_output' | 'internal'
 
 /** `GET /api/jobs/{id}` (`routes/plan.py:status_of`). */
 export interface JobStatus {

@@ -4,7 +4,7 @@ The runner starts it through `worker.sandbox` (rlimits) under a wall timeout and
 The task writes its outputs and moves the row `running → review` (`→ done` for a cut) itself; any failure is
 left to the runner,
 which reads the result from the LAST stdout line (the engine's lazy `import fitz` prints a deprecation notice
-to stdout mid-run): `{"ok": true}` or `{"ok": false, "code": "resources"|"internal"}`.
+to stdout mid-run): `{"ok": true}` or `{"ok": false, "code": "resources"|"too_large_output"|"internal"}`.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ from ..config import Settings
 from ..files import read_json, read_mode, write_json
 from ..store import Store
 from .analyze import MUPDF_ERRORS, analyze, default_plan, ranges_plan
-from .cut import MSG_PACKAGING, cut_book, cut_ranges, write_zip
+from .cut import MSG_PACKAGING, OutputTooLarge, cut_book, cut_ranges, output_budget, write_zip
 
 PROGRESS_INTERVAL_S = 0.5
 EXIT_INTERNAL = 1
@@ -94,8 +94,9 @@ def run_cut(settings: Settings, job_id: str, store: Store) -> bool:
     job_dir = settings.jobs_dir / job_id
     throttle = Throttle(lambda done, total, msg: store.update_progress(job_id, done, total, msg))
     plan = read_json(job_dir / "plan.json")
+    limit = output_budget(settings.max_output_bytes, job["bytes"])
     # ADR-009: a page-range plan is whole-page copies, not an engine cut.
-    rows, _ = (cut_ranges if plan["source"] == "ranges" else cut_book)(job_dir, plan, throttle)
+    rows, _ = (cut_ranges if plan["source"] == "ranges" else cut_book)(job_dir, plan, throttle, limit)
     # A job deleted while the engine ran must not get its directory back: the check sits right before the
     # only write the api serves (the engine's work files are already on disk and go with the row's TTL).
     row = store.get_job(job_id)
@@ -118,6 +119,8 @@ def guarded(job: Callable[[], bool]) -> int:
         ok = job()
     except MemoryError:
         return _result(False, "resources")
+    except OutputTooLarge:
+        return _result(False, "too_large_output")
     except OSError as e:
         # RLIMIT_FSIZE: Python ignores SIGXFSZ, so the oversized write fails with EFBIG instead.
         if e.errno == errno.EFBIG:

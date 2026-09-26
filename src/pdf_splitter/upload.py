@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
-import secrets
 import shutil
 import subprocess
 import sys
@@ -16,6 +14,7 @@ from typing import Annotated, Any, Literal
 from fastapi import APIRouter, Form, Request, UploadFile
 from fastapi.responses import JSONResponse
 
+from . import ratelimit
 from .config import Settings
 from .deps import SettingsDep, StoreDep
 from .errors import MESSAGES
@@ -33,18 +32,16 @@ DEFAULT_FILENAME = "document.pdf"
 
 # The preflight's own codes; anything else it prints is `unreadable`.
 PREFLIGHT_CODES = frozenset({"not_pdf", "encrypted", "too_many_pages", "no_text_layer", "unreadable"})
-STATUS = {"too_large": 413, "too_many_pages": 413}
+STATUS = {"too_large": 413, "too_many_pages": 413, "rate_limited": 429, "disk_full": 503}
 
 log = logging.getLogger(__name__)
 router = APIRouter()
 
-# Per-process salt: rows need *some* NOT NULL ip_hash, and the raw address must never be stored.
-# STORY-012 replaces this with the daily-rotating salt and the trusted-proxy rule.
-_IP_SALT = secrets.token_bytes(16)
 
-
-def ip_hash(host: str | None) -> str:
-    return hashlib.sha256(_IP_SALT + (host or "unknown").encode()).hexdigest()
+def disk_full(settings: Settings) -> bool:
+    """The guard Architecture § janitor describes: no new upload while the jobs volume is nearly full. Decimal GB,
+    the same unit `/api/health` reports."""
+    return shutil.disk_usage(settings.jobs_dir).free < settings.min_free_gb * 1e9
 
 
 def sanitize_filename(name: str | None) -> str:
@@ -63,8 +60,8 @@ def sanitize_filename(name: str | None) -> str:
     return name
 
 
-def reject(code: str) -> JSONResponse:
-    return JSONResponse({"code": code, "message": MESSAGES[code]}, status_code=STATUS.get(code, 400))
+def reject(code: str, headers: dict[str, str] | None = None) -> JSONResponse:
+    return JSONResponse({"code": code, "message": MESSAGES[code]}, status_code=STATUS.get(code, 400), headers=headers)
 
 
 def run_preflight(path: Path, max_pages: int, job_id: str, timeout: float | None = None) -> dict[str, Any]:
@@ -117,6 +114,18 @@ def _accept(
 ) -> JSONResponse:
     if file is None:
         return reject("not_pdf")
+    # Both guards before anything touches the disk: a refused upload leaves no directory and no row. The attempt
+    # is what the window counts (a refused file still cost a copy and a preflight), so it is recorded here, before
+    # the outcome is known.
+    client = ratelimit.ip_hash(ratelimit.client_ip(request, settings.trusted_proxy), secret=settings.ip_salt)
+    wait = ratelimit.retry_after(store, client, settings.rate_per_hour)
+    if wait is not None:
+        log.info("upload refused: rate limited (%s, retry after %ds)", client[:8], wait)
+        return reject("rate_limited", headers={"Retry-After": str(wait)})
+    if disk_full(settings):
+        log.warning("upload refused: less than %s GB free", settings.min_free_gb)
+        return reject("disk_full")
+    ratelimit.record(store, client)
     job_id = new_job_id()
     job_dir = settings.jobs_dir / job_id
     part = job_dir / "source.pdf.part"
@@ -141,7 +150,7 @@ def _accept(
             write_mode(job_dir, mode)
         job = store.create_job(
             job_id=job_id,
-            ip_hash=ip_hash(request.client.host if request.client else None),
+            ip_hash=client,
             filename=sanitize_filename(file.filename),
             bytes=size,
             pages=result["pages"],

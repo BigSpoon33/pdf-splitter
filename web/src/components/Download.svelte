@@ -37,11 +37,12 @@
   let requestedOn = $state<JobStatus | null | undefined>(undefined)
 
   const cutting = $derived(job?.kind === 'cut' && (job.state === 'queued' || job.state === 'running'))
-  // A failed cut leaves the job outside the states a cut may start from (`EDITABLE`, routes/common.py): no retry here.
+  // A failed cut is recoverable (Architecture § Job states): the API takes `PUT /plan` and `POST /cut` from it like
+  // from `review`, so the reason is shown here, above the button, and Split stays live for another try.
   const failed = $derived(job?.kind === 'cut' && job.state === 'failed')
   const count = $derived(editor.plan.sections.length)
   const requested = $derived(requestedOn !== undefined)
-  const disabled = $derived(posting || requested || cutting || failed || editor.saving || editor.gone || count === 0)
+  const disabled = $derived(posting || requested || cutting || editor.saving || editor.gone || count === 0)
 
   // Each status is a new object, and the page restarts its poll on the 202, so every one after `requestedOn` is the
   // server's word from after the cut was queued: a `cut` of any state — `review` included, when an edit landed
@@ -100,8 +101,10 @@
 {#if error}
   <p class="error" role="alert">{error}</p>
 {/if}
-{#if failed}
-  <p class="error" role="alert">The cut failed, so this job can't be split again. Upload the PDF again to retry.</p>
+{#if failed && job}
+  <p class="error" role="alert">
+    The last cut failed: {job.message || messageFor(job.error_code)} Change the sections if you need to, then split again.
+  </p>
 {/if}
 
 {#if cutting && job}

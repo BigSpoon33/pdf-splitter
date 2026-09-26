@@ -89,7 +89,7 @@ def get_sheet(job_id: str, n: int, settings: SettingsDep, store: StoreDep, dpi: 
     if dpi not in DPIS:
         raise invalid_field(["query", "dpi"], f"dpi must be one of {', '.join(map(str, DPIS))}", "literal_error")
     job = load_job(store, job_id)
-    plan = saved_plan(settings, job)
+    plan = saved_plan(store, settings, job)
     if not 1 <= n <= job["pages"]:
         raise ApiError(404, "not_found", "There is no page with that number.")
     # Architecture § File layout: `png/<dpi>/<sheet>-<hash>.png`, one render per (sheet, dpi, settings).
@@ -112,7 +112,7 @@ def post_section_plan(
     job_id: str, i: int, settings: SettingsDep, store: StoreDep, body: Annotated[dict[str, Any] | None, Body()] = None
 ) -> dict[str, Any]:
     job = load_job(store, job_id)
-    plan = saved_plan(settings, job)
+    plan = saved_plan(store, settings, job)
     if plan["source"] == "ranges":
         # ADR-009: a whole-page span has no heading and no cut to preview; the SPA never asks for one.
         raise invalid_field(["plan", "source"], "A page-range plan has no section preview.")

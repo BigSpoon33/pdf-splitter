@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS jobs (
 CREATE INDEX IF NOT EXISTS jobs_queue ON jobs(state, created_at);
 CREATE INDEX IF NOT EXISTS jobs_expiry ON jobs(expires_at);
 CREATE TABLE IF NOT EXISTS rate (ip_hash TEXT, at TEXT);
+CREATE INDEX IF NOT EXISTS rate_window ON rate(ip_hash, at);
 """
 
 STATES = frozenset({"queued", "running", "review", "done", "failed", "deleted"})
@@ -135,6 +136,19 @@ class Store:
     def queue_length(self) -> int:
         return self.conn.execute("SELECT COUNT(*) FROM jobs WHERE state = 'queued'").fetchone()[0]
 
+    def queue_position(self, job: dict[str, Any]) -> int | None:
+        """1 + the queued jobs of the same kind ahead of this one in `claim_next`'s order; None unless queued."""
+        if job["state"] != "queued":
+            return None
+        # Timestamps are whole seconds, so jobs created in the same second tie on `created_at`; the rowid (the
+        # insertion order) breaks the tie exactly as `claim_next` does.
+        ahead = self.conn.execute(
+            "SELECT COUNT(*) FROM jobs WHERE state = 'queued' AND kind = ? AND (created_at < ? OR"
+            " (created_at = ? AND rowid < (SELECT rowid FROM jobs WHERE id = ?)))",
+            (job["kind"], job["created_at"], job["created_at"], job["id"]),
+        ).fetchone()[0]
+        return 1 + ahead
+
     def claim_next(self, kind: str, now: datetime | None = None) -> dict[str, Any] | None:
         """Atomically move the oldest queued job of `kind` to running; None if the queue is empty."""
         _check(kind=kind)
@@ -147,7 +161,7 @@ class Store:
             row = conn.execute(
                 "UPDATE jobs SET state = 'running', started_at = ?, updated_at = ?"
                 " WHERE id = (SELECT id FROM jobs WHERE state = 'queued' AND kind = ?"
-                " ORDER BY created_at LIMIT 1) RETURNING *",
+                " ORDER BY created_at, rowid LIMIT 1) RETURNING *",
                 (ts, ts, kind),
             ).fetchone()
             conn.execute("COMMIT")
@@ -192,16 +206,18 @@ class Store:
         state: str,
         *,
         kind: str | None = None,
+        expect_kind: str | None = None,
         error_code: str | None = None,
         message: str | None = None,
         now: datetime | None = None,
     ) -> bool:
-        """`set_state` only if the row is still in `expect` (one state or several); False otherwise. The
-        worker finishes jobs with this, so a job deleted (or already finished) while its subprocess ran is
-        never resurrected, and the api queues a cut with it, so two clients can't queue the same job twice
-        or re-queue one a worker has already claimed."""
+        """`set_state` only if the row is still in `expect` (one state or several, and `expect_kind` when given);
+        False otherwise. The worker finishes jobs with this, so a job deleted (or already finished) while its
+        subprocess ran is never resurrected, and the api queues a cut with it, so two clients can't queue the
+        same job twice or re-queue one a worker has already claimed."""
         expected = (expect,) if isinstance(expect, str) else tuple(expect)
         _check(state=state, kind=kind)
+        _check(kind=expect_kind)
         for e in expected:
             _check(state=e)
         # A queued cut starts from a clean progress bar, not the analyze's final count.
@@ -209,8 +225,8 @@ class Store:
             "UPDATE jobs SET state = ?, kind = COALESCE(?, kind), error_code = ?, message = ?, updated_at = ?,"
             " progress = CASE WHEN ? = 'queued' THEN 0 ELSE progress END,"
             " total = CASE WHEN ? = 'queued' THEN 0 ELSE total END"
-            f" WHERE id = ? AND state IN ({','.join('?' * len(expected))})",
-            (state, kind, error_code, message, now_ts(now), state, state, job_id, *expected),
+            f" WHERE id = ? AND state IN ({','.join('?' * len(expected))}) AND kind = COALESCE(?, kind)",
+            (state, kind, error_code, message, now_ts(now), state, state, job_id, *expected, expect_kind),
         )
         if cur.rowcount:
             log.info("job %s -> %s%s", log_id(job_id), state, f" ({error_code})" if error_code else "")
@@ -230,6 +246,31 @@ class Store:
             "SELECT * FROM jobs WHERE expires_at < ? ORDER BY expires_at", (now_ts(now),)
         ).fetchall()
         return [dict(r) for r in rows]
+
+    def deleted(self) -> list[dict[str, Any]]:
+        rows = self.conn.execute("SELECT * FROM jobs WHERE state = 'deleted' ORDER BY updated_at").fetchall()
+        return [dict(r) for r in rows]
+
+    def prune_deleted(self, before: datetime) -> int:
+        """Drop `deleted` rows last touched before `before`; their directories are the janitor's, first."""
+        return self.conn.execute(
+            "DELETE FROM jobs WHERE state = 'deleted' AND updated_at < ?", (now_ts(before),)
+        ).rowcount
+
+    # ── the rate window (AC-1) ──────────────────────────────────────────────────────────────────────────
+
+    def add_rate(self, ip_hash: str, now: datetime | None = None) -> None:
+        self.conn.execute("INSERT INTO rate (ip_hash, at) VALUES (?, ?)", (ip_hash, now_ts(now)))
+
+    def rate_hits(self, ip_hash: str, since: datetime) -> list[str]:
+        """The hits of one hash after `since` (a hit exactly a window old has left it), oldest first."""
+        rows = self.conn.execute(
+            "SELECT at FROM rate WHERE ip_hash = ? AND at > ? ORDER BY at", (ip_hash, now_ts(since))
+        ).fetchall()
+        return [r["at"] for r in rows]
+
+    def prune_rate(self, before: datetime) -> int:
+        return self.conn.execute("DELETE FROM rate WHERE at < ?", (now_ts(before),)).rowcount
 
 
 def _check(*, state: str | None = None, kind: str | None = None) -> None:

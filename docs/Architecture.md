@@ -104,7 +104,7 @@ deploy/
   subprocess from a small pool (`preview_timeout = 20 s`, same rlimits as the worker), using the
   index the analyze job cached. A PNG render is cached on disk per (sheet, dpi, settings-hash).
 - **Failure mode:** each rejection is a specific 4xx with a `code` (`too_large`, `too_many_pages`,
-  `encrypted`, `not_pdf`, `no_text_layer`, `rate_limited`, `expired`). Unexpected errors → 500
+  `encrypted`, `not_pdf`, `no_text_layer`, `rate_limited`, `disk_full`, `expired`). Unexpected errors → 500
   with a request id. Nothing leaks internal paths.
 
 #### worker
@@ -126,6 +126,14 @@ deploy/
   orphan dirs with no row, and cap total disk (refuse new uploads with 503 when `/jobs` has
   < 2 GB free).
 - **Failure mode:** logs and continues. Deletion is idempotent.
+- **As built (STORY-012):** `janitor.sweep(store, settings, now)`, run by a thread of the worker process
+  (`Runner.serve`, at start and every `JANITOR_EVERY_S` = 300 s). One pass: rows past `expires_at` are set
+  `deleted` FIRST and then their directory removed (the DELETE route's order, so a task still running on the
+  job writes nothing new); every `deleted` row's directory is removed again if a late write brought it back;
+  directories with no row are removed once older than 1 h (an upload creates its directory before its row);
+  `rate` rows older than the 1 h window and `deleted` rows older than 7 days are pruned. The disk guard is the
+  api's: `POST /api/jobs` answers 503 `disk_full` while `shutil.disk_usage(JOBS_DIR).free < MIN_FREE_GB`
+  (decimal GB, the unit `/api/health` reports), checked with the rate window before anything touches the disk.
 
 #### store
 
@@ -195,7 +203,11 @@ rejects `page ∉ [1, pages]` (the engine's `cuts.plan` raises IndexError past t
 ```
 POST   /api/jobs                       multipart file=<pdf> [mode=chapters|ranges]   (ADR-009 as built: the split mode is the job's, fixed here; default chapters)
   201: {id, state:"queued"}            400 not_pdf|encrypted|no_text_layer · 413 too_large|too_many_pages · 422 invalid (loc body.mode) · 429 rate_limited · 503 disk_full
+                                       429 carries Retry-After (seconds until the oldest of the RATE_PER_HOUR attempts leaves the sliding hour); a refused
+                                       upload counts as an attempt; the client is the peer, or X-Forwarded-For's last hop when the peer is TRUSTED_PROXY
 GET    /api/jobs/{id}                  {id, state, kind, progress, total, queue_position, message, error_code, expires_at, seconds_left, filename, pages}
+                                       queue_position = 1 + the queued jobs of the same kind created before this one (the claim order); null unless queued
+                                       error_code (failed only) = timeout | resources | too_large_output | internal
                                        seconds_left = whole seconds until expires_at by the SERVER clock (0 at the deadline, never negative); the SPA counts down from it and only a 404/410 declares a job gone
                                        404 unknown · 410 expired
 GET    /api/jobs/{id}/analysis         Analysis (409 until state ≥ review)
@@ -206,7 +218,7 @@ POST   /api/jobs/{id}/sections/{i}/plan       {settings?, override?, sections?} 
                                        sections = the list to plan i in (the client's local one, validated as in PUT), else the saved list
                                        422 no_section when i is past that list (never the job-level 404)
                                        422 invalid (loc plan.source) when the saved plan is a `ranges` one: a span has nothing to preview
-POST   /api/jobs/{id}/cut              202 {state:"queued"} (uses the saved Plan) · 409 if running
+POST   /api/jobs/{id}/cut              202 {state:"queued"} (uses the saved Plan; from review, done or a failed cut) · 409 if running
 GET    /api/jobs/{id}/manifest         the last cut's manifest rows as JSON [{index, name, file, printedPages, pageCount, flags, notes, leaks, bytes} — the engine's manifest row + index/name/file] (409 before any cut; kept until the next cut replaces it)
 GET    /api/jobs/{id}/result.zip       attachment
 GET    /api/jobs/{id}/sections/{i}.pdf attachment (after cut)
@@ -223,7 +235,9 @@ never appear in logs (logs carry a short hash).
 `failed` (with error_code), and any → `deleted`. From `done`, editing the Plan returns to
 `review`. Old outputs stay downloadable until the next cut replaces them.
 
-**Failed cuts are recoverable (Shuma-approved framing, 2026-09-25):** a job that is `failed` with `kind: cut` (timeout/resources/internal while cutting) keeps its analysis and plan, so `PUT /plan` and `POST /cut` treat it like `review` (failed/cut → review on a saved edit; failed/cut → queued/cut on POST /cut). A failed ANALYZE stays terminal (there is nothing to edit). The previous result.zip, if any, stays downloadable.
+**Failed cuts are recoverable (Shuma-approved framing, 2026-09-25):** a job that is `failed` with `kind: cut` (timeout/resources/too_large_output/internal while cutting) keeps its analysis and plan, so `PUT /plan` and `POST /cut` treat it like `review` (failed/cut → review on a saved edit; failed/cut → queued/cut on POST /cut). A failed ANALYZE stays terminal (there is nothing to edit). The previous result.zip, if any, stays downloadable. Built in STORY-012: `routes/common.py:editable` (state AND kind), `post_cut`'s second conditional transition (`expect_kind="cut"`), the SPA's Split stays live with the reason above it.
+
+**Output budget (STORY-012):** a cut may write at most `min(MAX_OUTPUT_BYTES, max(10 × upload bytes, 256 MB))` into `work/`, measured after every section on both paths (engine and page ranges); past it the cut ends `failed/too_large_output` with its section files removed and no `result.zip` written (the previous one stays). The row's `message` tells the visitor to split into fewer or smaller sections.
 
 ### File layout
 
@@ -285,6 +299,7 @@ never appear in logs (logs carry a short hash).
 
 - **Status:** Accepted (Shuma, 2026-09-25)
 - **Decision:** No accounts. The job id is the capability. `jobs.owner` is a nullable column reserved for v2 accounts. The IP is stored only as a salted hash (for rate limiting), and the salt rotates daily.
+- **As built (STORY-012):** `ratelimit.ip_hash(ip, now, secret)` = sha256(sha256(`secret:UTC date`) + ip); the secret is `PDFSPLIT_IP_SALT`, or one drawn per api process when unset (fine for the CLI's single uvicorn process; several processes must share one). The same hash feeds `jobs.ip_hash` and `rate.ip_hash`; logs carry at most its first 8 characters. A visitor's window starts afresh at 00:00 UTC, when the salt turns.
 
 ### ADR-008: Caddy for TLS + static + proxy on one Hetzner/DO VM
 
@@ -317,6 +332,7 @@ CREATE TABLE jobs (
 CREATE INDEX jobs_queue ON jobs(state, created_at);
 CREATE INDEX jobs_expiry ON jobs(expires_at);
 CREATE TABLE rate (ip_hash TEXT, at TEXT);   -- sliding window; pruned by the janitor
+CREATE INDEX rate_window ON rate(ip_hash, at);
 ```
 
 ---

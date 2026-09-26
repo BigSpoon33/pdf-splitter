@@ -24,8 +24,12 @@ timeout + 10 s, RLIMIT_FSIZE 1 GB) under the kind's wall-clock timeout. An analy
 `<id>/analysis.json`, `<id>/plan.json` and the engine index `<id>/work/.book-index.json`, then moves the row to
 `review`. A cut job reads `<id>/plan.json`, writes one PDF per section into `<id>/work/` and then
 `<id>/result.zip` (`NNN - <section name>.pdf` × n + `manifest.json`), replaced whole, and moves the row to `done`.
-A failure leaves `failed` with `error_code` `timeout`, `resources` or `internal`. SIGTERM stops claiming and
-lets running jobs finish.
+A failure leaves `failed` with `error_code` `timeout`, `resources`, `too_large_output` (the cut passed its output
+budget: `PDFSPLIT_MAX_OUTPUT_BYTES` or 10× the upload, whichever is smaller, never under 256 MB — nothing of that
+cut is kept) or `internal`; a failed cut can be edited and cut again, a failed analyze cannot. The worker process
+also runs the janitor: at start and every 5 min it marks jobs past their TTL `deleted` and removes their
+directories, removes directories with no row (older than 1 h) or whose row is `deleted`, and prunes rate rows
+out of the window and `deleted` rows older than 7 days. SIGTERM stops claiming and lets running jobs finish.
 
 Request logs come from the app (`pdf_splitter.access`), not uvicorn, so job ids appear only as `log_id` hashes.
 Every response carries an `X-Request-ID` (an inbound one is kept when it matches `[A-Za-z0-9-]{8,64}`); the same
@@ -39,16 +43,19 @@ has every code), 422s add `errors: [{loc, msg, type}]`.
 
 ```
 POST   /api/jobs                             multipart file [+ mode=chapters|ranges] → 201 {id, state}
-GET    /api/jobs/{id}                        {id, state, kind, progress, total, queue_position, message,
-                                              error_code (failed only), expires_at, seconds_left, filename, pages}
+                                              429 rate_limited + Retry-After (PDFSPLIT_RATE_PER_HOUR attempts per client per
+                                              sliding hour) · 503 disk_full (under PDFSPLIT_MIN_FREE_GB free on the jobs volume)
+GET    /api/jobs/{id}                        {id, state, kind, progress, total, queue_position (1 = next of its kind,
+                                              null unless queued), message, error_code (failed only), expires_at,
+                                              seconds_left, filename, pages}
                                               (seconds_left: until expires_at by the server's clock — the SPA counts
                                               down from it; only the 410 below declares a job gone)
                                               404 not_found · 410 expired (deleted or past its TTL)
 GET    /api/jobs/{id}/analysis               the Analysis (409 not_ready before review)
 GET    /api/jobs/{id}/plan                   the saved Plan
 PUT    /api/jobs/{id}/plan                   Plan → 200 normalized Plan · 422 invalid · 409 busy while a job runs;
-                                              from done the job returns to review
-POST   /api/jobs/{id}/cut                    202 {id, state: "queued"} · 409 busy/not_ready · 422 empty plan
+                                              from done (or a failed cut) the job returns to review
+POST   /api/jobs/{id}/cut                    202 {id, state: "queued"} (from review, done or a failed cut) · 409 busy/not_ready · 422 empty plan
 GET    /api/jobs/{id}/sheets/{n}.png?dpi=72  PNG of sheet n (dpi 48|72|110), cached per (sheet, dpi, settings)
 POST   /api/jobs/{id}/sections/{i}/plan      {settings?, override?, sections?} → the Section plan (rects on 1-based sheets)
 GET    /api/jobs/{id}/result.zip             attachment (409 not_ready before the first cut)
@@ -72,7 +79,11 @@ All settings are environment variables with the `PDFSPLIT_` prefix (`src/pdf_spl
 | `PDFSPLIT_MAX_PAGES` | `2000` | largest page count |
 | `PDFSPLIT_TTL_HOURS` | `24` | hours a job and its files are kept |
 | `PDFSPLIT_WORKERS` | `2` | concurrent analyze/cut jobs |
-| `PDFSPLIT_RATE_PER_HOUR` | `6` | uploads per IP per hour |
+| `PDFSPLIT_RATE_PER_HOUR` | `6` | upload attempts per client per sliding hour (the 7th is 429 with `Retry-After`) |
+| `PDFSPLIT_MIN_FREE_GB` | `2` | uploads are refused (503 `disk_full`) below this much free space on the jobs volume (decimal GB) |
+| `PDFSPLIT_TRUSTED_PROXY` | unset | the one peer address whose `X-Forwarded-For` (last hop) names the client; unset, the peer is the client |
+| `PDFSPLIT_IP_SALT` | unset | secret under the daily-rotating IP hash; set it when more than one api process shares `jobs.db` |
+| `PDFSPLIT_MAX_OUTPUT_BYTES` | `2147483648` | ceiling on what one cut may write (the budget is this or 10× the upload, whichever is smaller, never under 256 MB) |
 | `PDFSPLIT_ANALYZE_TIMEOUT` | `300` | analyze job wall-clock limit, seconds |
 | `PDFSPLIT_CUT_TIMEOUT` | `600` | cut job wall-clock limit, seconds |
 | `PDFSPLIT_PUBLIC_URL` | `http://localhost:8000` | the site's public base URL |

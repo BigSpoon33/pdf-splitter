@@ -35,6 +35,7 @@ from pdf_splitter.worker.analyze import (
     page_labels,
     suggest,
 )
+from pdf_splitter.worker.cut import OutputTooLarge
 from pdf_splitter.worker.runner import REQUEUED, Runner, classify, loggable_tail, task_args
 from pdf_splitter.worker.task import Throttle
 
@@ -413,6 +414,8 @@ def test_task_refuses_an_id_that_is_not_a_plain_name(bad: str, capsys: pytest.Ca
         (pymupdf.mupdf.FzErrorLibrary("out of memory"), "resources", task.EXIT_RESOURCES),
         (pymupdf.mupdf.FzErrorFormat("cannot recognize xref format"), "internal", task.EXIT_INTERNAL),
         (pymupdf.mupdf.FzErrorSyntax("expected 'obj' keyword"), "internal", task.EXIT_INTERNAL),
+        # STORY-012: the cut's own output budget, a plain failure code (not a resource kill).
+        (OutputTooLarge(300_000), "too_large_output", task.EXIT_INTERNAL),
     ],
 )
 def test_guarded_maps_exceptions(
@@ -475,6 +478,8 @@ def test_sandbox_refuses_to_run_without_a_command() -> None:
         (0, b"", "internal"),
         (0, b'{"ok": false, "code": "internal"}', "internal"),
         (3, b'{"ok": false, "code": "resources"}', "resources"),
+        (1, b'{"ok": false, "code": "too_large_output"}', "too_large_output"),      # STORY-012's output cap
+        (1, b'{"ok": false, "code": "../etc"}', "internal"),                        # only the codes it names
         (1, b"Traceback ...", "internal"),
         (-signal.SIGXCPU, b"", "resources"),
         (-signal.SIGKILL, b"", "resources"),
