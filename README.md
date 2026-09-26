@@ -85,10 +85,10 @@ All settings are environment variables with the `PDFSPLIT_` prefix (`src/pdf_spl
 | `PDFSPLIT_IP_SALT` | unset | secret under the daily-rotating IP hash; set it when more than one api process shares `jobs.db` |
 | `PDFSPLIT_MAX_UPLOADS` | `4` | uploads the api streams at once; beyond it `POST /api/jobs` is 503 `overloaded` (with `Retry-After`) before the body is read |
 | `PDFSPLIT_LIMIT_CONCURRENCY` | `64` | uvicorn's ceiling on open connections (its own 503 beyond it) |
-| `PDFSPLIT_MAX_UPLOADS_PER_CLIENT` | `2` | of those uploads, how many one client (an IPv4 address or an IPv6 /64) may hold at once; beyond it 429 `rate_limited` (`Retry-After: 5`) before the body is read, no rate slot spent |
-| `PDFSPLIT_MIN_UPLOAD_RATE` | `32768` | an upload must deliver at least this many bytes in every 30 s window or it is abandoned with 408 `too_slow` — a floor on the rate, not a time limit |
+| `PDFSPLIT_MAX_UPLOADS_PER_CLIENT` | `2` | of those uploads, how many one client (an IPv4 address or an IPv6 /64) may hold at once; beyond it 429 `rate_limited` (`Retry-After: 5`) before the body is read, no rate slot spent. How *long* an upload may take is not the api's decision: it reads whatever arrives and never cancels a read — the proxy bounds the body (§ Deploy, `PDFSPLIT_READ_BODY`) |
 | `PDFSPLIT_MAX_JSON_BYTES` | `4194304` | largest body of any other request (a plan), in bytes; 413 beyond it, 411 without a `Content-Length` |
-| `PDFSPLIT_BODY_TIMEOUT` | `20` | seconds such a body has to arrive whole before the request is answered 408 `too_slow` |
+| `PDFSPLIT_BODY_TIMEOUT` | `20` | seconds such a body has to arrive whole before the request is answered 408 `too_slow`; a client that disconnects mid-body is logged as 499 |
+| `PDFSPLIT_MAX_BODIES_PER_CLIENT` | `8` | how many such bodies one client may have in flight; the next is 429 `rate_limited` (`Retry-After: 5`), unread — re-opening held bodies as they time out can't fill `PDFSPLIT_LIMIT_CONCURRENCY` from one address |
 | `PDFSPLIT_MAX_OUTPUT_BYTES` | `2147483648` | ceiling on what one cut may write (the budget is this or 10× the upload, whichever is smaller, never under 256 MB, never over the sandbox's 1 GiB file limit less 64 MiB for the ZIP — so the default lands on 960 MiB) |
 | `PDFSPLIT_ANALYZE_TIMEOUT` | `300` | analyze job wall-clock limit, seconds |
 | `PDFSPLIT_CUT_TIMEOUT` | `600` | cut job wall-clock limit, seconds |
@@ -152,10 +152,20 @@ carry IPv4 and an IPv6 ULA /64, so an IPv6 visitor is DNAT'd to caddy natively a
 address (rate-limited per /64). The worker has a read-only root, all capabilities dropped, a 64 MB tmpfs `/tmp` and
 a memory limit with no swap; the api is the same. Uploads spool under `/jobs/.spool` on the volume, never in RAM,
 and `POST /api/jobs` refuses what it can from the headers alone (an oversized `Content-Length`, a fifth concurrent
-upload, a client's third, a spent rate window) before it reads a byte of body; an upload that then falls under
-32 KiB per 30 s is abandoned (408), and any other body (a plan) must be declared, at most 4 MiB and complete
-within 20 s before its route runs. The `web` stage builds `web/dist` with Bun and the `caddy` stage copies it to
-`/srv`. The engine comes from its public GitHub tag during the build — no LAN access is needed anywhere.
+upload, a client's third, a spent rate window) before it reads a byte of body. **How long a body may take is
+Caddy's decision, not the api's** (`servers { timeouts { read_header 15s  read_body 30m  idle 2m } }` in
+`deploy/Caddyfile`; `PDFSPLIT_READ_BODY` overrides the 30 m): `read_body` is Go's `ReadTimeout`, the wall clock for
+one request's headers and body — per HTTP/1.1 request or HTTP/2 stream — so a body that stalls, or trickles for
+longer than that, is cut by Caddy and the api sees a plain disconnect (a 400 for an upload, a 499 for a plan;
+never an error of its own). 30 m carries the 200 MiB cap at ~115 KiB/s; the trade-off is that a slower line
+loses the upload at the 30 m mark — there is deliberately no floor on the *rate* any more: the in-app watchdog
+that enforced one raced the body against a clock and lost chunks of genuine uploads (gate r3). Any other body (a
+plan) must be declared, at most 4 MiB and complete within 20 s before its route runs, and one client may have 8
+of them in flight. **Residual risk:** clients spread over several IPv6 /64s (or IPv4 addresses) can still hold
+the 4 upload slots for up to the `read_body` bound each; per-IP connection limiting at the edge (CrowdSec,
+fail2ban on Caddy's log, or a Caddy rate-limit module) is STORY-017. The `web` stage builds `web/dist` with Bun and
+the `caddy` stage copies it to `/srv`. The engine comes from its public GitHub tag during the build — no LAN access
+is needed anywhere.
 
 ```bash
 cp deploy/.env.example deploy/.env       # set PDFSPLIT_IP_SALT (required) and PUBLIC_HOST
@@ -176,7 +186,8 @@ host (a real one and a smoke run) apart. `deploy/.env` is read from the compose 
 | `PDFSPLIT_SUBNET` / `PDFSPLIT_SUBNET6` | `172.30.0.0/24` / `fd30:5eaf:9a13::/64` | the `backend` network (internal: caddy + api) |
 | `PDFSPLIT_CADDY_IP` / `PDFSPLIT_CADDY_IP6` | `172.30.0.10` / `fd30:5eaf:9a13::10` | caddy's fixed addresses on `backend`; together they are the api's `PDFSPLIT_TRUSTED_PROXY` — the only peer whose `X-Forwarded-For` names the client (caddy may connect over either family) |
 | `PDFSPLIT_EDGE_SUBNET` / `PDFSPLIT_EDGE_SUBNET6` | `172.30.1.0/24` / `fd30:5eaf:9a13:1::/64` | the `edge` network (caddy alone: published ports, ACME) |
-| `PDFSPLIT_WORKERS`, `PDFSPLIT_RATE_PER_HOUR`, `PDFSPLIT_MAX_BYTES`, `PDFSPLIT_TTL_HOURS`, `PDFSPLIT_MIN_FREE_GB`, `PDFSPLIT_MAX_UPLOADS`, `PDFSPLIT_LIMIT_CONCURRENCY`, `PDFSPLIT_MAX_UPLOADS_PER_CLIENT`, `PDFSPLIT_MIN_UPLOAD_RATE`, `PDFSPLIT_MAX_JSON_BYTES`, `PDFSPLIT_BODY_TIMEOUT` | as in § Configuration | passed through to both api and worker |
+| `PDFSPLIT_WORKERS`, `PDFSPLIT_RATE_PER_HOUR`, `PDFSPLIT_MAX_BYTES`, `PDFSPLIT_TTL_HOURS`, `PDFSPLIT_MIN_FREE_GB`, `PDFSPLIT_MAX_UPLOADS`, `PDFSPLIT_LIMIT_CONCURRENCY`, `PDFSPLIT_MAX_UPLOADS_PER_CLIENT`, `PDFSPLIT_MAX_JSON_BYTES`, `PDFSPLIT_BODY_TIMEOUT`, `PDFSPLIT_MAX_BODIES_PER_CLIENT` | as in § Configuration | passed through to both api and worker |
+| `PDFSPLIT_READ_BODY` | `30m` | Caddy's `read_body` (a Caddy duration): the wall clock for one request's headers + body, the only bound on how long an upload may take; the smoke test shortens it |
 | `PDFSPLIT_TAG` | `local` | the image tag (`pdfsplit-app:<tag>`, `pdfsplit-caddy:<tag>`) |
 
 Caddy caps request bodies at 210 MB (just above the api's 200 MiB, so an oversized upload still gets the api's own
@@ -190,16 +201,31 @@ listener later.
 
 **Host firewall.** Docker's own rules live in the FORWARD chain; what the api sends to the host's own address on
 the backend network (the gateway) goes through INPUT, which is the host's to police. Drop it there, ahead of every
-allow, for both families — with the subnets from `deploy/.env` if you changed them:
+allow, for both families — with the subnets from `deploy/.env` if you changed them. The chain names differ per
+family (`ufw-before-*` in `before.rules`, `ufw6-before-*` in `before6.rules`: a v6 rule naming the v4 chain makes
+`ip6tables-restore` fail and `ufw reload` refuse the whole file), and an nftables rule goes in its **own file with
+its own table** — never into `/etc/nftables.conf` and never via `nft -f /etc/nftables.conf` on a running host,
+whose stock `flush ruleset` deletes Docker's tables (DNAT to caddy, the real client addresses, ACME):
 
 ```bash
-# ufw (Ubuntu): the before-rules run ahead of `ufw allow ...`; put these first in the *filter section's
-# ufw-before-input chain of BOTH files, then `ufw reload`.
-#   /etc/ufw/before.rules    -A ufw-before-input -s 172.30.0.0/24 -j DROP
-#   /etc/ufw/before6.rules   -A ufw-before-input -s fd30:5eaf:9a13::/64 -j DROP
-# nftables (Debian without ufw), persisted in /etc/nftables.conf under `chain input`:
-#   ip  saddr 172.30.0.0/24 drop
-#   ip6 saddr fd30:5eaf:9a13::/64 drop
+# ufw (Ubuntu): the before-rules run ahead of `ufw allow ...`. In the *filter section of each file, right after
+# its `RELATED,ESTABLISHED` line, then `ufw reload`:
+#   /etc/ufw/before.rules    -A ufw-before-input  -s 172.30.0.0/24 -j DROP
+#   /etc/ufw/before6.rules   -A ufw6-before-input -s fd30:5eaf:9a13::/64 -j DROP
+# nftables (Debian without ufw): a separate file, its own table, loaded by `nft -f` of THAT file (idempotent).
+# For boot persistence add `include "/etc/nftables.d/*.nft"` at the END of /etc/nftables.conf — the boot-time
+# load runs before Docker starts, so its flush is harmless then; on a running host load ONLY the pdfsplit file.
+#   /etc/nftables.d/pdfsplit.nft:
+#     table inet pdfsplit
+#     flush table inet pdfsplit
+#     table inet pdfsplit {
+#         chain input {
+#             type filter hook input priority filter - 1; policy accept;
+#             ip saddr 172.30.0.0/24 drop
+#             ip6 saddr fd30:5eaf:9a13::/64 drop
+#         }
+#     }
+#   nft -f /etc/nftables.d/pdfsplit.nft && nft list table inet pdfsplit
 # Check, from inside the api (expects `blocked` on every line; sshd is the service every VM has):
 docker compose -p pdfsplit -f deploy/compose.yaml exec api python -c '
 import socket
@@ -221,10 +247,16 @@ in the app image — nothing publishes the api, and Docker binds no port on an i
 uploads is 8 × 413 with under 2 MB of body read each and no slot spent, 6 × 60 MiB at once is 4 spooled to
 `/jobs/.spool` + 2 × 503 `overloaded`, and three uploads with spoofed `X-Forwarded-For` are 201 201 429 under the
 client's own hash; a client on `edge` uploading to caddy over IPv6 and the host reaching the published port at the
-edge network's v6 gateway (the netfilter DNAT path a visitor takes) land in one bucket, their shared /64; four
-uploads trickling 256 B/s from one address are 2 × 429 (its cap) + 2 × 408 (abandoned after a 30 s window) while a
-second address uploads 201 in the meantime, and 63 `PUT /plan` bodies that never finish are 63 × 408 after 20 s with
-the api healthy afterwards; `DELETE` → 410. It always tears down with `down -v`, untags its images, and fails if
-anything of the project is left or any other container on the host changed. Override `SMOKE_PROJECT`,
-`SMOKE_HTTP_PORT`, `SMOKE_HTTPS_PORT`, `SMOKE_SUBNET`, `SMOKE_SUBNET6`, `SMOKE_CADDY_IP`, `SMOKE_CADDY_IP6`,
-`SMOKE_EDGE_SUBNET`, `SMOKE_EDGE_SUBNET6` if those collide, `SMOKE_HOST_PORTS` to probe more of the host.
+edge network's v6 gateway (the netfilter DNAT path a visitor takes) land in one bucket, their shared /64. The run
+starts caddy with `read_body` at 10 s (`SMOKE_READ_BODY_S`) so the bound shows in seconds: four uploads trickling
+256 B/s *through caddy* from one address are 2 × 429 (its cap) + 2 cut by caddy at the bound (an empty `200 OK`
+with `Connection: close` to an HTTP/1.1 client) while a second address uploads 201 in the meantime; a stalled
+`PUT` over HTTP/2 from the host is 502 from caddy at the bound and the api logs it as 499; 63 `PUT /plan` bodies
+that never finish, straight at the api from one address, are 8 × 408 after the api's 20 s + 55 × 429 at once (its
+per-client body cap) with health answering 200 *while* they are held; `DELETE` → 410. Then caddy is recreated at
+the shipped 30 m and a 64 MiB upload at 150 KiB/s (`SMOKE_STEADY_MIB`, `SMOKE_STEADY_RATE`; ≈ 7 min — set
+`SMOKE_STEADY_MIB=8` for a quick run) arrives whole, and the api's log is checked for zero `ERROR`/traceback lines. It
+always tears down with `down -v`, untags its images, and fails if anything of the project is left or any other
+container on the host changed. Override `SMOKE_PROJECT`, `SMOKE_HTTP_PORT`, `SMOKE_HTTPS_PORT`, `SMOKE_SUBNET`,
+`SMOKE_SUBNET6`, `SMOKE_CADDY_IP`, `SMOKE_CADDY_IP6`, `SMOKE_EDGE_SUBNET`, `SMOKE_EDGE_SUBNET6` if those collide,
+`SMOKE_HOST_PORTS` to probe more of the host.

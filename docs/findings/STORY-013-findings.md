@@ -8,9 +8,11 @@ Commit `cce9bd1 feat: STORY-013 - containers, compose, Caddy and an end-to-end s
 commit `fix: STORY-013 - gate r1: uploads guarded before the body is read, real IPv6 client addresses, api without
 egress, smoke on an empty host` (`6ef0253`) on top of `7d9311a` — § Gate r1 fixes below; `3396e1a` repaired the SPA
 parity it broke. **Gate r2** (§ Round 2 of the review) failed it with 5 confirmed findings; the fix is `fix: STORY-013 -
-gate r2: slow bodies can't pin the caps, v6 keyed per /64, host reachability documented and probed` on top of
-`cc32530` — § Gate r2 fixes below. The file:line references in § AC Verification are as of `cce9bd1`; the gate sections
-cite the lines current at their commit.
+gate r2: slow bodies can't pin the caps, v6 keyed per /64, host reachability documented and probed` (`897a94d`) on top of
+`cc32530` — § Gate r2 fixes below. **Gate r3** (§ Round 3) found the r2 watchdog LOSING DATA and paused the loop; Shuma
+chose to simplify (2026-09-26): the fix is `fix: STORY-013 - gate r3: slow bodies bounded at the proxy, no in-app
+watchdog; per-client body caps; correct host firewall rules` on top of `3882222` — § Gate r3 fixes below. The file:line
+references in § AC Verification are as of `cce9bd1`; the gate sections cite the lines current at their commit.
 
 ## AC Verification
 - [x] AC-1: one multi-stage `Dockerfile` — `:6` `web` (`oven/bun:1.3.5`, `bun install --frozen-lockfile` + `bun run build`),
@@ -366,6 +368,137 @@ addresses `.80/.81/.82`, two each → `4×400 2×503`, 4 open `/jobs/.spool` fds
 (22 containers, incl. `deploy-*` and `multica-*` on `172.26.0.0/16`, untouched); no `pdfsplit*` image or `:smoke` tag
 remains; nothing pushed, no daemon setting changed, the smoke's own subnets stayed `172.27.13/14.0/24` + the `fd27:` ULAs.
 
+## Gate r3 fixes (2026-09-26, attempt 3 — "simplify", Shuma's decision)
+
+Round 3 (`docs/findings/STORY-013-review.md` § Round 3) showed the r2 upload watchdog LOSING DATA: `asyncio.wait_for(receive(),
+…)` cancelled a `BaseHTTPMiddleware` receive that is not cancel-safe at window boundaries, so a chunk was dropped and a
+genuine upload was stored truncated yet answered 201. The decision: no in-app timing of bodies at all; the proxy bounds
+them. Six items, one commit.
+
+**1. The in-app upload watchdog is gone** — `src/pdf_splitter/upload.py:77` `UploadGuard` keeps everything that refuses
+from the headers (size, 411/415, the server cap, the per-client cap, the rate slot before the body, the disk guard, the
+spool on the volume) and then calls `self.app(scope, receive, send)` with the server's OWN `receive` (`:124`): no wrapper,
+nothing that could race or cancel a read. `Progress`, `UPLOAD_WINDOW`, the `clock` parameter and `Settings.min_upload_rate`
+(`PDFSPLIT_MIN_UPLOAD_RATE`) are removed from code, compose, `.env.example`, README and the config tests. The `too_slow`
+code stays (the body guard still answers it, § 4) with its message reworded for what it now is (a request body, not the
+upload) in `errors.py` and `web/src/lib/errors.ts` — parity test unchanged at 18 codes. Test: `tests/test_upload.py:641`
+`test_an_admitted_upload_streams_through_the_servers_own_receive_however_slowly` — the parser stand-in asserts the
+`receive` it was handed `is` the one the guard got, and a body arriving in ten chunks with a (simulated) pause before
+each reaches it whole (201, 1000 bytes, one rate row).
+
+**2. Bodies are bounded at Caddy** — `deploy/Caddyfile:14-16`, a global `servers { timeouts { read_header 15s  read_body
+{$READ_BODY_TIMEOUT:30m}  idle 2m } }`; `compose.yaml:65` passes `READ_BODY_TIMEOUT: ${PDFSPLIT_READ_BODY:-30m}` to caddy
+(`.env.example`, README § Deploy). `caddy adapt` shows `read_timeout` 1800 s by default and 20 s / 10 s under the
+override; `caddy validate` → `Valid configuration`; `caddy fmt --diff` clean. **What the numbers mean:** `read_body` is
+Go's `http.Server.ReadTimeout` — the wall clock for one request's headers AND body, set per HTTP/1.1 request and (since
+Go 1.20's `x/net/http2`) per HTTP/2 stream; 30 m carries the api's 200 MiB cap at ~115 KiB/s (200 × 1024 / 1800). The
+**trade-off**: there is no floor on the *rate* any more, only this ceiling on the *time* — a line slower than ~115 KiB/s
+loses a 200 MiB upload at the 30 m mark (it never did under the r2 watchdog's 32 KiB / 30 s floor), and a client that
+holds a slot pays nothing but time (§ 6). **Observed behaviour when Caddy cuts a body** (probe stack `pdfsplit-r3probe`,
+own subnets `172.29.101/102.0/24`, torn down; then the smoke): an HTTP/1.1 client gets Go's empty `HTTP/1.1 200 OK`,
+`Content-Length: 0`, `Connection: close` (the handler wrote nothing — the api's answer never reaches a client whose body
+was cut); an HTTP/2 stream gets a 502 (`reverse_proxy`: `readfrom … i/o timeout`); the api sees a plain disconnect and
+answers 400 to an upload (FastAPI's body-parse error) or 499 to a plan (§ 4) — never an ERROR. **Live, in the smoke:** at a
+10 s override, four 256 B/s trickles through caddy → 2 × 429 (the per-client cap) + 2 cut at `t=10.0` s with ≤ 2 KB in;
+a stalled `PUT` over HTTP/2 from the host → 502 from caddy, the api's access line `… 499 10003 ms`; then caddy recreated at
+the shipped 30 m and **64 MiB at 150 KiB/s through caddy arrives whole** (400 `not_pdf` after every byte — the body is
+zeros — at t ≈ 437 s; transcript below). `deploy/smoke_client.py` prints `t=<seconds>` per exchange for this (`:148`).
+
+**3. The per-client cap survives midnight** — `src/pdf_splitter/ratelimit.py:76` `client_key(ip, secret)` =
+sha256(sha256(`secret:in-flight`) + `rate_key(ip)`): the same IPv4-address-or-IPv6-/64 grouping as the window, salted by
+the secret, NOT dated, never stored. Both in-flight caps key on it (`upload.py:106`, `body_guard.py:71`); the dated
+`ip_hash` is still what `take_slot` records and the route stores (`request.state.client_hash`), so ADR-007 is unchanged.
+Tests: `tests/test_limits.py:137` (same across days, per /64, v4-mapped folded, differs from either day's `ip_hash`);
+`tests/test_upload.py:671` `test_the_per_client_cap_survives_midnight` — `ratelimit.utcnow` frozen at 23:59:00, two uploads
+from one /64 held inside the route, the clock moved to 00:00:30, a third from the same /64 is 429 (it was 201 on the
+dated key), the guard's `per_client` holds exactly one key, and the `jobs` rows carry yesterday's hash for the two and
+today's for the later ones.
+
+**4. BodyGuard** — `src/pdf_splitter/body_guard.py`: 4 MiB + 20 s kept; `Settings.max_bodies_per_client` = 8
+(`config.py:47`, `PDFSPLIT_MAX_BODIES_PER_CLIENT`, compose + `.env.example` + README) — a client's ninth body in flight is
+429 `rate_limited` + `Retry-After: 5` (`RETRY_AFTER_BODY`, `:37`) + `Connection: close`, unread (`:74`); the count is
+charged while the body is being read and released before the route runs. A mid-body disconnect answers `CLIENT_CLOSED` =
+499 with an empty body (`:35`, `client_closed` `:125`): uvicorn's `send` is a no-op once the peer is gone, so nothing goes
+on the wire, but the ASGI contract is met and the access log logs `PUT … 499` instead of the "No response returned."
+500 + traceback that Starlette 1.7's `call_next` raised. Tests (`tests/test_body_guard.py`): `:147` disconnect → `[499]`,
+empty body, cap released; `:160` the same through the whole app (`create_app`, access log around the guard) — no record at
+ERROR, no "Traceback", an access line with ` 499 `; `:178` eight bodies held from one client, the ninth 429 with the
+headers above and its `receive` never called, another client's body read and routed (200), the cap empty after the held
+ones end. Live: 63 held PUTs from one address straight at the api → 8 × 408 after 20 s + 55 × 429 within 0.1 s, health
+through caddy 200 *while* they were held; the api log has 0 ERROR/traceback lines for the whole run (the smoke asserts it).
+
+**5. Host firewall docs corrected** — README § Deploy "Host firewall" (`README.md:202`), Architecture ADR-005 "The rules,
+corrected" (`:343`), § Handoff below: ufw v4 `-A ufw-before-input -s 172.30.0.0/24 -j DROP` in `before.rules`, v6
+`-A ufw6-before-input -s fd30:5eaf:9a13::/64 -j DROP` in `before6.rules` (the chains are per family); nftables as a
+SEPARATE file `/etc/nftables.d/pdfsplit.nft` with its own `table inet pdfsplit` and an `input` chain at `priority filter - 1`,
+made idempotent by `table inet pdfsplit` + `flush table inet pdfsplit` ahead of the definition, loaded by `nft -f` of THAT
+file — never `nft -f /etc/nftables.conf` on a running host (Debian's stock `flush ruleset` deletes Docker's tables);
+`include "/etc/nftables.d/*.nft"` at the end of `nftables.conf` only for boot persistence (boot runs before Docker).
+**Validated in throwaway `unshare -rn` namespaces** against the STOCK ufw files (`before.rules` 75 lines, `before6.rules`
+142 lines, fetched from `git.launchpad.net/ufw`): with ufw's runtime chains pre-created and `--noflush` (how
+`ufw-init-functions` loads them) `iptables-restore -n before.rules` and `ip6tables-restore -n before6.rules` apply cleanly
+with the DROP lines at `:26` / `:30`; the OLD line (`ufw-before-input` inside `before6.rules`, what README said before) fails
+`ip6tables-restore: line 30 failed: No chain/target/match by that name.` (rc 1 — `ufw reload` would refuse the file, and
+the v6 drop was never installed: round 3 finding 4 confirmed). Note `iptables-restore --test` does NOT catch it (the nft
+backend only parses under `--test`), which is why the namespace applies for real. `nft -f pdfsplit.nft` twice beside a
+Docker-style `table ip filter` → the two drop rules once, the Docker-style table intact; `flush ruleset` → 0 tables left
+(finding 5 confirmed).
+
+**6. Residual risk documented** — README § Deploy, Architecture ADR-005 "Residual risk (gate r3)" (`:350`) and ADR-008
+"Bodies are bounded at Caddy" (`:394`): several IPv6 /64s (or IPv4 addresses) can hold the 4 upload slots for up to the
+`read_body` bound each; the answer is per-IP connection/request limiting at the edge — `docs/stories/STORY-017.md`
+(backlog: CrowdSec / fail2ban on Caddy's access log, or a Caddy rate-limit module, per-/64 for IPv6).
+
+**Smoke changes:** the run starts caddy at `read_body` 10 s (`SMOKE_READ_BODY_S`; under the api's 20 s body bound, so a
+PUT cut through caddy is provably caddy's — the api logs 499, not its own 408); the r2 "slow uploads straight at the api"
+step became "stalled uploads THROUGH caddy" (`smoke.sh:313`; straight at the api a trickle now runs as long as the client
+likes, by design), plus the HTTP/2 stall from the host (`:337`), the held PUTs under the per-client cap with health polled
+while they hold (`:348`), the caddy recreate at the shipped 30 m + the steady 64 MiB upload (`:368`; `SMOKE_STEADY_MIB` /
+`SMOKE_STEADY_RATE`, ≈ 7 min at the defaults, `SMOKE_STEADY_MIB=8` for a quick run) and the final "0 ERROR/traceback lines
+in the api log" check. `cut_by_caddy()` (`:93`) counts the lines with an empty 200 ending within `[bound, bound + 5 s)`.
+
+**Tests:** `uv run pytest -q` → **452 passed in 100.72s** (450 → 452: −3 watchdog tests, +2 upload, +1 limits, +2 body
+guard); `uv run ruff check` → `All checks passed!`. `cd web && bun run check` → `337 FILES 0 ERRORS 0 WARNINGS`; `bun run
+test` → `Test Files 21 passed · Tests 286 passed`; `bun run build` → `dist/assets/index-Bi7ZZFr5.js 109.31 kB │ gzip: 38.95
+kB`. `caddy validate` → `Valid configuration`. **Smoke — quick run (`SMOKE_STEADY_MIB=8 SMOKE_HOST_PORTS="22 11434"`) PASSED
+first time (2.5 min); full default run (64 MiB at 150 KiB/s) PASSED, exit 0:**
+```
+09:39:15 smoke: project pdfsplit-smoke, caddy https://localhost:18443 (read_body 10s for the run), backend 172.27.13.0/24 + fd27:5eaf:9a13::/64, edge 172.27.14.0/24 + fd27:5eaf:9a13:1::/64, 22 other containers running
+09:39:16   ok  fixture book: 127643 bytes
+09:39:16 docker compose up -d --build --wait
+09:39:32   ok  stack up: api=Up 6 seconds (healthy) caddy=Up Less than a second worker=Up 6 seconds 
+09:39:32   ok  GET /api/health via caddy → 200 {"ok":true,"queue":0,"disk_free_gb":233.5,"engine_version":"0.4.2"}
+09:39:32   ok  SPA: / and /j/<id> serve index.html; CSP + nosniff present; /assets/index-Bi7ZZFr5.js gzip-encoded
+09:39:33   ok  egress: api github.com:443 blocked; 172.27.14.1:18443 blocked; 1.1.1.1:53 blocked; caddy reached acme-v02.api.letsencrypt.org; worker network=none; api publishes nothing
+09:39:33 WARN  the api reaches the host at its backend gateway: [172.27.13.1]:11434 [fd27:5eaf:9a13::1]:11434 — drop INPUT from 172.27.13.0/24 and fd27:5eaf:9a13::/64 on the host (README § Deploy) before going public
+09:39:34   ok  POST /api/jobs → 201 (state queued)
+09:39:37   ok  analyze → review (6/6 pages)
+09:39:37   ok  GET /plan → 200 (source headings, 3 sections); PUT /plan → 200
+09:39:40   ok  POST /cut → 202; cut → done (3/3 sections)
+09:39:40   ok  GET /result.zip → 200 application/zip, 94757 bytes, 3 PDFs + manifest.json:
+09:39:42   ok  flood: 8 × 300 MiB straight at the api → 8 × 413 too_large, at most 1152 KB of body read each, 0 slots spent; api oom_killed=false restarts=0 health=healthy mem=2147483648, 55.99MiB resident
+09:39:54   ok  per-client cap: 6 × 60 MiB at once from 172.27.13.77 → 2×400 4×429 (2 streamed, 4 refused unread, no slot); rate rows +2 under 172.27.13.77; then 2 more → 2 × 400
+09:40:00   ok  server cap: 6 × 60 MiB at once from 3 addresses → 4×400 2×503 (4 streamed to the spool: 4 open /jobs/.spool fds mid-upload; 2 refused unread); rate rows +4 across 2 new hashes; api oom_killed=false restarts=0 health=healthy mem=2147483648
+09:40:03   ok  XFF check: 3 uploads straight at the api with spoofed X-Forwarded-For → 201 201 429; rate rows 9→11, all under 172.27.13.77, no new client hash
+09:40:06   ok  IPv6: edge client fd27:5eaf:9a13:1::77 → caddy over v6 → 201, counted under its /64; host → [fd27:5eaf:9a13:1::1]:18443 (v6 DNAT) → 201, same /64 → the same bucket (rows 12→13, hashes 4→4; rate_key fd27:5eaf:9a13:1::/64)
+09:40:17   ok  stalled uploads: 4 × 64 KiB at 256 B/s through caddy from 172.27.14.78 → 2×200 2×429 (2 refused by the per-client cap unread, 2 admitted and cut by caddy after 10.0s with ≤ 2 KB in); 172.27.14.79 got 201 through caddy meanwhile; rate rows +3 (2 admitted + 1), 2 new hashes; api oom_killed=false restarts=0 health=healthy mem=2147483648
+09:40:33   ok  stalled PUT over HTTP/2 from the host: caddy answered 502 at its bound; the api logged the disconnect as 499 after 10004 ms, no ERROR
+09:40:53   ok  held PUTs: 63 × PUT /plan declaring 100 KB and sending 100 B, straight at the api from 172.27.13.78 → 8 × 408 too_slow after the 20 s bound + 55 × 429 rate_limited within 0.1s (the per-client body cap, unread); health via caddy 200 while they held; api oom_killed=false restarts=0 health=healthy mem=2147483648
+09:40:53   ok  DELETE → 204, GET → 410 (expired)
+09:40:53 recreating caddy at the shipped read_body default (compose.yaml: 30m)
+09:40:55 steady upload: 64 MiB at 150 KiB/s through caddy (≈ 436 s)
+09:48:14   ok  steady upload: 64 MiB at 150 KiB/s through caddy at read_body 30m → 400 t=436.9, all 67109017 bytes (body + envelope) read by the api and answered not_pdf — never cut
+09:48:14   ok  api log: 0 ERROR/traceback lines across the run (every cut body was a 400 or a 499)
+09:48:14 teardown: docker compose -p pdfsplit-smoke down -v; untag the :smoke images
+09:48:17 other containers untouched: 22 before and after; leftovers of pdfsplit-smoke: 0
+09:48:17 SMOKE PASSED
+```
+**Isolation:** `docker ps -a`, `docker volume ls` and `docker network ls` before and after (the probe stack and both
+smoke runs) are identical — 22 containers incl. `deploy-*` and `multica-*` (`172.26.0.0/16`) untouched; the probe used
+project `pdfsplit-r3probe` on `172.29.101/102.0/24` + `fd29:5eaf:9a13::/64` and ports 18480/18843, the smoke its usual
+`172.27.13/14.0/24` + `fd27:` ULAs and 18080/18443; no `:smoke`/`:r3probe` tag left; nothing pushed; no daemon or host
+firewall change (the firewall files were only ever applied inside `unshare -rn`).
+
 ## Bugs Found
 - **`docker compose down --rmi all` under a throwaway project untagged another project's image.** First teardown design.
   The smoke build is byte-identical to a `:local` build, so both tags share one image ID and compose's remove-by-ID took
@@ -433,12 +566,18 @@ internal), so nothing in the api may ever need to call out — a future webhook 
 network or a new service. **But the api CAN reach the VM itself** at the backend gateway (`172.30.0.1` and
 `fd30:5eaf:9a13::1` by default): `internal` only stops forwarding, and sshd on `0.0.0.0`/`[::]` answers there (gate r2,
 seen live with Ollama on the laptop). Add the host rule BEFORE the first public `up`, ahead of every allow, both
-families — ufw (Ubuntu): in `/etc/ufw/before.rules`, in the `*filter` section's `ufw-before-input` chain right after
-the `RELATED,ESTABLISHED` line, `-A ufw-before-input -s 172.30.0.0/24 -j DROP`; in `/etc/ufw/before6.rules` at the same
-spot, `-A ufw-before-input -s fd30:5eaf:9a13::/64 -j DROP`; then `ufw reload`. nftables (Debian without ufw), in
-`/etc/nftables.conf` under `chain input` before the accept rules: `ip saddr 172.30.0.0/24 drop` and `ip6 saddr
-fd30:5eaf:9a13::/64 drop`, then `nft -f /etc/nftables.conf`. (Adjust the subnets if `deploy/.env` changed them.) Check,
-from inside the running api, that every line says `blocked`:
+families (gate r3 corrected these; README § Deploy has the same block) — ufw (Ubuntu): in `/etc/ufw/before.rules`, in
+the `*filter` section's `ufw-before-input` chain right after the `RELATED,ESTABLISHED` line, `-A ufw-before-input -s
+172.30.0.0/24 -j DROP`; in `/etc/ufw/before6.rules` at the same spot but in ITS chain, `-A ufw6-before-input -s
+fd30:5eaf:9a13::/64 -j DROP` (the v6 chains are `ufw6-*`; naming the v4 chain there makes `ip6tables-restore` fail at that
+line and `ufw reload` refuse the file); then `ufw reload`. nftables (Debian without ufw): a SEPARATE file
+`/etc/nftables.d/pdfsplit.nft` — `table inet pdfsplit` / `flush table inet pdfsplit` / `table inet pdfsplit { chain input {
+type filter hook input priority filter - 1; policy accept; ip saddr 172.30.0.0/24 drop; ip6 saddr fd30:5eaf:9a13::/64
+drop } }` — loaded with `nft -f /etc/nftables.d/pdfsplit.nft` (idempotent). NEVER `nft -f /etc/nftables.conf` while Docker
+runs: Debian's stock file opens with `flush ruleset`, which deletes Docker's tables (the DNAT to caddy, the real client
+addresses, ACME on 80/443); for boot persistence put `include "/etc/nftables.d/*.nft"` at the END of `nftables.conf` (the
+boot-time load runs before Docker starts). (Adjust the subnets if `deploy/.env` changed them.) Check, from inside the
+running api, that every line says `blocked`:
 `docker compose -p pdfsplit -f deploy/compose.yaml exec api python -c 'import socket
 for host in ("172.30.0.1", "fd30:5eaf:9a13::1"):
     try: socket.create_connection((host, 22), timeout=2).close(); print("REACHED", host)
@@ -447,7 +586,11 @@ host-reachability step prints a WARNING naming the reachable ports while the rul
 same block). The `overloaded` and `too_slow` codes already have SPA messages (gates r1/r2); the one `web/` follow-up for
 014 to fold in with the terms/privacy pages is the favicon CSP note above. The uptime check (AC-5 of 014)
 should hit `https://<domain>/api/health` and expect `"ok":true` + `"engine_version":"0.4.2"`; ntfy is LAN-only, so a cloud
-cron / healthchecks.io ping is the likely answer — decide in-story.
+cron / healthchecks.io ping is the likely answer — decide in-story. **Body timing (gate r3):** the only bound on how long
+an upload may take is caddy's `read_body` (`PDFSPLIT_READ_BODY`, 30 m — 200 MiB at ~115 KiB/s); a visitor on a slower
+line loses the upload at the 30 m mark with no api message (an HTTP/2 XHR sees a 502 → the SPA's fallback text), and
+the api never times a body itself. Nothing on the VM needs setting for it. What is NOT covered — several /64s holding the
+4 upload slots for 30 m each — is STORY-017 (per-IP limiting at the edge), to weigh after the first real traffic.
 
 ## Out-of-Scope Items
 - Favicon `data:,` vs. the CSP (cosmetic; § CSP above) — `web/` is STORY-014's to touch.
@@ -455,3 +598,6 @@ cron / healthchecks.io ping is the likely answer — decide in-story.
 - `pids_limit` / `ulimits` on the worker container, Caddy's own `cap_drop`, HSTS: hardening beyond the ACs; none needed
   for the ACs and each changes behaviour the VM story may want to decide (HSTS especially).
 - `docker compose down --rmi` semantics (§ Bugs) are worth a line in `PROVISION.md`.
+- Per-IP connection/request limiting at the edge (several /64s × the 30 m `read_body` bound) — STORY-017, backlog.
+- A friendlier answer than Go's empty `200 OK` / caddy's 502 for a body caddy cut (a Caddy `handle_errors` block that
+  maps the 502 to a JSON `{code, message}` the SPA knows) — cosmetic; the SPA shows its fallback text today.

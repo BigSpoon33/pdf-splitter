@@ -9,14 +9,14 @@ import subprocess
 import sys
 import tempfile
 import threading
-import time
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pymupdf as fitz
 import pytest
 from fastapi.testclient import TestClient
 
-from pdf_splitter import preflight, upload
+from pdf_splitter import preflight, ratelimit, upload
 from pdf_splitter.access_log import redact_path
 from pdf_splitter.app import create_app
 from pdf_splitter.config import Settings
@@ -610,31 +610,20 @@ def test_one_client_holds_at_most_max_uploads_per_client_and_never_all_the_slots
     assert job_count(settings) == 4
 
 
-# --- the watchdog (gate r2): a body that stops arriving is abandoned --------------------------------
-
-
-class Clock:
-    def __init__(self) -> None:
-        self.t = 0.0
-
-    def __call__(self) -> float:
-        return self.t
+# --- gate r3: the upload path never wraps, races or cancels the server's receive ---------------------------
 
 
 class Sink:
-    """What the guard wraps in these tests, standing in for the multipart parser: reads the whole body, then
-    answers 201 — the answer the guard must drop once it has sent a 408 of its own."""
+    """The parser's stand-in: remembers the `receive` it was handed, drains the body, answers 201."""
 
     def __init__(self) -> None:
-        self.got, self.disconnected = 0, False
+        self.receive, self.got = None, 0
 
     async def __call__(self, scope, receive, send) -> None:
+        self.receive = receive
         while True:
             message = await receive()
-            if message["type"] == "http.disconnect":
-                self.disconnected = True
-                break
-            self.got += len(message["body"])
+            self.got += len(message.get("body", b""))
             if not message.get("more_body"):
                 break
         await send({"type": "http.response.start", "status": 201, "headers": []})
@@ -649,83 +638,96 @@ def upload_scope(length: int) -> dict:
     }
 
 
-def trickling(clock: Clock, steps: list[tuple]):
-    """A `receive` that plays `steps` — advance the clock by `dt`, then hand over `body` (the last step of a
-    complete body says `False` for more) — and, past a `None` body, a client that never sends another byte
-    (blocks until the guard's wait gives up)."""
-    it, silent = iter(steps), False
-
-    async def receive():
-        nonlocal silent
-        if not silent:
-            dt, body, *more = next(it)
-            clock.t += dt
-            if body is not None:
-                return {"type": "http.request", "body": body, "more_body": more[0] if more else True}
-            silent = True
-        await asyncio.Event().wait()
-
-    return receive
-
-
-def guarded(tmp_path: Path, clock, **overrides):
-    settings = Settings(jobs_dir=tmp_path / "jobs", **overrides)
+def test_an_admitted_upload_streams_through_the_servers_own_receive_however_slowly(tmp_path: Path) -> None:
+    """Gate r3 (round 3 finding 1): the watchdog's `wait_for(receive(), …)` cancelled reads that are not
+    cancel-safe and lost chunks of genuine uploads. Now the guard hands the app the very `receive` it was
+    given — no wrapper, so nothing can race it against a clock — and a body arriving a byte every "hour"
+    (the pauses are simulated: the test does not sleep) reaches the parser whole."""
+    settings = Settings(jobs_dir=tmp_path / "jobs")
     settings.jobs_dir.mkdir()
     store = Store(settings.db_path)
     store.init()
     store.close()
-    sink, sent = Sink(), []
+    sink, sent, chunks = Sink(), [], iter([b"0" * 100] * 9 + [b"1" * 100])
+
+    async def receive():
+        # Each chunk lands after an "hour" of nothing: the pause is the point, and nothing may be timing it.
+        await asyncio.sleep(0)
+        body = next(chunks)
+        return {"type": "http.request", "body": body, "more_body": body[0] == ord("0")}
 
     async def send(message):
         sent.append(message)
 
-    return upload.UploadGuard(sink, settings, clock=clock), sink, sent, send
-
-
-def statuses(sent: list) -> list[int]:
-    return [m["status"] for m in sent if m["type"] == "http.response.start"]
-
-
-def test_an_upload_that_keeps_moving_streams_to_the_app_untouched(tmp_path: Path) -> None:
-    """40 KiB every 10 s clears 32 KiB per 30 s window: three windows pass, the app gets every byte, one 201."""
-    clock = Clock()
-    guard, sink, sent, send = guarded(tmp_path, clock)
-    chunk = b"0" * (40 * 1024)
-    receive = trickling(clock, [(10.0, chunk)] * 8 + [(10.0, chunk, False)])
-    asyncio.run(guard(upload_scope(len(chunk) * 9), receive, send))
-    assert sink.got == len(chunk) * 9 and not sink.disconnected
-    assert statuses(sent) == [201]
-    assert guard.in_flight == 0 and guard.per_client == {}
-
-
-def test_an_upload_under_the_rate_floor_is_408_too_slow_and_frees_its_slots(tmp_path: Path) -> None:
-    """100 bytes in 31 s: the window closes with too little, so that chunk is never handed on — the guard answers
-    408 itself (Connection: close), tells the parser the client is gone and drops the parser's own answer. The
-    slot the window spent stays spent — a trickler pays with their own hour — but the in-flight counts are freed."""
-    clock = Clock()
-    guard, sink, sent, send = guarded(tmp_path, clock)
-    receive = trickling(clock, [(31.0, b"0" * 100), (1.0, b"0" * 100)])
+    guard = upload.UploadGuard(sink, settings)
     asyncio.run(guard(upload_scope(1000), receive, send))
-    assert sink.disconnected and sink.got == 0
-    assert statuses(sent) == [408]
-    headers = {k.decode(): v.decode() for k, v in sent[0]["headers"]}
-    assert headers["connection"] == "close"
-    assert json.loads(sent[1]["body"]) == {"code": "too_slow", "message": upload.MESSAGES["too_slow"]}
+    assert sink.receive is receive
+    assert sink.got == 1000
+    assert [m["status"] for m in sent if m["type"] == "http.response.start"] == [201]
     assert guard.in_flight == 0 and guard.per_client == {}
-    assert rate_rows(guard.settings) == 1
+    assert rate_rows(settings) == 1
 
 
-def test_a_silent_client_is_408_when_the_wait_itself_times_out(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The other path to the same answer: nothing arrives at all, so it is the wait that gives up (a 50 ms
-    window on the real clock, so the test waits milliseconds, not 30 s). A first window with enough in it
-    (100 bytes ≥ a floor of 1) rolls over; the empty one after it refuses."""
-    monkeypatch.setattr(upload, "UPLOAD_WINDOW", 0.05)
-    guard, sink, sent, send = guarded(tmp_path, time.monotonic, min_upload_rate=1)
-    receive = trickling(Clock(), [(0.0, b"0" * 100), (0.0, None)])
-    asyncio.run(guard(upload_scope(1000), receive, send))
-    assert sink.disconnected and sink.got == 100
-    assert statuses(sent) == [408]
-    assert guard.in_flight == 0 and guard.per_client == {}
+def test_the_per_client_cap_survives_midnight(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Gate r3 (round 3 finding 3): the cap used to be keyed on the DATED hash, so two uploads charged at 23:59
+    were counted under yesterday's key and a third at 00:00 found today's empty — every client got a fresh cap
+    at midnight UTC. Keyed on the undated `client_key`, the two held uploads still count after the day turns."""
+    settings = Settings(jobs_dir=tmp_path / "jobs", max_uploads=4, max_uploads_per_client=2, trusted_proxy="testclient")
+    clock = {"now": datetime(2026, 9, 25, 23, 59, 0, tzinfo=UTC)}
+    monkeypatch.setattr(ratelimit, "utcnow", lambda: clock["now"])
+    entered, release, holding = threading.Semaphore(0), threading.Event(), True
+    real = upload.run_preflight
+
+    def slow_preflight(*args, **kwargs):
+        if holding:
+            entered.release()
+            assert release.wait(30)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(upload, "run_preflight", slow_preflight)
+    statuses: list[int] = []
+    with TestClient(create_app(settings)) as client:
+
+        def attempt(xff: str) -> None:
+            statuses.append(post(client, pdf_bytes(), headers={"X-Forwarded-For": xff}).status_code)
+
+        held = [threading.Thread(target=attempt, args=(a,)) for a in ("2001:db8:1:2::1", "2001:db8:1:2::2")]
+        for t in held:
+            t.start()
+        for _ in held:
+            assert entered.acquire(timeout=30)
+        holding = False
+        # The day turns while both are still streaming: the hash the window records under changes, the cap's
+        # key must not.
+        clock["now"] = datetime(2026, 9, 26, 0, 0, 30, tzinfo=UTC)
+        r = post(client, pdf_bytes(), headers={"X-Forwarded-For": "2001:db8:1:2::3"})
+        assert r.status_code == 429, r.text
+        assert r.json()["code"] == "rate_limited"
+        assert len(guard_of(client).per_client) == 1
+        release.set()
+        for t in held:
+            t.join(30)
+        assert statuses == [201, 201]
+        assert post(client, pdf_bytes(), headers={"X-Forwarded-For": "2001:db8:1:2::3"}).status_code == 201
+        assert guard_of(client).per_client == {}
+    # The two uploads were recorded under yesterday's dated hash, the third under today's (ADR-007 unchanged).
+    store = Store(settings.db_path)
+    try:
+        hashes = {row[0] for row in store.conn.execute("SELECT ip_hash FROM jobs")}
+    finally:
+        store.close()
+    assert hashes == {
+        ratelimit.ip_hash("2001:db8:1:2::1", datetime(2026, 9, 25, tzinfo=UTC)),
+        ratelimit.ip_hash("2001:db8:1:2::1", datetime(2026, 9, 26, tzinfo=UTC)),
+    }
+
+
+def guard_of(client: TestClient) -> upload.UploadGuard:
+    """The `UploadGuard` instance inside the app's middleware stack (its counters are the evidence)."""
+    layer = client.app.middleware_stack
+    while not isinstance(layer, upload.UploadGuard):
+        layer = layer.app
+    return layer
 
 
 def test_the_app_spools_uploads_under_the_jobs_dir_while_it_runs(settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
 # The compose stack end to end on a throwaway project (STORY-013 AC-4): build, up, health through caddy, the
 # synthetic book uploaded → review → plan → cut → a zip with 3 PDFs; then what the gate asked for (STORY-013
-# addendum + gates r1/r2): the api has no egress (and a WARNING when the host itself answers at the backend
-# gateway), an upload flood is refused before a byte of body is read, the in-flight cap holds, spoofed
-# X-Forwarded-For straight at the api is ignored, an IPv6 client is counted under its /64, a trickling client
-# can't pin the slots and held-open PUTs can't take the api down; delete, `down -v`. Exit 0 only when every step
-# passed AND nothing of the project is left behind. Needs docker compose, curl and the repo's dev environment
-# (uv) for the fixture book and the hashes.
+# addendum + gates r1/r2/r3): the api has no egress (and a WARNING when the host itself answers at the backend
+# gateway), an upload flood is refused before a byte of body is read, the in-flight caps hold, spoofed
+# X-Forwarded-For straight at the api is ignored, an IPv6 client is counted under its /64, a body that stalls
+# or trickles is cut by CADDY at its read_body bound (HTTP/1.1 and HTTP/2) while a steady slow upload under the
+# production bound completes, held-open PUTs meet the api's 20 s bound and one client's cap on them, and the
+# api logs no ERROR for any of it; delete, `down -v`. Exit 0 only when every step passed AND nothing of the
+# project is left behind. Needs docker compose, curl and the repo's dev environment (uv) for the fixture book
+# and the hashes. The steady-upload step takes SMOKE_STEADY_MIB / SMOKE_STEADY_RATE seconds (≈ 7 min at the
+# defaults, which are the production numbers the bound must carry); SMOKE_STEADY_MIB=8 for a quick run.
 set -euo pipefail
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -28,6 +31,14 @@ export PDFSPLIT_IP_SALT="smoke-$RANDOM$RANDOM$RANDOM"
 export PDFSPLIT_RATE_PER_HOUR=6
 export PUBLIC_HOST=localhost
 export PDFSPLIT_PUBLIC_URL="https://localhost:$PDFSPLIT_HTTPS_PORT"
+# Caddy's read_body for the run, in whole seconds (gate r3): short, so a stalled body is cut in seconds rather
+# than the production 30 m, and UNDER the api's 20 s JSON-body bound, so a PUT cut through caddy is provably
+# caddy's doing (the api logs 499, not its own 408). The steady-upload step at the end recreates caddy at the
+# production default to prove that one carries a slow line.
+READ_BODY_S=${SMOKE_READ_BODY_S:-10}
+export PDFSPLIT_READ_BODY="${READ_BODY_S}s"
+STEADY_MIB=${SMOKE_STEADY_MIB:-64}
+STEADY_RATE=${SMOKE_STEADY_RATE:-153600}
 # The one-off clients' fixed addresses: one on `backend` (straight at the api), one on `edge` (through caddy
 # over IPv6). The rate budget below is per address, so the whole run is planned around them.
 CLIENT4="${PDFSPLIT_SUBNET%.0/24}.77"
@@ -39,10 +50,13 @@ BACKEND_GW6="${PDFSPLIT_SUBNET6%/64}1"
 # Host ports the api is asked to reach at the backend gateway (gate r2): sshd is the one every VM has; add what
 # this host binds to 0.0.0.0/[::] to see the warning fire.
 HOST_PORTS=${SMOKE_HOST_PORTS:-22}
-# Two more addresses on `backend` for the slow-body checks: the caps are per client, so the trickler must not
-# be CLIENT4 (whose hour is spent by then) and the client it must not lock out must be a third.
-TRICKLER="${PDFSPLIT_SUBNET%.0/24}.78"
-OTHER="${PDFSPLIT_SUBNET%.0/24}.79"
+# More addresses for the slow-body checks: the caps are per client, so the trickler must not be CLIENT4
+# (whose hour is spent by then) and the client it must not lock out must be another. Uploads that stall go
+# THROUGH caddy (its bound is what cuts them), from two addresses on `edge`; the held PUTs go straight at the
+# api from one on `backend`.
+PUTTER="${PDFSPLIT_SUBNET%.0/24}.78"
+EDGE_TRICKLER="${PDFSPLIT_EDGE_SUBNET%.0/24}.78"
+EDGE_OTHER="${PDFSPLIT_EDGE_SUBNET%.0/24}.79"
 
 BASE="https://localhost:$PDFSPLIT_HTTPS_PORT"
 # Not /tmp: it is RAM-backed on some hosts. Readable by the one-off clients, which run as the image's uid 10001.
@@ -71,8 +85,13 @@ client() {
 }
 backend() { client backend "$CLIENT4" "${PDFSPLIT_SUBNET6%/64}77" "$@"; }
 edge() { client edge "${PDFSPLIT_EDGE_SUBNET%.0/24}.77" "$CLIENT6" "$@"; }
-trickler() { client backend "$TRICKLER" "${PDFSPLIT_SUBNET6%/64}78" "$@"; }
-other() { client backend "$OTHER" "${PDFSPLIT_SUBNET6%/64}79" "$@"; }
+putter() { client backend "$PUTTER" "${PDFSPLIT_SUBNET6%/64}78" "$@"; }
+edge_trickler() { client edge "$EDGE_TRICKLER" "${PDFSPLIT_EDGE_SUBNET6%/64}78" "$@"; }
+edge_other() { client edge "$EDGE_OTHER" "${PDFSPLIT_EDGE_SUBNET6%/64}79" "$@"; }
+# Lines of a client's output that caddy cut at its bound: no api answer reached the client (an HTTP/1.1
+# client gets Go's empty `200 OK` + `Connection: close`, nothing else), ended within `READ_BODY_S` + 5 s.
+cut_by_caddy() { awk -v lo="$READ_BODY_S" -v hi="$((READ_BODY_S + 5))" '$1 == 200 && NF == 4 { t = substr($3, 3); if (t + 0 >= lo && t + 0 < hi) n++ } END { print n + 0 }' "$1"; }
+api_errors() { compose logs --no-color api 2>/dev/null | grep -cE ' ERROR |Traceback' || true; }
 # The `rate` table, read inside the running api (sqlite on the volume): counts, and the hashes newest-last.
 rate_rows() { compose exec -T api python -c 'import sqlite3; print(*sqlite3.connect("/jobs/jobs.db").execute("select count(*), count(distinct ip_hash) from rate").fetchone())'; }
 rate_hashes() { compose exec -T api python -c 'import sqlite3; print(*[r[0] for r in sqlite3.connect("/jobs/jobs.db").execute("select ip_hash from rate order by at, rowid")])'; }
@@ -102,7 +121,7 @@ teardown() {
 trap teardown EXIT
 
 OTHERS_BEFORE=$(others)
-say "smoke: project $PROJECT, caddy https://localhost:$PDFSPLIT_HTTPS_PORT, backend $PDFSPLIT_SUBNET + $PDFSPLIT_SUBNET6, edge $PDFSPLIT_EDGE_SUBNET + $PDFSPLIT_EDGE_SUBNET6, $(others | wc -l) other containers running"
+say "smoke: project $PROJECT, caddy https://localhost:$PDFSPLIT_HTTPS_PORT (read_body ${READ_BODY_S}s for the run), backend $PDFSPLIT_SUBNET + $PDFSPLIT_SUBNET6, edge $PDFSPLIT_EDGE_SUBNET + $PDFSPLIT_EDGE_SUBNET6, $(others | wc -l) other containers running"
 
 # The same 6-page, 3-heading book tests/test_api_e2e.py drives (tests/fixtures/books.py).
 (cd "$ROOT" && uv run --quiet python -c \
@@ -291,38 +310,80 @@ read -r rows_4 hashes_4 < <(rate_rows)
 [ "$((rows_4 - rows_4a))" = 1 ] && [ "$hashes_4" = "$hashes_4a" ] || fail "two addresses in one /64 should share a bucket: rows $rows_4a→$rows_4, hashes $hashes_4a→$hashes_4"
 step "IPv6: edge client $CLIENT6 → caddy over v6 → 201, counted under its /64; host → [$EDGE_GW6]:$PDFSPLIT_HTTPS_PORT (v6 DNAT) → 201, same /64 → the same bucket (rows $rows_4a→$rows_4, hashes $hashes_4a→$hashes_4; rate_key $(py -c 'import sys; from pdf_splitter.ratelimit import rate_key; print(rate_key(sys.argv[1]))' "$CLIENT6"))"
 
-# ── Slow bodies (gate r2), straight at the api from two fresh addresses on `backend`.
-# Four uploads from one address, each a real trickle (256 B/s into a declared 64 KiB): two are 429 at once (the
-# per-client cap, PDFSPLIT_MAX_UPLOADS_PER_CLIENT=2, no slot spent) and the two admitted fall under the 32 KiB
-# per 30 s floor and are 408 `too_slow` — while they hold, a second client is not locked out (two of the
-# server's four slots are free). Before this, four such uploads pinned every slot for as long as the client liked.
+# ── Slow bodies (gate r3): the api no longer times an upload — a watchdog that raced the body against a clock
+# lost chunks of genuine uploads — caddy does, at read_body (${READ_BODY_S}s for this run, 30 m in production).
+# Four uploads trickling 256 B/s THROUGH caddy from one edge address: two are 429 at once (the per-client cap,
+# unread, no slot spent), the two admitted stream until caddy's bound cuts them (the client gets Go's empty
+# `200 OK` + `Connection: close`; the api sees a disconnect and its 400 reaches nobody) — and a second address
+# uploads 201 through caddy meanwhile. Straight at the api the same trickle would run for as long as the client
+# liked, by design: the api never cancels a read.
 read -r rows_5 hashes_5 < <(rate_rows)
-trickler http://api:8000/api/jobs --zeros $((64 * 1024)) --chunk 256 --rate 256 --n 4 --family 4 >"$WORK/trickle.txt" &
+edge_trickler https://caddy/api/jobs --sni localhost --zeros $((64 * 1024)) --chunk 256 --rate 256 --n 4 --family 4 --wait $((READ_BODY_S + 30)) >"$WORK/trickle.txt" &
 trickle_pid=$!
-sleep 4
-code=$(other http://api:8000/api/jobs --file /w/book.pdf --family 4 | awk '{print $1}')
+sleep 3
+code=$(edge_other https://caddy/api/jobs --sni localhost --file /w/book.pdf --family 4 | awk '{print $1}')
 [ "$code" = 201 ] || fail "a second client was locked out while one client trickled: $code"
 wait "$trickle_pid" || fail "trickle client: $(cat "$WORK/trickle.txt")"
 codes=$(awk '{print $1}' "$WORK/trickle.txt" | sort | uniq -c | awk '{printf "%s×%s ", $1, $2}')
-[ "$(grep -c '^429 .*rate_limited' "$WORK/trickle.txt")" = 2 ] && [ "$(grep -c '^408 .*too_slow' "$WORK/trickle.txt")" = 2 ] || fail "trickle answered: $codes"
-most_sent=$(grep '^408' "$WORK/trickle.txt" | sed -n 's/.*sent=\([0-9]*\).*/\1/p' | sort -n | tail -1)
+[ "$(grep -c '^429 .*rate_limited' "$WORK/trickle.txt")" = 2 ] && [ "$(cut_by_caddy "$WORK/trickle.txt")" = 2 ] || fail "trickle answered: $codes— $(tr '\n' ';' <"$WORK/trickle.txt")"
+cut_t=$(awk '$1 == 200 { print substr($3, 3) }' "$WORK/trickle.txt" | sort -n | tail -1)
+most_sent=$(awk '$1 == 200 { print substr($2, 6) }' "$WORK/trickle.txt" | sort -n | tail -1)
 read -r rows_6 hashes_6 < <(rate_rows)
 [ "$((rows_6 - rows_5))" = 3 ] && [ "$hashes_6" = "$((hashes_5 + 2))" ] || fail "trickle: rate rows $rows_5→$rows_6, hashes $hashes_5→$hashes_6"
 state=$(api_state)
 [[ $state == *"oom_killed=false restarts=0 health=healthy"* ]] || fail "api after the trickle: $state"
-step "slow uploads: 4 × 64 KiB at 256 B/s from $TRICKLER → $codes(2 refused by the per-client cap unread, 2 abandoned after a 30 s window with ≤ $((most_sent / 1024)) KB in); $OTHER got 201 meanwhile; rate rows +3 (2 admitted trickles + 1), 2 new hashes; api $state"
+step "stalled uploads: 4 × 64 KiB at 256 B/s through caddy from $EDGE_TRICKLER → $codes(2 refused by the per-client cap unread, 2 admitted and cut by caddy after ${cut_t}s with ≤ $((most_sent / 1024)) KB in); $EDGE_OTHER got 201 through caddy meanwhile; rate rows +3 (2 admitted + 1), 2 new hashes; api $state"
 
-# 63 held-open PUT /plan bodies (limit_concurrency is 64; the job need not exist — the body used to be read
-# before the route looked the job up): each is 408 after the 20 s body bound, so the api is answering again
-# within half a minute instead of 503ing for as long as the bodies were held.
-trickler http://api:8000/api/jobs/no-such-job/plan --method PUT --raw --declare 100000 --zeros 100 --n 63 --family 4 >"$WORK/puts.txt" || fail "put client: $(cat "$WORK/puts.txt")"
-[ "$(grep -c '^408 .*too_slow' "$WORK/puts.txt")" = 63 ] || fail "held PUTs answered: $(awk '{print $1}' "$WORK/puts.txt" | sort | uniq -c | tr '\n' ' ')"
+# The same bound on an HTTP/2 stream (what a browser speaks to caddy), from the host: a PUT declaring 1000
+# bytes that sends one and stalls is answered 502 by caddy after the bound (Go applies read_body per stream);
+# the api, which was reading that body under its own 20 s, sees the disconnect first and logs 499 — never a
+# 500 with a traceback (gate r3 finding 6). curl only returns once its stdin closes, so the timing evidence is
+# the api's access line for the request.
+h2=$( (printf 'x'; sleep $((READ_BODY_S + 5))) | timeout $((READ_BODY_S + 30)) curl -ksS --http2 -o /dev/null -w '%{http_code} %{http_version}' -X PUT -H 'Content-Type: application/json' -H 'Content-Length: 1000' -T - "$BASE/api/jobs/h2-stall/plan" 2>/dev/null || true)
+[ "$h2" = "502 2" ] || fail "h2 stalled PUT via caddy: '$h2'"
+h2_ms=$(compose logs --no-color api 2>/dev/null | sed -n 's/.*PUT \/api\/jobs\/[0-9a-f]*\/plan 499 \([0-9]*\)\..*/\1/p' | tail -1)
+[ -n "$h2_ms" ] && [ "$h2_ms" -ge $((READ_BODY_S * 1000)) ] && [ "$h2_ms" -lt $((READ_BODY_S * 1000 + 5000)) ] || fail "the api did not log the cut PUT as a 499 near ${READ_BODY_S}s: '$h2_ms' — $(compose logs --no-color api 2>/dev/null | grep 'PUT ' | tail -3 | tr '\n' ';')"
+step "stalled PUT over HTTP/2 from the host: caddy answered 502 at its bound; the api logged the disconnect as 499 after ${h2_ms} ms, no ERROR"
+
+# 63 held-open PUT /plan bodies from ONE address, straight at the api (limit_concurrency is 64; the job need
+# not exist): the client's cap admits 8 — each 408 after the api's 20 s bound — and refuses the other 55 at
+# once (429, unread), so re-opening them as they time out can never fill the ceiling from one address; health
+# through caddy answers 200 WHILE they are held, not just afterwards.
+putter http://api:8000/api/jobs/no-such-job/plan --method PUT --raw --declare 100000 --zeros 100 --n 63 --family 4 >"$WORK/puts.txt" &
+puts_pid=$!
+sleep 5
 code=$(req "$BASE/api/health" "$WORK/health2.json")
-[ "$code" = 200 ] && [ "$(field "$WORK/health2.json" ok)" = True ] || fail "health after the held PUTs: $code"
+[ "$code" = 200 ] && [ "$(field "$WORK/health2.json" ok)" = True ] || fail "health while 63 PUTs were held: $code"
+wait "$puts_pid" || fail "put client: $(cat "$WORK/puts.txt")"
+[ "$(grep -c '^408 .*too_slow' "$WORK/puts.txt")" = 8 ] && [ "$(grep -c '^429 .*rate_limited' "$WORK/puts.txt")" = 55 ] || fail "held PUTs answered: $(awk '{print $1}' "$WORK/puts.txt" | sort | uniq -c | tr '\n' ' ')"
+refused_t=$(awk '$1 == 429 { print substr($3, 3) }' "$WORK/puts.txt" | sort -n | tail -1)
 state=$(api_state)
 [[ $state == *"restarts=0 health=healthy"* ]] || fail "api after the held PUTs: $state"
-step "held PUTs: 63 × PUT /plan declaring 100 KB and sending 100 B, straight at the api → 63 × 408 too_slow after the 20 s bound; health via caddy 200 after; api $state"
+step "held PUTs: 63 × PUT /plan declaring 100 KB and sending 100 B, straight at the api from $PUTTER → 8 × 408 too_slow after the 20 s bound + 55 × 429 rate_limited within ${refused_t}s (the per-client body cap, unread); health via caddy 200 while they held; api $state"
 
 [ "$(req "$BASE/api/jobs/$JOB" /dev/null -X DELETE)" = 204 ] || fail "DELETE"
 [ "$(req "$BASE/api/jobs/$JOB" "$WORK/gone.json")" = 410 ] || fail "GET after DELETE: $(cat "$WORK/gone.json")"
 step "DELETE → 204, GET → 410 ($(field "$WORK/gone.json" code))"
+
+# ── The production bound (gate r3): caddy recreated with the shipped read_body default (30 m; the run so far
+# used ${READ_BODY_S}s), then STEADY_MIB MiB at STEADY_RATE B/s through caddy — the slow line the number must
+# carry (200 MiB at ~115 KiB/s fits in 30 m) — arrives whole: the api reads every byte and answers its own
+# not_pdf (the body is zeros), which only a body that was never cut gets.
+say "recreating caddy at the shipped read_body default (compose.yaml: 30m)"
+env -u PDFSPLIT_READ_BODY docker compose -p "$PROJECT" -f "$HERE/compose.yaml" up -d --no-build --wait caddy 2>&1 | sed 's/^/      /'
+docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$PROJECT-caddy-1" | grep -qx 'READ_BODY_TIMEOUT=30m' || fail "caddy was not recreated at the 30m default: $(docker inspect -f '{{.Config.Env}}' "$PROJECT-caddy-1")"
+for _ in $(seq 1 60); do
+  [ "$(req "$BASE/api/health" "$WORK/health3.json")" = 200 ] && [ "$(field "$WORK/health3.json" ok)" = True ] && break
+  sleep 1
+done
+[ "$(field "$WORK/health3.json" ok)" = True ] || fail "health after recreating caddy"
+say "steady upload: $STEADY_MIB MiB at $((STEADY_RATE / 1024)) KiB/s through caddy (≈ $((STEADY_MIB * MiB / STEADY_RATE)) s)"
+edge_other https://caddy/api/jobs --sni localhost --zeros $((STEADY_MIB * MiB)) --rate "$STEADY_RATE" --family 4 --wait $((STEADY_MIB * MiB / STEADY_RATE + 600)) >"$WORK/steady.txt" || fail "steady client: $(cat "$WORK/steady.txt")"
+grep -q '^400 .*not_pdf' "$WORK/steady.txt" || fail "steady upload: $(cat "$WORK/steady.txt")"
+sent=$(sed -n 's/.*sent=\([0-9]*\).*/\1/p' "$WORK/steady.txt")
+[ "$sent" -gt $((STEADY_MIB * MiB)) ] || fail "steady upload: only $sent bytes went out before the answer"
+step "steady upload: $STEADY_MIB MiB at $((STEADY_RATE / 1024)) KiB/s through caddy at read_body 30m → $(awk '{print $1, $3}' "$WORK/steady.txt"), all $sent bytes (body + envelope) read by the api and answered not_pdf — never cut"
+
+errors=$(api_errors)
+[ "$errors" = 0 ] || fail "the api logged $errors ERROR/traceback lines: $(compose logs --no-color api 2>/dev/null | grep -E ' ERROR |Traceback' | head -3 | tr '\n' ';')"
+step "api log: 0 ERROR/traceback lines across the run (every cut body was a 400 or a 499)"

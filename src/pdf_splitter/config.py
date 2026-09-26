@@ -34,16 +34,17 @@ class Settings(BaseSettings):
     # uvicorn's own ceiling on open connections (503 beyond it): polls and downloads count too.
     limit_concurrency: int = 64
     # Of `max_uploads`, how many one client may hold at once (429, no slot spent; upload.py `UploadGuard`): a
-    # trickle from one address can then pin at most half the slots, never all of them (gate r2).
+    # trickle from one address can then pin at most half the slots, never all of them (gate r2). How long a
+    # body may take is not the api's business (gate r3): Caddy's read_body bound (deploy/Caddyfile) cuts a
+    # stalled one, and the api reads whatever arrives without ever cancelling a read.
     max_uploads_per_client: int = 2
-    # A streaming upload must deliver at least this many bytes in every 30 s window or it is abandoned (408
-    # `too_slow`, upload.py `Progress`). A floor on the rate, not a wall clock: a slow line still finishes 200 MiB.
-    min_upload_rate: int = 32 * 1024
     # Every other body (a JSON plan) is read whole before the route sees it (body_guard.py): at most this many
     # bytes (413) and all of it within `body_timeout` seconds (408), so a held-open PUT costs one connection for
-    # seconds, not for as long as the client likes.
+    # seconds, not for as long as the client likes — and one client holds at most `max_bodies_per_client` of them
+    # at once (429), so re-opening them as they time out can't keep `limit_concurrency` full (gate r3).
     max_json_bytes: int = 4 * MB
     body_timeout: float = 20
+    max_bodies_per_client: int = 8
     # The secret under the daily-rotating IP hash (ADR-007). Unset, each api process draws its own at start, which
     # is fine for the one uvicorn process the CLI runs; several processes must share one so the window is shared.
     ip_salt: str | None = None

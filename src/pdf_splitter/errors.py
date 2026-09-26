@@ -26,8 +26,9 @@ MESSAGES = {
     "disk_full": "The server has no room for new uploads right now. Try again later.",
     # STORY-013 gate r1: the in-flight upload cap (upload.py `UploadGuard`)
     "overloaded": "The server is busy with other uploads right now. Try again in a moment.",
-    # STORY-013 gate r2: a body that stopped arriving (upload.py `Progress`, body_guard.py)
-    "too_slow": "The upload stalled and was abandoned. Check your connection and try again.",
+    # STORY-013 gate r2: a request body (a plan, never the upload — Caddy bounds that) that stopped arriving
+    # (body_guard.py). Gate r3 took the upload watchdog out; the code stays for the body guard's 408.
+    "too_slow": "The request stalled and was abandoned. Check your connection and try again.",
     # jobs
     "not_found": "There is no such job.",
     "expired": "This job was deleted (files are kept 24 hours).",

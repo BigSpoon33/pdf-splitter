@@ -12,7 +12,8 @@ many bytes went out before the api answered. `--raw` sends the zeros as a bare J
   python smoke_client.py URL [--file P | --zeros N] [--header 'K: V']... [--n N] [--rate BYTES/S] [--family 4|6]
                             [--sni HOST] [--method PUT] [--raw] [--chunk BYTES] [--declare N]
 
-Prints one line per upload: `<status> sent=<bytes> local=<address> <body>`; exits 0 whatever the statuses were.
+Prints one line per upload: `<status> sent=<bytes> t=<seconds> local=<address> <body>` (`t` from the first byte
+sent to the end of the exchange — the evidence of WHEN a proxy cut a body); exits 0 whatever the statuses were.
 """
 
 from __future__ import annotations
@@ -137,12 +138,15 @@ def upload(args: argparse.Namespace) -> str:
             pending = pending[n:]
         if b"\r\n\r\n" in received and done_sending is False and _complete(received):
             done_sending = True
+    elapsed = time.monotonic() - started
     status_line, _, rest = received.partition(b"\r\n")
     status = status_line.split(b" ")[1].decode() if b" " in status_line else "000"
     body = rest.partition(b"\r\n\r\n")[2].decode(errors="replace").strip().replace("\n", " ")
     if args.verbose:
         print(received[:600].decode(errors="replace"), file=sys.stderr)
-    return f"{status} sent={sent} local={local} {body[:200]}"
+    # `t=` is when the exchange ended, from the first byte of the request: how long a body was allowed to
+    # stall before the server cut it is the evidence of the proxy's read_body bound (gate r3).
+    return f"{status} sent={sent} t={elapsed:.1f} local={local} {body[:200]}"
 
 
 def _complete(received: bytes) -> bool:

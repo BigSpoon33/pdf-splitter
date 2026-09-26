@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 from pathlib import Path
 
@@ -12,6 +13,7 @@ import pytest
 from test_upload import assert_unread, reading_client
 
 from pdf_splitter import body_guard
+from pdf_splitter.app import create_app
 from pdf_splitter.config import Settings
 from pdf_splitter.errors import MESSAGES
 
@@ -142,12 +144,78 @@ def test_a_silent_client_is_408_when_the_wait_itself_times_out(tmp_path: Path) -
     assert not echo.ran and statuses(sent) == [408]
 
 
-def test_a_client_that_leaves_mid_body_gets_no_answer_and_no_route(tmp_path: Path) -> None:
+def test_a_client_that_leaves_mid_body_gets_an_empty_499_and_no_route(tmp_path: Path) -> None:
+    """Gate r3 (round 3 finding 6): answering nothing left the access log's `call_next` without a response —
+    a 500 and a traceback for every client that gave up mid-body. The guard now answers nginx's 499 with no
+    body (uvicorn drops it on the dead connection) and the cap is released."""
     clock = Clock()
     guard, echo, sent, send = harness(tmp_path, clock)
     receive = playing(clock, [(0.0, chunk(b"0" * 10)), (1.0, {"type": "http.disconnect"})])
     asyncio.run(guard(put_scope(100), receive, send))
-    assert not echo.ran and sent == []
+    assert not echo.ran
+    assert statuses(sent) == [body_guard.CLIENT_CLOSED] == [499]
+    assert sent[1]["body"] == b"" and guard.per_client == {}
+
+
+def test_a_mid_body_disconnect_is_logged_as_499_not_as_a_500(settings: Settings, caplog: pytest.LogCaptureFixture) -> None:
+    """The same disconnect through the whole app (access log around the guard): the access line says 499 and
+    nothing is logged at ERROR — no "No response returned." traceback."""
+    caplog.set_level(logging.INFO)
+    app, clock, sent = create_app(settings), Clock(), []
+    receive = playing(clock, [(0.0, chunk(b'{"a":')), (1.0, {"type": "http.disconnect"})])
+
+    async def send(message):
+        sent.append(message)
+
+    asyncio.run(app(put_scope(100), receive, send))
+    assert statuses(sent) == [499]
+    assert [r for r in caplog.records if r.levelno >= logging.ERROR] == []
+    assert not any("Traceback" in r.getMessage() for r in caplog.records)
+    assert any(r.getMessage().startswith("PUT /api/jobs/") and " 499 " in r.getMessage()
+               for r in caplog.records if r.name == "pdf_splitter.access")
+
+
+def test_one_client_holds_at_most_max_bodies_per_client_and_others_get_through(tmp_path: Path) -> None:
+    """Gate r3 (round 3 finding 2): the 20 s bound freed a held body, but a client re-opening `LIMIT_CONCURRENCY`
+    of them kept the ceiling full. Now a client's ninth body in flight is 429 at once — unread, `Retry-After`,
+    `Connection: close` — while another client's body is read and routed; the cap frees as bodies end."""
+    guard, echo, _sent, send = harness(tmp_path, Clock(), max_bodies_per_client=8)
+
+    async def scenario() -> None:
+        never = playing(Clock(), [(0.0, None)])
+        held = [asyncio.create_task(guard(put_scope(100), never, send)) for _ in range(8)]
+        for _ in range(3):
+            await asyncio.sleep(0)
+        assert guard.per_client and next(iter(guard.per_client.values())) == 8
+        ninth_sent, ninth_read = [], []
+
+        async def ninth_receive():
+            ninth_read.append(1)
+            return chunk(b"0" * 100, more=False)
+
+        async def ninth_send(message):
+            ninth_sent.append(message)
+
+        await guard(put_scope(100), ninth_receive, ninth_send)
+        assert statuses(ninth_sent) == [429] and ninth_read == []
+        headers = {k.decode(): v.decode() for k, v in ninth_sent[0]["headers"]}
+        assert headers["retry-after"] == body_guard.RETRY_AFTER_BODY and headers["connection"] == "close"
+        assert json.loads(ninth_sent[1]["body"]) == {"code": "rate_limited", "message": MESSAGES["rate_limited"]}
+        # Another client is not behind the first one's cap.
+        other = {**put_scope(7), "client": ("198.51.100.4", 1234)}
+        other_sent = []
+
+        async def other_send(message):
+            other_sent.append(message)
+
+        await guard(other, playing(Clock(), [(0.0, chunk(b'{"a":1}', more=False))]), other_send)
+        assert echo.ran and statuses(other_sent) == [200] and other_sent[1]["body"] == b'{"a":1}'
+        for task in held:
+            task.cancel()
+        await asyncio.gather(*held, return_exceptions=True)
+        assert guard.per_client == {}
+
+    asyncio.run(scenario())
 
 
 @pytest.mark.parametrize(

@@ -20,11 +20,12 @@ x-pdfsplit-env: &pdfsplit-env
   PDFSPLIT_MIN_FREE_GB: ${PDFSPLIT_MIN_FREE_GB:-2}
   PDFSPLIT_MAX_UPLOADS: ${PDFSPLIT_MAX_UPLOADS:-4}
   PDFSPLIT_LIMIT_CONCURRENCY: ${PDFSPLIT_LIMIT_CONCURRENCY:-64}
-  # Gate r2: one client's share of the upload slots, and the floors under a body that stops arriving.
+  # Gates r2/r3: one client's share of the upload slots and of the JSON bodies in flight, and the bound on a
+  # JSON body. How long an UPLOAD may take is caddy's READ_BODY_TIMEOUT below, not the api's.
   PDFSPLIT_MAX_UPLOADS_PER_CLIENT: ${PDFSPLIT_MAX_UPLOADS_PER_CLIENT:-2}
-  PDFSPLIT_MIN_UPLOAD_RATE: ${PDFSPLIT_MIN_UPLOAD_RATE:-32768}
   PDFSPLIT_MAX_JSON_BYTES: ${PDFSPLIT_MAX_JSON_BYTES:-4194304}
   PDFSPLIT_BODY_TIMEOUT: ${PDFSPLIT_BODY_TIMEOUT:-20}
+  PDFSPLIT_MAX_BODIES_PER_CLIENT: ${PDFSPLIT_MAX_BODIES_PER_CLIENT:-8}
   # The api's rate window keys on this; the worker gets it too because the janitor prunes those rows.
   PDFSPLIT_IP_SALT: ${PDFSPLIT_IP_SALT:?set PDFSPLIT_IP_SALT (deploy/.env) - the secret under the IP hash}
   PDFSPLIT_PUBLIC_URL: ${PDFSPLIT_PUBLIC_URL:-https://localhost}
@@ -59,6 +60,9 @@ services:
       - "${PDFSPLIT_HTTPS_PORT:-443}:443"
     environment:
       PUBLIC_HOST: ${PUBLIC_HOST:-localhost}
+      # The wall clock for one request's headers + body (deploy/Caddyfile `read_body`): the only bound on how
+      # long an upload may take. 30m fits 200 MiB at ~115 KiB/s; the smoke shortens it to prove the cut.
+      READ_BODY_TIMEOUT: ${PDFSPLIT_READ_BODY:-30m}
     volumes:
       # Certificates and the ACME account survive a rebuild; losing them means re-issuing on every deploy.
       - caddy_data:/data

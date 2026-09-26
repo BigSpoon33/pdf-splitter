@@ -50,7 +50,8 @@ Dockerfile          (repo root; targets `web` = Bun build of web/dist, `python` 
 deploy/
 ├── compose.yaml        (`name: pdfsplit`; caddy, api, worker; volumes `jobs`, `caddy_data`, `caddy_config`;
 │                        networks `edge` (caddy: ports, ACME) + `backend` (internal: caddy + api), both v4 + v6 ULA)
-├── Caddyfile           (TLS, static SPA + fallback, /api → api:8000, 210MB body cap, CSP + security headers, zstd/gzip)
+├── Caddyfile           (TLS, static SPA + fallback, /api → api:8000, 210MB body cap, read_body 30m / read_header 15s / idle 2m,
+│                        CSP + security headers, zstd/gzip)
 ├── smoke.sh            (the stack end to end under the throwaway project `pdfsplit-smoke`)
 ├── smoke_client.py     (smoke.sh's upload client, run in the app image on the stack's networks: flood, cap, XFF, v6)
 └── .env.example        (→ deploy/.env, gitignored: PDFSPLIT_IP_SALT, PUBLIC_HOST, ports, subnets, limits)
@@ -110,20 +111,27 @@ deploy/
 - **Responsibility:** the HTTP surface, input validation, rate limiting, job state transitions,
   and serving outputs. It never runs a full analysis or cut in-process.
 - **Inputs:** multipart uploads (streamed to disk), JSON Plans, job ids.
-- **Upload guard** (`upload.UploadGuard`, STORY-013 gate r1 + r2): an ASGI layer around `POST /api/jobs` that answers
+- **Upload guard** (`upload.UploadGuard`, STORY-013 gates r1–r3): an ASGI layer around `POST /api/jobs` that answers
   from the headers alone — 413 for a `Content-Length` past `MAX_BYTES` + a 64 KiB envelope, 411/415 for a chunked
   or non-multipart body, 503 `overloaded` past `MAX_UPLOADS` in flight, 429 `rate_limited` when the client already
-  holds `MAX_UPLOADS_PER_CLIENT` of them (keyed like the window: the IPv4 address or the IPv6 /64) or when its rate
-  slot is spent, 503 `disk_full` — before Starlette's multipart parser reads a byte, and closes the connection on a
-  refusal. The route inherits the client's hash and never takes a slot of its own. What is admitted streams under a
-  watchdog (`upload.Progress`): fewer than `MIN_UPLOAD_RATE` bytes in any 30 s window and the upload is abandoned
-  with 408 `too_slow` — a floor on the rate, never a wall clock, so a slow line still finishes a 200 MiB file. What
-  does get parsed spools under `<jobs>/.spool` on the volume (`upload.spooling_to` sets `tempfile`/`TMPDIR` for the
-  app's lifetime), not the container's tmpfs; uvicorn's `limit_concurrency` caps connections.
-- **Body guard** (`body_guard.BodyGuard`, gate r2): every other request with a body (a `PUT /plan`, a section
+  holds `MAX_UPLOADS_PER_CLIENT` of them or when its rate slot is spent, 503 `disk_full` — before Starlette's
+  multipart parser reads a byte, and closes the connection on a refusal. The route inherits the client's hash and
+  never takes a slot of its own. What is admitted is handed to the app with the server's own `receive`, untouched:
+  **the api never times or cancels a read** (gate r3 — the r2 watchdog that raced `receive()` against a clock
+  cancelled reads that are not cancel-safe and stored truncated uploads as 201). How long a body may take is the
+  proxy's bound (Caddy `read_body`, ADR-008). The in-flight caps are keyed on `ratelimit.client_key` — the same
+  IPv4-address-or-IPv6-/64 grouping as the window, salted but undated, so a cap charged at 23:59 is still held at
+  00:00 (gate r3). What does get parsed spools under `<jobs>/.spool` on the volume (`upload.spooling_to` sets
+  `tempfile`/`TMPDIR` for the app's lifetime), not the container's tmpfs; uvicorn's `limit_concurrency` caps
+  connections.
+- **Body guard** (`body_guard.BodyGuard`, gates r2 + r3): every other request with a body (a `PUT /plan`, a section
   plan) is read whole before its route runs — `Content-Length` required (411), at most `MAX_JSON_BYTES` (413
   `invalid`), all of it within `BODY_TIMEOUT` seconds (408 `too_slow`) — so a held-open body costs one connection
-  for seconds, not for as long as the client likes (63 of them used to fill `limit_concurrency` for good).
+  for seconds, not for as long as the client likes (63 of them used to fill `limit_concurrency` for good). One
+  client may have `MAX_BODIES_PER_CLIENT` (8) in flight; the next is 429 `rate_limited`, unread, so re-opening
+  them as they time out cannot keep the ceiling full from one address. A client that disconnects mid-body gets an
+  empty 499 (`body_guard.CLIENT_CLOSED`, uvicorn drops it) so the access log records a client-closed request
+  rather than the 500 + traceback that "no response" used to produce.
 - **Outputs:** JSON, PNG, PDF, ZIP.
 - **Preview calls** (`/sheets/{n}.png`, `/sections/{i}/plan`) run the engine *read-only* in a
   subprocess from a small pool (`preview_timeout = 20 s`, same rlimits as the worker), using the
@@ -227,13 +235,14 @@ rejects `page ∉ [1, pages]` (the engine's `cuts.plan` raises IndexError past t
 
 ```
 POST   /api/jobs                       multipart file=<pdf> [mode=chapters|ranges]   (ADR-009 as built: the split mode is the job's, fixed here; default chapters)
-  201: {id, state:"queued"}            400 not_pdf|encrypted|no_text_layer · 408 too_slow · 411 invalid (chunked) · 413 too_large|too_many_pages · 415 invalid (not multipart) · 422 invalid (loc body.mode) · 429 rate_limited · 503 disk_full|overloaded
+  201: {id, state:"queued"}            400 not_pdf|encrypted|no_text_layer · 411 invalid (chunked) · 413 too_large|too_many_pages · 415 invalid (not multipart) · 422 invalid (loc body.mode) · 429 rate_limited · 503 disk_full|overloaded
                                        429 rate_limited is the sliding hour (Retry-After = seconds until the oldest of the RATE_PER_HOUR attempts leaves it) or the
-                                       per-client in-flight cap (Retry-After 5); 503 overloaded is the server's in-flight cap (Retry-After 5); 408 too_slow is an
-                                       upload that fell under MIN_UPLOAD_RATE bytes per 30 s. Which answers spend one of the client's RATE_PER_HOUR slots: the slot is
-                                       taken once the headers pass and both caps admit, so 201, the route's 400/413, 503 disk_full and 408 too_slow each count as
-                                       an attempt; 411/415, a 413 from the headers, 503 overloaded and the cap's 429 spend none. The client is the peer, or
-                                       X-Forwarded-For's last hop when the peer is TRUSTED_PROXY; an IPv6 client is its /64 (ratelimit.rate_key)
+                                       per-client in-flight cap (Retry-After 5); 503 overloaded is the server's in-flight cap (Retry-After 5). No time bound here:
+                                       an upload that stalls is cut by the PROXY (Caddy read_body, 30 m; the api then answers 400 to a body that ended early).
+                                       Which answers spend one of the client's RATE_PER_HOUR slots: the slot is taken once the headers pass and both caps admit,
+                                       so 201, the route's 400/413 (incl. the 400 for a body the proxy cut) and 503 disk_full each count as an attempt; 411/415,
+                                       a 413 from the headers, 503 overloaded and the cap's 429 spend none. The client is the peer, or X-Forwarded-For's last
+                                       hop when the peer is TRUSTED_PROXY; an IPv6 client is its /64 (ratelimit.rate_key)
 GET    /api/jobs/{id}                  {id, state, kind, progress, total, queue_position, message, error_code, expires_at, seconds_left, filename, pages}
                                        queue_position = 1 + the queued jobs of the same kind created before this one (the claim order); null unless queued
                                        error_code (failed only) = timeout | resources | too_large_output | internal
@@ -243,7 +252,8 @@ GET    /api/jobs/{id}/analysis         Analysis (409 until state ≥ review)
 GET    /api/jobs/{id}/plan             Plan (default = suggested source, no overrides)
 PUT    /api/jobs/{id}/plan             Plan → 200 normalized Plan | 422 with field errors
                                        every body but the upload's (body_guard.BodyGuard): Content-Length required (411 invalid), ≤ MAX_JSON_BYTES (413 invalid),
-                                       whole within BODY_TIMEOUT seconds (408 too_slow) — answered before the route runs, with Connection: close
+                                       whole within BODY_TIMEOUT seconds (408 too_slow), at most MAX_BODIES_PER_CLIENT in flight per client (429 rate_limited,
+                                       Retry-After 5) — answered before the route runs, with Connection: close; a disconnect mid-body is an empty 499 (logged, never sent)
 GET    /api/jobs/{id}/sheets/{n}.png?dpi=72   PNG (dpi ∈ {48, 72, 110})
 POST   /api/jobs/{id}/sections/{i}/plan       {settings?, override?, sections?} → Section plan (not persisted)
                                        sections = the list to plan i in (the client's local one, validated as in PUT), else the saved list
@@ -330,6 +340,18 @@ never appear in logs (logs carry a short hash).
   never drop that (they live in FORWARD; INPUT is the host's), so the VM's firewall must: drop INPUT from the
   backend subnets, v4 and v6, ahead of every allow (README § Deploy has the ufw/nftables lines and the check).
   `deploy/smoke.sh` probes the backend gateway from inside the api and prints a WARNING when the host answers.
+- **The rules, corrected (gate r3):** ufw's chains are per family — `ufw-before-input` in `before.rules`,
+  `ufw6-before-input` in `before6.rules` (a v6 rule naming the v4 chain fails `ip6tables-restore` at that line and
+  `ufw reload` refuses the file); nftables gets its own file and table (`/etc/nftables.d/pdfsplit.nft`, `table inet
+  pdfsplit`, an input chain at `priority filter - 1`) loaded by `nft -f` of that file alone — never
+  `nft -f /etc/nftables.conf` on a running host, whose stock `flush ruleset` deletes Docker's tables (DNAT, the
+  real client addresses, ACME). Both validated in throwaway `unshare -rn` namespaces against the stock ufw files
+  (STORY-013 findings § Gate r3 fixes).
+- **Residual risk (gate r3):** the api's in-flight caps are per client (IPv4 address / IPv6 /64) and the only bound
+  on a body's *time* is Caddy's `read_body` (30 m), so clients spread over several /64s can hold the 4 upload slots
+  for up to 30 m each. Per-IP connection/request limiting at the edge (CrowdSec or fail2ban on Caddy's access log,
+  or a Caddy rate-limit module) is STORY-017 — not scheduled; the abuse it addresses costs an attacker addresses,
+  not bandwidth.
 - **Alternatives:** gVisor/Firecracker (overkill for v1; could be added later as a runtime flag).
 
 ### ADR-006: Svelte + Vite + TypeScript SPA, built with Bun, served by Caddy
@@ -369,6 +391,16 @@ never appear in logs (logs carry a short hash).
   in `caddy_data`), `localhost` → Caddy's internal CA. `deploy/smoke.sh` drives the whole stack under the throwaway project
   `pdfsplit-smoke`, reaching the unpublished api from a one-off client on `backend` (`deploy/smoke_client.py`). `deploy.sh`
   is STORY-014's.
+- **Bodies are bounded at Caddy (gate r3, Shuma's "simplify" decision, 2026-09-26):** the Caddyfile's global
+  `servers { timeouts { read_header 15s  read_body {$READ_BODY_TIMEOUT:30m}  idle 2m } }` (`PDFSPLIT_READ_BODY` in
+  compose). `read_body` is Go's `ReadTimeout` — the wall clock for one request's headers and body, per HTTP/1.1
+  request or HTTP/2 stream — so a body that stalls or trickles past it is cut by Caddy: an HTTP/1.1 client gets Go's
+  empty `200 OK` + `Connection: close`, an HTTP/2 stream a 502, and the api sees a plain disconnect (a 400 for an
+  upload it was parsing, a 499 for a plan the body guard was reading). The numbers: 30 m carries the 200 MiB cap at
+  ~115 KiB/s; the smoke proves 64 MiB at 150 KiB/s arrives whole under it and that a stall is cut at the bound (run
+  with a 10 s override, HTTP/1.1 and HTTP/2). The trade-off: no floor on the *rate* any more, only a ceiling on the
+  *time* — a line slower than ~115 KiB/s loses a 200 MiB upload at the 30 m mark, and a client holding a slot pays
+  nothing but time. The in-app alternative (the r2 watchdog) lost data, which is worse than either.
 
 ---
 

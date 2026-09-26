@@ -1,5 +1,23 @@
 # The site address decides TLS: a public hostname (PUBLIC_HOST on the VM) gets a Let's Encrypt certificate,
 # the local default `localhost` gets one from Caddy's internal CA (curl -k / --cacert locally).
+{
+	servers {
+		# How long a request may take to arrive is decided HERE, not in the api (STORY-013 gate r3: an in-app
+		# watchdog that raced the body against a clock lost chunks of genuine uploads). read_body is Go's
+		# ReadTimeout — the wall clock for one request's headers AND body, per HTTP/1.1 request or HTTP/2
+		# stream — so a body that stalls, or trickles for longer than this, is cut and the api sees a plain
+		# disconnect. 30 m carries the api's 200 MiB cap at ~115 KiB/s; a slower line loses the upload (the
+		# trade-off: no floor on the rate any more, only this ceiling on the time). READ_BODY_TIMEOUT lets a
+		# smoke run shorten it. read_header is the slowloris bound; idle closes keep-alive connections that
+		# send nothing.
+		timeouts {
+			read_header 15s
+			read_body {$READ_BODY_TIMEOUT:30m}
+			idle 2m
+		}
+	}
+}
+
 {$PUBLIC_HOST:localhost} {
 	encode zstd gzip
 

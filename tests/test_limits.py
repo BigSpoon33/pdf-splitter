@@ -134,6 +134,23 @@ def test_ip_hash_is_salted_shared_by_secret_and_rotates_daily() -> None:
     assert ratelimit.ip_hash("198.51.100.7", T0) != a
 
 
+def test_client_key_names_the_same_client_across_midnight_and_never_the_address() -> None:
+    """Gate r3: the in-flight caps (uploads, bodies) charge and release under a key that does not turn with the
+    day — otherwise a cap charged at 23:59 is released under yesterday's key and today's starts empty. Same
+    grouping as the window (/64, v4-mapped), salted by the secret, never the raw address."""
+    key = ratelimit.client_key("2001:db8:1:2::1", "secret")
+    assert len(key) == 64 and "db8" not in key
+    assert ratelimit.client_key("2001:db8:1:2:ffff::9", "secret") == key                 # one /64
+    assert ratelimit.client_key("2001:db8:1:3::1", "secret") != key                      # another /64
+    assert ratelimit.client_key("2001:db8:1:2::1", "other secret") != key
+    assert ratelimit.client_key("::ffff:203.0.113.9", "secret") == ratelimit.client_key("203.0.113.9", "secret")
+    # Not the dated hash of either day: a cap key in memory links to nothing in the tables.
+    for day in (T0, T0 + timedelta(days=1)):
+        assert ratelimit.ip_hash("2001:db8:1:2::1", day, "secret") != key
+    # No secret: the process's own, stable within it.
+    assert ratelimit.client_key("198.51.100.7") == ratelimit.client_key("198.51.100.7")
+
+
 def slot(store: Store, hashes: list[str], limit: int, now: datetime) -> int | None:
     return store.take_rate_slot(lambda at: (hashes, at - ratelimit.WINDOW), limit=limit, clock=lambda: now)[1]
 

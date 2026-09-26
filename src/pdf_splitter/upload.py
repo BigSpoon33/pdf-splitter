@@ -3,7 +3,6 @@ under a size cap, preflight it, then queue an analyze job."""
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import os
@@ -11,9 +10,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import time
 import unicodedata
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Annotated, Any, Literal
@@ -22,7 +20,7 @@ from fastapi import APIRouter, Form, Request, UploadFile
 from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import Headers
-from starlette.types import ASGIApp, Message, Receive, Scope, Send
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from . import ratelimit
 from .config import Settings
@@ -46,8 +44,6 @@ ENVELOPE = 64 * 1024
 UPLOAD_PATH = "/api/jobs"
 MULTIPART = "multipart/form-data"
 RETRY_AFTER_OVERLOADED = "5"
-# The `Progress` window: `Settings.min_upload_rate` bytes must arrive in each one.
-UPLOAD_WINDOW = 30.0
 
 # The preflight's own codes; anything else it prints is `unreadable`.
 PREFLIGHT_CODES = frozenset({"not_pdf", "encrypted", "too_many_pages", "no_text_layer", "unreadable"})
@@ -78,41 +74,19 @@ def spooling_to(directory: Path) -> Iterator[None]:
             os.environ["TMPDIR"] = previous_env
 
 
-class Progress:
-    """The watchdog under a streaming body: at least `min_rate` bytes must arrive in every `window` seconds, or
-    the upload is abandoned. A floor on the rate rather than a wall clock, so a genuinely slow line still
-    finishes a 200 MiB file while a client trickling one byte at a time can't hold a slot for hours (gate r2).
-    `tick(0)` is what the wait's timeout calls: a window that closed with nothing in it is the same failure."""
-
-    def __init__(self, min_rate: int, window: float, clock: Callable[[], float]) -> None:
-        self.min_rate, self.window, self.clock = min_rate, window, clock
-        self.window_end = clock() + window
-        self.received = 0
-
-    def remaining(self) -> float:
-        return max(0.0, self.window_end - self.clock())
-
-    def tick(self, n: int) -> bool:
-        """Count `n` bytes; False once a window has closed with fewer than `min_rate` in it."""
-        self.received += n
-        if self.clock() < self.window_end:
-            return True
-        enough = self.received >= self.min_rate
-        self.received, self.window_end = 0, self.clock() + self.window
-        return enough
-
-
 class UploadGuard:
     """Pure ASGI, around the app, for `POST /api/jobs` only: everything that can refuse an upload without reading
     it — the declared size, the in-flight caps (the server's and the client's), the client's rate slot, the disk
     guard — runs here, BEFORE the multipart parser has spooled a byte, so a flood of big bodies costs the api a
     header read each. A refusal closes the connection, or the client would keep sending a body nobody reads.
-    What is admitted streams under `Progress`: a body that stalls is answered 408 from here and the parser is
-    told the client went away. The route gets the client's hash through `request.state.client_hash` and never
-    claims a slot of its own."""
+    What is admitted is handed to the app with the server's own `receive`, untouched: a wrapper that raced
+    `receive()` against a clock (gate r2's watchdog) cancelled reads that were not cancel-safe and dropped
+    chunks of genuine uploads (gate r3), so how long a body may take is Caddy's decision now (`read_body` in
+    deploy/Caddyfile), never this layer's. The route gets the client's hash through `request.state.client_hash`
+    and never claims a slot of its own."""
 
-    def __init__(self, app: ASGIApp, settings: Settings, clock: Callable[[], float] = time.monotonic) -> None:
-        self.app, self.settings, self.clock = app, settings, clock
+    def __init__(self, app: ASGIApp, settings: Settings) -> None:
+        self.app, self.settings = app, settings
         self.in_flight = 0
         self.per_client: dict[str, int] = {}
 
@@ -125,10 +99,11 @@ class UploadGuard:
         if response is not None:
             await response(scope, receive, send)
             return
-        # Keyed like the window (today's hash of the /64 or the address), so the cap and the window name the
-        # same client; the key is only ever held in memory and only while the upload streams.
+        # The same /64-or-address the window keys on, but undated (ratelimit.client_key): the cap is charged
+        # when the body starts and released when it ends, and a key that turned at midnight would leave the
+        # charge under yesterday's key and find today's empty. Held in memory only, while the upload streams.
         ip = ratelimit.client_ip(request, settings.trusted_proxy)
-        client = ratelimit.ip_hash(ip, secret=settings.ip_salt)
+        client = ratelimit.client_key(ip, settings.ip_salt)
         # The server's cap first: a client can't spend the whole server's slots, and neither cap spends a slot
         # of the client's window. Both are reserved before the first await, so two requests can't both find room.
         if self.in_flight >= settings.max_uploads:
@@ -146,45 +121,13 @@ class UploadGuard:
             if response is not None:
                 await response(scope, receive, send)
                 return
-            await self.stream(scope, receive, send)
+            await self.app(scope, receive, send)
         finally:
             self.in_flight -= 1
             if self.per_client[client] == 1:
                 del self.per_client[client]
             else:
                 self.per_client[client] -= 1
-
-    async def stream(self, scope: Scope, receive: Receive, send: Send) -> None:
-        """Run the app with `receive` under the watchdog. Past a stalled window this sends the 408 itself — the
-        parser is mid-body and has sent nothing — then hands the parser a disconnect so it stops; the 400 the
-        framework answers to that is dropped here, since the response has already gone out."""
-        progress = Progress(self.settings.min_upload_rate, UPLOAD_WINDOW, self.clock)
-        refused = started = False
-
-        async def guarded_receive() -> Message:
-            nonlocal refused
-            while not refused:
-                try:
-                    message = await asyncio.wait_for(receive(), progress.remaining())
-                except TimeoutError:
-                    if progress.tick(0):
-                        continue
-                else:
-                    if message["type"] != "http.request" or progress.tick(len(message.get("body", b""))):
-                        return message
-                refused = True
-                log.info("upload abandoned: under %d bytes in %.0fs", self.settings.min_upload_rate, UPLOAD_WINDOW)
-                if not started:
-                    await refuse("too_slow")(scope, receive, send)
-            return {"type": "http.disconnect"}
-
-        async def guarded_send(message: Message) -> None:
-            nonlocal started
-            if not refused:
-                started = True
-                await send(message)
-
-        await self.app(scope, guarded_receive, guarded_send)
 
     def refuse_by_headers(self, headers: Headers) -> JSONResponse | None:
         declared = headers.get("content-length")

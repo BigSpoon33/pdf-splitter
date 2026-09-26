@@ -73,6 +73,16 @@ def ip_hash(ip: str, now: datetime | None = None, secret: str | None = None) -> 
     return hashlib.sha256(salt + rate_key(ip).encode()).hexdigest()
 
 
+def client_key(ip: str, secret: str | None = None) -> str:
+    """What the in-flight caps (upload.UploadGuard, body_guard.BodyGuard) count a client under: the same
+    `rate_key` the window hashes, salted with the secret but NOT the date. A cap is charged when a body starts
+    and released when it ends; keyed on the dated hash, a body started at 23:59 was still charged to yesterday's
+    key at 00:00, and the client's next request found today's key empty — a fresh cap every midnight (gate r3).
+    Held in memory only, never stored, so the daily rotation ADR-007 needs for the tables does not apply."""
+    salt = hashlib.sha256(f"{secret or _PROCESS_SECRET}:in-flight".encode()).digest()
+    return hashlib.sha256(salt + rate_key(ip).encode()).hexdigest()
+
+
 def window_hashes(ip: str, now: datetime, secret: str | None = None) -> list[str]:
     """Today's hash first (new hits are recorded under it), then yesterday's while the sliding hour still
     reaches back into yesterday: the hits a client made before midnight keep counting until they are an hour old."""
