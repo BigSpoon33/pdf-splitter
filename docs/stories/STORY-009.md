@@ -96,7 +96,7 @@ feat: STORY-009 - source picker, editable section list and layout panel
 
 ## Status
 
-**Done** — 2026-09-25, `784b31d` (findings: `docs/findings/STORY-009-findings.md`)
+**Done** — 2026-09-25, `784b31d` + gate r1 fix `9e29032` (findings: `docs/findings/STORY-009-findings.md`)
 
 - [x] AC-1
 - [x] AC-2

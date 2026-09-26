@@ -2,8 +2,90 @@
 **Date:** 2026-09-25
 **Status:** done
 
-Commit: `784b31d feat: STORY-009 - source picker, editable section list and layout panel` (feature/mvp, pushed to
-`origin` and `gitea`).
+Commits: `784b31d feat: STORY-009 - source picker, editable section list and layout panel`, then the gate r1 fix
+`9e29032 fix: STORY-009 - gate r1: overrides follow boundaries, undo/paste/picker state, saves survive leaving, badges
+after reload` (feature/mvp, pushed to `origin` and `gitea`). § Gate r1 fixes cites lines as of `9e29032`; the AC
+section below cites `784b31d` (its anchors moved by the fix — the function names still hold).
+
+## Gate r1 fixes (`9e29032`)
+
+`docs/findings/STORY-009-review.md` round 1: 6 confirmed, 3 refuted → 3 orchestrator additions. Every item has a
+test that fails on `784b31d` (verified by copying the new test files into a `784b31d` worktree: the 32 new/changed
+tests fail there; 147/147 pass on `9e29032`).
+
+- **F2 overrides follow boundaries** — `web/src/lib/plan.ts:160` `dropEnd`: `removeSection` (:168) drops the END
+  override (`endCut`/`endCol`) of section i−1, whose end moved to the next start (or the book's end); `insertSection`
+  (:196) drops the end of the section before the slot, and the new section starts with no override. Start overrides
+  of untouched sections stay; an override that was only an end disappears rather than leaving `{}`. Same rule
+  `mergeWithNext` already used. Tests: `plan.test.ts` "removeSection: the section before the removed one keeps its
+  start override and loses its end" / "insertSection: the new section starts clean and the one before it loses its
+  end" (headed_book: sheets 1/3/4 of 6, overrides `{0: startCut 70 + endCut 300, 1: startCut 88 + endCut 520,
+  2: startCut 400}`). Live: delete section 2 → `{"0":{"startCut":70},"1":{"startCut":400,"startCol":"right"}}`;
+  add Interlude@2 → `{"0":{"startCut":70},"2":{…}}`.
+- **F4 badges after reload** — `Review.svelte:55`: the manifest is requested whenever `Review` mounts (it mounts only
+  in `review`/`done`), in parallel with the analysis and plan; a 409 `not_ready` (or any failure) means no badges and
+  no error. The prop is now `jobState: 'review' | 'done'` (`JobPage.svelte:15`). The "cut again to refresh the files"
+  note (`stale`, :90) shows whenever a manifest exists AND (the job is in `review` OR an edit happened since load,
+  `PlanEditor.edited` `editor.svelte.ts:72`). Tests: `Review.test.ts` "a job back in review after an edit still shows
+  the last cut badges and the stale note on reload (gate r1 F4)", "loads … 409 on the manifest is just 'no badges'".
+  Live: rename from `done` → job `review`, badges kept + note; reload in `review` → badges kept + note.
+- **F5 paste** — `SourcePicker.svelte:39-43`: "Paste a list" is a local VIEW (`local`/`mode`), not a pick: choosing it
+  never calls `onpick`, and the box is `typed ?? formatList(sections)` — re-seeded from the CURRENT list on every
+  switch (`choose`, :78, sets `typed = null`). Only "Use this list" (`useList`, :87) applies the text. The view yields
+  to the saved source when it moves on (a pick elsewhere, an Undo). Tests: `SourcePicker.test.ts` "switching to the
+  paste list changes nothing and always seeds the box from the current list (gate r1 F5)", "the paste view yields to
+  the saved source…". Live: Paste → 0 PUTs, box = the current three lines; a bad line typed, Outline, Paste again →
+  box re-seeded, the stale text gone, still 3 sections.
+- **F6 undo scope** — `editor.svelte.ts` `UndoSnapshot` (:31): `replaceSections` snapshots `source`, `sections`,
+  `overrides` and the picker state only; `undoLast` (:140) restores those and leaves `settings` as they are. Tests:
+  `editor.test.ts` "Undo restores the source, list, overrides and picker controls — never a setting changed since",
+  `Review.test.ts` "Undo puts the picker controls back and keeps a setting changed after the switch". Live: level 2,
+  header band 60, Undo → the three level-1 names, header band still 60 (`GET /plan` header_band 60).
+- **F7 no lost saves** — `destroy()` (`editor.svelte.ts:293`) commits a name draft and calls `flush()` without
+  awaiting (a request already out queues one more, as before). `pagehide` and `visibilitychange → hidden` on the
+  window (`UnloadSource`, :21; listeners bound in the constructor, removed by `destroy`) call `sendBeforeUnload`
+  (:257): an UNSENT edit is sent at once with `{keepalive: true}`, bypassing the one-in-flight rule (the older request
+  left first, and nothing may run after unload); nothing unsent = nothing sent; a `gone` job sends nothing.
+  `putPlan(id, plan, {signal?, keepalive?})` (`api.ts:242`) passes it to `fetch`. Tests: `editor.test.ts` "PlanEditor
+  never loses a save (gate r1 F7)" ×5, `Review.test.ts` "sends a pending edit when the page is left rather than
+  dropping it". Live: page 5 + navigate to `/` at once → `GET /plan` pages `[1,2,5]`; page 4 + the tab hidden → the
+  PUT left immediately with `[1,2,4]`.
+- **F8 picker resync** — the controls' state moved into the editor: `PickerState` (`plan.ts:31`: `outlineLevel`,
+  `headingLevel`, `threshold`, `maxLength`), `initialPicker(analysis)` (:41), `PlanEditor.picker`
+  (`editor.svelte.ts:66`). `SourcePicker` has no local level/threshold state: it renders `picker` and reports the
+  next state as `onpick`'s 4th argument; `replaceSections(source, sections, label, picker)` stores it with the list
+  and Undo restores it, so the `<select>`/slider show the restored values and choosing the previous option is a
+  change event again. Tests: `SourcePicker.test.ts` "shows the restored controls after an Undo, and choosing the old
+  option again re-applies it", `Review.test.ts` (F6/F8). Live: Undo → select shows 1; level 2 again → 3 level-2
+  sections.
+- **Name drafts (addition)** — `PlanEditor.draft` (:83), `setDraft(i, name)` (:159, on focus/input), `commitDraft()`
+  (:164, on blur/Enter/`destroy`/unload; a same name is not an edit). `SectionList.svelte:26` `nameOf` shows the draft
+  while it exists, so a 200 that lands mid-typing never rewrites the focused input; the normalized name appears after
+  the commit. Tests: `SectionList.test.ts` "keeps a typed name as a draft and commits it on blur", "Enter commits the
+  draft"; `editor.test.ts` "PlanEditor name drafts". Live: "Front matter " typed, 1.5 s → no PUT, plan unchanged;
+  Enter → PUT, the input then shows the trimmed "Front matter".
+- **Merge badge (addition)** — the manifest rows now live in `PlanEditor.rows` (:68; `Review` fills them,
+  `SectionList` reads `editor.rows`); `merge(i)` (:185) drops the row with `index === i` — the merged section's row
+  described the old span. Tests: `SectionList.test.ts` "a merge drops the badge of the section that absorbed the next
+  one", `editor.test.ts` "PlanEditor manifest rows". Live: Merge ↓ on 1 → no badges.
+- **PRD scope-2 heading filters (addition)** — `headingSections(analysis, {level, threshold, maxLength?, bands?})`
+  (`plan.ts:64`): candidates longer than `maxLength` (default `MAX_HEADING_LENGTH` = 90, the analysis `max_len`) or
+  whose top `y` sits inside the CURRENT `header_band` / `H − footer_band` (`analysis.size[page-1].H`) are out — the
+  engine's own `heading_candidates` rule, applied to candidates detected with the default bands. `SourcePicker` has a
+  "Max heading length (characters)" input (applies live like the slider) and takes `settings` for the bands (from
+  `editor.plan.settings`, so a LayoutPanel band edit updates the count at once); when the count no longer matches the
+  list a "Use these headings" button re-applies (`headingsDiffer`, `SourcePicker.svelte:55`). Tests: `plan.test.ts`
+  "drops candidates longer than maxLength and those inside the current bands", `SourcePicker.test.ts` "headings: a max
+  length and the current bands narrow the count…". Live (headed_book: chapter tops at y 72.9, Closing Chapter at
+  382.9): max length 20 → 1 section (Closing Chapter); header band 100 → count 1 of a 3-section list, "Use these
+  headings" shown → click → [Closing Chapter], button gone.
+
+Counts after the fix: `bun run test` **147 pass** (11 files; was 127), `bun run check` 0 errors 0 warnings (316
+files), `bun run build` 77.34 kB JS (28.50 gzip; was 74.04 / 27.54), `uv run pytest` 335 (unchanged), ruff clean.
+Manual run as in attempt 1 (API 8010 + worker on a scratch jobs dir, `API_PORT=8010 bun run dev --port 5179`,
+headless Chromium 1.61 via the Browser skill's playwright, all stopped by PID; `document.title` "PDF Splitter"
+throughout; raw job id in api.log/worker.log: 0; console: only the browser's own "Failed to load resource: 409" for
+the manifest before a cut — the same class of line as attempt 1's 422 ones, not an app error).
 
 ## AC Verification
 - [x] AC-1: `web/src/components/SourcePicker.svelte` — three radios (`Outline` / `Headings` / `Paste a list`). Outline:
@@ -122,9 +204,8 @@ was exercised by `SectionList.test.ts` "changes the page and shows the printed l
   Architecture § Data Types' Plan line does not list it yet (doc gap below). A set gap changes the profile hash, so
   the first preview / the cut re-index (12–14 s on Maciocia) — same as any layout change (STORY-007 findings).
 - **The picker's detail controls follow the SAVED source** (`source={editor.plan.source}`): the level select shows
-  under Outline only while Outline is the plan's source, etc. Switching to *Paste a list* pre-fills the box with the
-  current list (`formatList`, `plan.ts:99`) and picks it as `manual`, so the switch itself loses nothing; edits apply
-  on "Use this list".
+  under Outline only while Outline is the plan's source, etc. *Paste a list* is the exception since gate r1 (F5): it
+  is a local view seeded from the current list (`formatList`) that changes nothing until "Use this list".
 - **Slider + level:** both filter (`size ≥ threshold × body_size` AND the level when one is chosen); the initial
   threshold is 1.0 so the suggested level reproduces the default plan. Slider top = the biggest level in body sizes,
   at least 2.
@@ -143,9 +224,13 @@ was exercised by `SectionList.test.ts` "changes the page and shows the printed l
 `Review.svelte` owns one `PlanEditor` per job (`editor.plan` is the local truth, `editor.selected` the section to
 preview, `editor.setSetting('column_split', …)` is how a gutter drag lands, and overrides go through
 `editor.plan.overrides[String(i)]` + a `touch`-style method you add — none exists yet since nothing in STORY-009
-edits an override). Preview endpoints are unchanged from STORY-007 and their contracts are the tests
-(`::test_section_plan_returns_the_engine_view_with_rects`, `::test_sheet_png_renders_through_the_sandboxed_subprocess_and_caches`,
-the 410-during-render tests at `tests/test_api_e2e.py:487-580`).
+edits an override). Since gate r1 the editor also owns `picker` (the SourcePicker controls), `rows` (the last cut's
+manifest), `draft` (a name being typed) and `edited`; it listens to `pagehide`/`visibilitychange` itself and
+`destroy()` sends what is pending — a component that unmounts the editor must call `destroy()`, never just drop it.
+`Review` takes `jobState: 'review' | 'done'`. Preview endpoints are unchanged from STORY-007 and their contracts are
+the tests (`::test_section_plan_returns_the_engine_view_with_rects`,
+`::test_sheet_png_renders_through_the_sandboxed_subprocess_and_caches`, the 410-during-render tests at
+`tests/test_api_e2e.py:487-580`).
 
 ## Out-of-Scope Items
 - **Re-detecting headings under a user wrap gap** (orchestrator addendum): candidates are computed once at analysis
@@ -155,6 +240,10 @@ the 410-during-render tests at `tests/test_api_e2e.py:487-580`).
   § API Interface's manifest line says `pages` where the engine's rows carry `printedPages`/`pageCount`.
 - **`JobStatus` does not resume polling** after a cut is queued from the review page (STORY-011's cut button will
   need it: either remount `JobStatus` on the cut or let it accept a "poll again" signal).
-- The picker cannot show which outline level / threshold a reloaded plan came from (the Plan stores only `source`);
-  it starts from `analysis.suggested`.
+- The picker cannot show which outline level / threshold a reloaded plan came from (the Plan stores only `source`;
+  `PlanEditor.picker` lives in memory); it starts from `initialPicker(analysis)` (`analysis.suggested`, threshold 1,
+  max length 90). Persisting the picker state would need a Plan field (Architecture § Data Types) — not scheduled.
+- A LayoutPanel band edit updates the headings COUNT, not the list: re-applying is the "Use these headings" button
+  (a layout edit silently replacing the section list would be worse). The bands filter runs on candidates detected
+  with the default bands, so a band SMALLER than the default cannot reveal more — that is the re-detect follow-up.
 - Cut/download/delete/expiry UX (STORY-011); `queue_position`/rate limits (STORY-012); Caddy (STORY-013).

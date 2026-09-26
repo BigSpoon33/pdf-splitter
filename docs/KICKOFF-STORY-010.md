@@ -7,17 +7,19 @@ The product lives in two repos:
 
 - **Web (you write code here):** `~/Documents/Repos/pdf-splitter` (GitHub `BigSpoon33/pdf-splitter` = `origin`,
   Gitea mirror = `gitea`), branch **`feature/mvp`**. Stay on that branch. STORY-009 landed as
-  `784b31d feat: STORY-009 - source picker, editable section list and layout panel` and its docs commit
-  `docs: STORY-009 - findings + KICKOFF-STORY-010`. Anything after those is the orchestrator's gate work; check
-  `git log --oneline -8`. **Baselines:** `cd web && bun run test` → **127 pass** (11 files, ≈ 2.5 s), `bun run check`
-  0 errors 0 warnings (316 files), `bun run build` ≈ 74 kB JS (27.5 kB gzip); `uv run pytest` → **335 pass** (≈ 75 s),
-  `uv run ruff check` clean. `docs/loop-state.json` belongs to the orchestrator: never stage it.
+  `784b31d feat: STORY-009 - source picker, editable section list and layout panel`, its docs commit
+  `955ab62`, then the gate r1 fix `9e29032 fix: STORY-009 - gate r1: overrides follow boundaries, undo/paste/picker
+  state, saves survive leaving, badges after reload` and its docs commit `docs: STORY-009 - gate r1 fixes in findings
+  + KICKOFF-STORY-010`. Anything after those is the orchestrator's gate work; check `git log --oneline -8`.
+  **Baselines:** `cd web && bun run test` → **147 pass** (11 files, ≈ 3 s), `bun run check` 0 errors 0 warnings
+  (316 files), `bun run build` ≈ 77 kB JS (28.5 kB gzip); `uv run pytest` → **335 pass** (≈ 75 s), `uv run ruff check`
+  clean. `docs/loop-state.json` belongs to the orchestrator: never stage it. Line numbers below are as of `9e29032`.
 - **Engine (read-only):** `~/Documents/Repos/monograph-splitter`, pinned at `v0.4.1`. Its review editor
   `src/monograph_splitter/review/app.html` is the prior art for hatching, ruler and band semantics — port the math,
   not the code (story note).
 - Read, in order: `docs/stories/STORY-010.md` (its ACs are authoritative), `docs/Architecture.md` § web (SPA),
   § Data Types (Section plan, Plan `overrides`), § API Interface, ADR-003 (sheet numbers), then
-  `docs/findings/STORY-009-findings.md` (§ Decisions, § Handoff, § Out-of-Scope) and
+  `docs/findings/STORY-009-findings.md` (§ Gate r1 fixes, § Decisions, § Handoff, § Out-of-Scope) and
   `docs/findings/STORY-007-findings.md` AC-2/AC-3 (the preview subprocess and its 410 rules).
 
 Toolchain: the SPA is **Bun only** (`bun install` / `bun run dev|check|test|build`, `bunx`; never npm/npx/yarn/pnpm).
@@ -26,36 +28,55 @@ Toolchain: the SPA is **Bun only** (`bun install` / `bun run dev|check|test|buil
 ## What STORY-009 established (use these, don't re-invent)
 
 - **The page:** `web/src/components/JobPage.svelte` renders `JobStatus` (which now takes `onstatus`,
-  `JobStatus.svelte:11`) and mounts `Review.svelte` once `state ∈ {review, done}` (`JobPage.svelte:10`). `Review`
-  loads `getAnalysis` + `getPlan` (+ `getManifest` when `done`), builds ONE `PlanEditor` and renders `SourcePicker`,
-  `SectionList`, `LayoutPanel`, the save-state line and the Undo toast. **PagePreview mounts inside `Review.svelte`**
-  next to `SectionList` — it needs `editor`, `analysis` (sizes, pages) and the job `id`.
+  `JobStatus.svelte:11`) and mounts `Review.svelte` with `jobState: 'review' | 'done'` once the job is there
+  (`JobPage.svelte:10-15`). `Review` loads `getAnalysis` + `getPlan` and, in parallel, `getManifest` (always; a 409
+  before any cut = no badges, `Review.svelte:55`), builds ONE `PlanEditor` (`:64`, with `initialPicker(analysis)`),
+  fills `editor.rows` from the manifest and renders `SourcePicker`, `SectionList`, `LayoutPanel`, the save-state line
+  (+ the "cut again" note when a manifest exists and the plan moved on, `stale` :90) and the Undo toast. **PagePreview
+  mounts inside `Review.svelte`** next to `SectionList` — it needs `editor`, `analysis` (sizes, pages) and the job `id`.
+  `Review`'s effect cleanup calls `editor.destroy()` — keep that: `destroy()` is what sends a pending save when the
+  user leaves (gate r1 F7).
 - **The plan store** `web/src/lib/editor.svelte.ts` `PlanEditor` (a rune class; every field is `$state`):
-  `plan: Plan` (local truth), `selected: number | null` (:49 — **the selected section lives here**; `select(i)` :135,
-  kept in step by delete/merge/add), `dirty`/`saving`/`error`/`fieldErrors`/`gone`, and the edit methods
-  `replaceSections` :73, `rename` :93, `setPage` :100, `remove` :107, `merge` :114, `add` :122,
-  `setSetting(key, value)` :130 (**a gutter drag = `setSetting('column_split', x / W)`, a band drag =
-  `setSetting('header_band' | 'footer_band', pt)`**), `errorAt(...loc)` :141 (a 422 message for a control),
-  `flush()` :160 (send now). Every edit goes through the private `touch()` → a debounced PUT (600 ms, one in flight,
-  latest after; the 200 body is adopted unless an edit happened meanwhile). **There is no override method yet:** add
-  `setOverride(i, override | null)` (write `plan.overrides[String(i)]` or delete the key, then `touch()`); keep the
-  re-keying in `web/src/lib/plan.ts` (`shiftOverrides` :106, `removeSection` :115, `mergeWithNext` :127,
-  `insertSection` :142) intact — overrides are keyed by section INDEX and the API refuses keys past the end.
+  `plan: Plan` (local truth), `selected: number | null` (:81 — **the selected section lives here**; `select(i)` :208,
+  kept in step by delete/merge/add), `picker: PickerState` (:66, the SourcePicker controls — snapshotted with the
+  list so Undo restores them), `rows: ManifestRow[]` (:68, the last cut's manifest; `merge` drops the absorbed row),
+  `draft` (:83, a section name being typed: `setDraft` :159 / `commitDraft` :164 — the plan gets it on
+  blur/Enter/leaving), `dirty`/`edited`/`saving`/`error`/`fieldErrors`/`gone`, and the edit methods
+  `replaceSections(source, sections, label, picker)` :121, `rename` :151, `setPage` :171, `remove` :178,
+  `merge` :185, `add` :195, `setSetting(key, value)` :203 (**a gutter drag = `setSetting('column_split', x / W)`, a
+  band drag = `setSetting('header_band' | 'footer_band', pt)`**), `errorAt(...loc)` :214 (a 422 message for a
+  control), `flush()` :235 (send now), `destroy()` :293 (commits the draft, sends what is pending, unbinds the
+  `pagehide`/`visibilitychange` listeners the constructor added — `UnloadSource` :21; tests pass a stand-in `page`).
+  Every edit goes through the private `touch()` → a debounced PUT (600 ms, one in flight, latest after; the 200 body
+  is adopted unless an edit happened meanwhile; an unsent edit goes out with `keepalive` when the tab hides or
+  unloads, `sendBeforeUnload` :257). The save callback is `SavePlan = (plan, opts?: {keepalive?}) => Promise<Plan>`.
+  **There is no override method yet:** add `setOverride(i, override | null)` (write `plan.overrides[String(i)]` or
+  delete the key, then `touch()`); keep the re-keying in `web/src/lib/plan.ts` (`shiftOverrides` :147,
+  `removeSection` :168, `mergeWithNext` :178, `insertSection` :196, `dropEnd` :160 — **since gate r1 F2 the section
+  whose END moved loses its end override**: delete/insert/merge all apply it) intact — overrides are keyed by section
+  INDEX and the API refuses keys past the end. A preview that shows an override's cut must therefore re-fetch the
+  section plan after any delete/insert/merge, not only after its own drag.
 - **Types and client** `web/src/lib/api.ts`: `Analysis` (:174; `size[{W,H}]` per sheet, `pageLabels`), `Plan` (:208),
   `Override` (:201 — only the keys sent are applied: `startCut: null` REMOVES a cut, an absent key keeps the engine's;
   `startCol`/`endCol` ∈ `full|left|right`), `Section`, `PlanSettings` (:184, incl. optional `heading_wrap_gap`),
-  `ManifestRow` (:217), `getAnalysis` :227, `getPlan` :231, `putPlan` :236, `getManifest` :245, all through the private
-  `request()`; `isGone(err)` for 404/410. **Add `getSectionPlan(id, i, body?)` and a `sheetUrl(id, n, dpi)`** on top
+  `ManifestRow` (:217), `getAnalysis` :227, `getPlan` :231, `putPlan(id, plan, {signal?, keepalive?})` :242
+  (`SaveOptions` :235), `getManifest` :252, all through the private `request()`; `isGone(err)` for 404/410. **Add `getSectionPlan(id, i, body?)` and a `sheetUrl(id, n, dpi)`** on top
   (a PNG is an `<img src>`, not a fetch — but a 410 on it needs handling: see gotcha 3).
-- **Pure helpers** `web/src/lib/plan.ts`: `badgeFlags`/`rowFor`/`flagLabel` (the flag badges), `parseList`, sources.
+- **Pure helpers** `web/src/lib/plan.ts`: `badgeFlags`/`rowFor`/`flagLabel` (the flag badges; `SectionList` reads
+  `editor.rows`, it takes no `rows` prop), `parseList`, sources (`headingSections(analysis, {level, threshold,
+  maxLength?, bands?})` :64 — the PRD scope-2 filters; `PickerState` :31, `initialPicker` :41).
   `web/src/lib/config.ts`: `SAVE_DEBOUNCE_MS` 600, `UNDO_MS` 8000, `POLL_MS` 1500.
 - **CSS:** tokens on `:root` in `web/src/app.css` (`--bg --surface --fg --muted --border --accent --accent-soft
   --danger --danger-soft --ok --radius --focus`), global `.card .error .bar .badge .toast .field .field-error`,
   `button.primary`, form controls styled globally. `.row.selected` in `SectionList.svelte` highlights the selection.
 - **Tests:** vitest + @testing-library/svelte (jsdom). Fixtures for the analysis/plan/manifest are in
   `web/src/lib/fixtures.ts` (`analysisOf`, `planOf`, `sectionsOf`, `rowOf`) — extend them, don't fork them. Loaders
-  are injected as props (`Review.test.ts` `mount()`); `PlanEditor` takes a fake `save` (`editor.test.ts` `deferredSave`).
-  With fake timers, don't `vi.waitFor` timing assertions (see `settle()` in `JobStatus.test.ts`).
+  are injected as props (`Review.test.ts` `mount()`, which passes `jobState` and a `loadManifest` — `noCut` rejects
+  409, `cut` resolves rows); `PlanEditor` takes a fake `save` (`editor.test.ts` `deferredSave`) and a fake `page`
+  (`fakePage()`) so no test binds real window listeners it cannot fire. `SectionList.test.ts` sets `editor.rows`
+  directly. With fake timers, don't `vi.waitFor` timing assertions (see `settle()` in `JobStatus.test.ts`). A name
+  input holds a DRAFT until blur/Enter: a test that renames through the DOM must `fireEvent.blur` (or Enter) before
+  it expects a save.
 
 ## API contracts you'll use (the tests ARE the contract — never hand-write sample JSON)
 
@@ -113,7 +134,9 @@ Toolchain: the SPA is **Bun only** (`bun install` / `bun run dev|check|test|buil
    manifest flags — an `override` badge from the PLAN (not the manifest) is a small addition there
    (`class="badge info"` exists).
 6. **Debounce vs drag:** `editor.setSetting` and a future `setOverride` go through the 600 ms debounce; a drag's
-   release should call them once, not per frame.
+   release should call them once, not per frame. Do NOT hold a drag's value outside the editor the way name drafts
+   are held (`editor.draft`): a pending cut must be in `plan.overrides` before the tab hides, or `sendBeforeUnload`
+   sends the plan without it.
 7. **Keyboard (AC-5):** the cut line is a focusable element (`tabindex=0`, `role=slider` with `aria-valuenow`/min/max
    in pt, `aria-label`), arrows nudge 1 pt, Shift+arrows 10 pt; `bun run check` must stay at **0 warnings** — a11y
    warnings count (a `<div onmousedown>` without a role/keyboard handler is one). Svelte 5 only (runes, snippets).
@@ -170,7 +193,7 @@ Toolchain: the SPA is **Bun only** (`bun install` / `bun run dev|check|test|buil
 
 ## Final report shape
 
-Per-AC ✅/❌ with file:line, the counts (`bun run test` before 127 / after N; `uv run pytest` still 335), `bun run check`
+Per-AC ✅/❌ with file:line, the counts (`bun run test` before 147 / after N; `uv run pytest` still 335), `bun run check`
 and `bun run build` results (bundle size), the manual run's observations (a section selected → both sheets with the
 overlay; a cut dragged → the override saved and the plan re-fetched; gutter drag → `column_split` saved; Reset;
 keyboard nudge), the commits (on both remotes), and what STORY-011 (cut/download UX) should know: how to trigger the
