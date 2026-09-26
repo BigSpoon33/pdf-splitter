@@ -189,3 +189,21 @@ Fix forward, one commit on the feature/mvp tip:
    cut); a 409 busy is never shown for our own in-flight cut and any split error clears once a later
    status arrives. Test: double-click → exactly one POST /cut; no lingering alert.
 Update findings ("Gate r1 fixes"), Architecture § API Interface (seconds_left on GET job), KICKOFF-STORY-015.
+
+## Attempt 2b — round-2 fixes (standing auto-fix policy) — READ THIS FIRST
+
+One commit on the feature/mvp tip:
+`fix: STORY-011 - gate r2: re-check the server after wake, never strand the Split button`
+1. **Wake re-check**: poll the job once (reusing JobStatus `resume`) on `visibilitychange → visible`,
+   `pageshow`, and `online`, and additionally every 5 minutes while the page is in review/done;
+   each answer re-anchors the countdown (new `seconds_left` + `receivedAt`). Only a server 404/410
+   shows the deleted screen (unchanged). Test: simulate a suspend (advance Date/`seconds_left` without
+   advancing performance.now/timers), fire visibilitychange → one poll → countdown shows the server's
+   figure; 410 → deleted. Also: no poll storm (at most one per event + the 5-min tick).
+2. **Split never stranded**: release `requestedOn` on ANY status received after the POST /cut was
+   accepted whose `kind` is `cut` (including review/cut), and on any failed/terminal status. If that
+   first status is already review/cut or done and the cut we requested finished, treat it as a finished
+   cut: bump `cuts` so the results refresh (the manifest route serves the new rows). Test: POST 202 →
+   first status review/cut → Split enabled, results refreshed to the new manifest; double-click still
+   one POST.
+Update findings ("Gate r2 fixes") and KICKOFF-STORY-015 if it cites these behaviours.
