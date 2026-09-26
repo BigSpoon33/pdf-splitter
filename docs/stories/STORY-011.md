@@ -1,6 +1,6 @@
 # STORY-011: SPA: cut, download, delete and expiry UX
 
-> **Status:** Pending
+> **Status:** Done (2026-09-25)
 > **Size:** S
 > **Date:** 2026-09-25
 > **Architecture ref:** `docs/Architecture.md#web (SPA)`
@@ -93,10 +93,10 @@ feat: STORY-011 - split, download, delete-now and expiry UX
 
 ## Status
 
-**Pending**
+**Done** (2026-09-25)
 
-- [ ] AC-1
-- [ ] AC-2
-- [ ] AC-3
-- [ ] AC-4
-- [ ] AC-5
+- [x] AC-1
+- [x] AC-2
+- [x] AC-3
+- [x] AC-4
+- [x] AC-5
