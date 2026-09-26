@@ -283,3 +283,32 @@ One commit: `fix: STORY-013 - the SPA knows the overloaded code`
   nowhere new (just the message). DropZone shows it in place like other upload errors.
 - `cd web && bun run check && bun run test && bun run build` all green (expect 285+ passing, 0 warnings);
   `uv run pytest -q` still green. Note it in findings ("Gate r1 fixes" addendum). Push to origin + gitea.
+
+## Attempt 2c — round-2 fixes (standing auto-fix policy) — READ THIS FIRST
+
+5 confirmed findings — `docs/findings/STORY-013-review.md` § Round 2. One commit on the feature/mvp tip:
+`fix: STORY-013 - gate r2: slow bodies can't pin the caps, v6 keyed per /64, host reachability documented and probed`
+1. **Slow bodies** (no hard wall-clock cap — genuine slow uploads must still work):
+   - Uploads: wrap `receive` in UploadGuard with a progress watchdog — abort (408 `too_slow`, new code
+     + SPA message) when fewer than MIN_UPLOAD_RATE bytes (config, default 32 KiB) arrive in any
+     30 s window, and a per-client in-flight cap (config, default 2 of the 4 slots, keyed by the same
+     client hash) → 429 `rate_limited`/503 `overloaded` as fits.
+   - Every other request with a body (e.g. PUT /plan): a small pure-ASGI BodyGuard: Content-Length
+     required ≤ MAX_JSON_BYTES (config, default 4 MiB; 413 otherwise), and the body must arrive within
+     a short bound (config, default 20 s → 408). Chunked bodies refused (411) as for uploads.
+   - Tests prove each with a trickling ASGI receive (no real sleeps: inject the clock). Live (isolated
+     project): 4 trickled uploads from one client no longer lock out a second client; 63 trickled PUTs
+     don't take the api unhealthy.
+2. **v6 per /64**: the rate key for IPv6 clients is the /64 prefix (IPv4 unchanged; v4-mapped v6 →
+   the v4 address). Replace the /128-distinctness test with /64 grouping + distinct /64s distinct.
+3. **Host reachability**: correct README/Architecture (the api can't reach the internet/LAN, but CAN
+   reach host services via its network's gateway unless the host firewall drops it); the smoke probes the
+   BACKEND gateway (v4+v6) and prints the result as a WARNING (it can't fix the host); the STORY-014
+   handoff gets the exact host firewall rule to add on the VM (nftables/ufw: drop INPUT from the
+   backend subnets, v4+v6, both before-rules) and a check to run after.
+4. **Real "before the body" tests**: instrument `receive` (count body messages/bytes consumed) instead
+   of listing the spool dir; prove they fail if the guard reads the body first.
+5. **Docs**: fix the handoff (`overloaded` done) and § API Interface (411/415/408/503 overloaded; which
+   refusals spend a slot).
+All suites green (pytest, ruff, web check/test/build); ISOLATION rules unchanged (own project, subnets
+NOT 172.26.x — multica_default holds 172.26.0.0/16 — own ULAs, high ports, `docker ps` identical).
