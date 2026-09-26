@@ -187,3 +187,21 @@ Per-AC ✅/❌ with file:line; counts (`bun run test` before 238 / after N; `uv 
 ranges" → upload → range editor → `1-10, 15-20, 5-7` → Split → 3 PDFs of 10/6/3 pages; every-N; reload keeps the
 mode; chapter mode unchanged); the commits (on both remotes); decisions taken (mode in URL vs plan source,
 `endPage` forbidden vs ignored, preview refusal); what the next story should know.
+
+## Previous attempt (RETRY — read this first)
+
+Attempt 1 (`722b231`) failed with 1 CONFIRMED finding — `docs/findings/STORY-015-review.md`.
+Fix forward, one commit on the feature/mvp tip:
+`fix: STORY-015 - gate r1: the split mode is fixed at upload, a link can never convert a job`
+- **Mode is a property of the job, set at upload**: `POST /api/jobs` accepts an optional form field
+  `mode` (`chapters` default | `ranges`; anything else 422). The analyze task writes the default plan
+  for that mode — for `ranges` an empty ranges plan (`{source:"ranges", sections:[], overrides:{}}`).
+  pytest: both modes; bad mode 422; default unchanged.
+- **The URL never changes a job**: remove the SPA's convert-on-load (`setRanges([])` from the query).
+  The review screen's mode comes ONLY from the saved plan's `source`. Keep `?mode=ranges` in the
+  redirect only as a harmless hint (or drop it) — opening any job with any query never writes the plan.
+  Tests: a chapter job (edited, cut) opened with `?mode=ranges` → chapter UI, plan.json byte-identical,
+  0 PUTs; a ranges upload → range editor on first load and after reload with/without the query.
+- Home page passes the chosen mode in the upload (DropZone/createJob gets a `mode` param).
+Update findings ("Gate r1 fix"), Architecture (ADR-009 "As built": mode set at upload; API Interface
+POST /api/jobs `mode`), README, and KICKOFF-STORY-012.
