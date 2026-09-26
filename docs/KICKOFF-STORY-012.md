@@ -49,23 +49,23 @@ Port 8000 is taken on this laptop: API on 8010, Vite with `API_PORT=8010 bun run
   with § Storage Schema — a new column or index goes in both.
 - **Upload** `src/pdf_splitter/upload.py`: `:38-44` the per-process `_IP_SALT` + `ip_hash(host)` (the comment says
   STORY-012 replaces it with the daily salt + trusted-proxy rule); `:112` `_accept(file, request, settings, store)` —
-  the job dir is created before the copy and removed unless `created`; the row is inserted at `:132` with
+  the job dir is created before the copy and removed unless `created`; the row is inserted at `:135` with
   `ip_hash(request.client.host)`. The rate check and the disk guard belong BEFORE `job_dir.mkdir()` (nothing on disk
   for a refused upload); `reject(code)` (`:63`) builds the error body — `Retry-After` is a header it does not set yet.
   Codes `rate_limited` / `disk_full` are NOT in `src/pdf_splitter/errors.py:MESSAGES` yet (the SPA's
   `web/src/lib/errors.ts` already has both, and `web/src/lib/errors.test.ts` counts the API's table against it —
   adding them to the API is required, and keeps that test green).
-- **Status** `src/pdf_splitter/routes/plan.py:36` `status_of(job)` returns `"queue_position": None` — the docstring
+- **Status** `src/pdf_splitter/routes/plan.py:37` `status_of(job)` returns `"queue_position": None` — the docstring
   says it is STORY-012's. The SPA already renders it: `web/src/components/JobStatus.svelte:94` "Position in queue: N"
   when `queued` and non-null (`JobStatus.test.ts:82`). Contract for the shape:
   `tests/test_api_e2e.py::test_job_status_shape_hides_the_requeue_marker_and_shows_failures` (`STATUS_KEYS`, `:135`).
 - **Job routes' gate** `src/pdf_splitter/routes/common.py:16` `EDITABLE = ("review", "done")`, `:17` `BUSY`,
-  `:20` `gone(job)` (deleted or past `expires_at` → 410), `:25` `load_job`, `:52` `require_editable`, `:57`
+  `:20` `gone(job)` (deleted or past `expires_at` → 410), `:25` `load_job`, `:50` `require_editable`, `:55`
   `saved_plan(settings, job)` = `exists()` then `read_json` — **addendum 2**: a DELETE between the two is a 500
   today; every read of job files after `load_job` must map a vanished file to 410. The preview routes already do it
-  (`routes/preview.py:65` `settled()` re-reads the row and raises the 410; `:82` `_cached` reads instead of
+  (`routes/preview.py:63` `settled()` re-reads the row and raises the 410; `:78` `_cached` reads instead of
   `exists()`; `tests/test_api_e2e.py:529-745` "…after a delete is 410 not 500" tests are the pattern — hook the DELETE
-  between the check and the read with `monkeypatch`). `routes/download.py:31` `_result_zip` has the same
+  between the check and the read with `monkeypatch`). `routes/download.py:30` `_result_zip` has the same
   `exists()`-then-open shape.
 - **Worker** `src/pdf_splitter/worker/runner.py:67` `Runner(settings, kinds, poll=)`: `:133` `recover(store, now)`
   (re-queue/fail stuck `running` rows; `now` injectable), `:151` `_maybe_sweep` (throttled by `SWEEP_EVERY_S` on
@@ -73,17 +73,17 @@ Port 8000 is taken on this laptop: API on 8010, Vite with `API_PORT=8010 bun run
   `:185` `serve` (threads = `settings.workers`, `recover` once at start). **AC-3: the janitor lives here** — same
   shape as `_maybe_sweep`: a throttled call from the loop, or its own daemon thread started in `serve`, every 5 min;
   log and continue on any failure (Architecture: idempotent). `tests/test_worker.py:493-630` test `Runner` with a
-  real `wstore`; `test_cut.py:150` defines the `wstore` fixture (copy it).
-- **Delete** `routes/download.py:76` `delete_job`: row → `deleted` first, then `rmtree` — the janitor's per-row
+  real `wstore`; `test_cut.py:166` defines the `wstore` fixture (copy it).
+- **Delete** `routes/download.py:80` `delete_job`: row → `deleted` first, then `rmtree` — the janitor's per-row
   order should be the same (addendum 1: a `deleted` row whose dir came back — a late `mkdir(parents=True)` from the
-  engine, see `preview.py:65` — gets its dir removed again).
+  engine, see `preview.py:63` — gets its dir removed again).
 - **Failed cut today** (addendum 3): `routes/common.py:16` `EDITABLE` excludes `failed`, so `PUT /plan` / `POST /cut`
   on `failed`+`cut` answer 409 `not_ready` (`tests/test_api_e2e.py::test_put_plan_and_cut_refused_outside_review_and_done`
   pins `("failed", "analyze", "not_ready")` — keep that row, ADD `failed`+`cut` → 200/202). `analyzed(job)` (`:40`)
   already counts `kind == "cut"` as analyzed. SPA: `web/src/components/Download.svelte:40-44` `failed` disables
   Split and `:103` says "Upload the PDF again to retry"; `Review.svelte` never unmounts on a failed cut
   (`JobPage.svelte` `reviewable` is sticky), so only Download's `failed` gating and message change, plus
-  `JobPage.svelte:46` `onstatus` — a `failed` cut currently does not bump `cuts` (correct: the previous ZIP stays).
+  `JobPage.svelte:51` `onstatus` — a `failed` cut currently does not bump `cuts` (correct: the previous ZIP stays).
   `JobPage.test.ts` `fakeApi()` (`:40`) follows the API's transitions; add a `failed` phase to it for the vitest.
 - **Health** `src/pdf_splitter/app.py:43`: `disk_free_gb` = `shutil.disk_usage(settings.jobs_dir).free` — the disk
   guard uses the same call (AC-5 says monkeypatch `shutil.disk_usage`; patch it where the guard imports it).
@@ -116,7 +116,7 @@ Port 8000 is taken on this laptop: API on 8010, Vite with `API_PORT=8010 bun run
 
 1. **Frozen clocks, no sleeping.** Every store method takes `now`; the janitor and the rate window must too
    (`janitor.run(store, settings, now=)`, `ratelimit.check(store, ip_hash, now=)`), so AC-5's tests pass `now` and
-   never sleep. `tests/test_worker.py` `FakeClock` (:231) is the pattern for monotonic throttles.
+   never sleep. `tests/test_worker.py` `FakeClock` (:218) is the pattern for monotonic throttles.
 2. **The daily-rotating salt must be shared by every API process/thread** (ADR-007) — a per-process random salt
    (today's `_IP_SALT`) would make the window per-process. Derive it from a secret + the UTC date
    (`PDFSPLIT_IP_SALT` setting, default random once per process is NOT enough for multi-worker uvicorn — say so if
@@ -143,7 +143,7 @@ Port 8000 is taken on this laptop: API on 8010, Vite with `API_PORT=8010 bun run
    (like from `done`). SPA: Split enabled after a failed cut with the failure message above it; the editor stays.
 9. **`queue_position`** = 1 + the number of queued rows of the same kind created before this one (FIFO per kind,
    `claim_next`), `null` unless `queued`. Cheap SQL in `status_of`'s caller (it needs the store) — `get_job`
-   (`routes/plan.py:56`) has `StoreDep`.
+   (`routes/plan.py:57`) has `StoreDep`.
 10. **Bun/uv only; `bun run check` stays at 0 warnings; commit messages end with the Co-Authored-By line; stage
     explicit paths (never `git add -A`/`.`; never `docs/loop-state.json`); never `reset --hard` / `checkout .`.**
     Stop servers by PID (`lsof -ti :8010`, `kill <pid>`; the worker via `pgrep -a -f "pdf-splitter worker"`), never

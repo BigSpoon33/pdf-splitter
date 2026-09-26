@@ -1,6 +1,6 @@
 # STORY-015: Home page with two entry points + page-range mode
 
-> **Status:** Pending
+> **Status:** Done (2026-09-26)
 > **Size:** M
 > **Date:** 2026-09-25
 > **Architecture ref:** `docs/Architecture.md#adr-009-page-range-mode-is-a-plan-source-not-a-new-pipeline`
@@ -102,11 +102,11 @@ feat: STORY-015 - home page with chapter and page-range entry points; page-range
 
 ## Status
 
-**Pending**
+**Done** — 2026-09-26, `722b231` on feature/mvp (`docs/findings/STORY-015-findings.md`)
 
-- [ ] AC-1
-- [ ] AC-2
-- [ ] AC-3
-- [ ] AC-4
-- [ ] AC-5
-- [ ] AC-6
+- [x] AC-1
+- [x] AC-2
+- [x] AC-3
+- [x] AC-4
+- [x] AC-5
+- [x] AC-6
