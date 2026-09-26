@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { ComponentProps } from 'svelte'
-  import { getJob, type ApiError, type JobStatus as Status } from '../lib/api'
+  import { getJob, TERMINAL_STATES, type ApiError, type JobStatus as Status } from '../lib/api'
+  import { EXPIRY_TICK_MS, WAKE_RECHECK_MS } from '../lib/config'
   import { linkClick } from '../lib/route'
   import Expired, { type GoneReason } from './Expired.svelte'
   import Expiry from './Expiry.svelte'
@@ -14,9 +15,13 @@
     review?: Partial<ComponentProps<typeof Review>>
     expiry?: Partial<ComponentProps<typeof Expiry>>
     pollMs?: number
+    /** How long a settled page goes without asking the API for its status again. */
+    recheckMs?: number
+    /** How often the settled page compares its two clocks for a suspend it slept through. */
+    tickMs?: number
   }
 
-  let { id, load = getJob, review = {}, expiry = {}, pollMs }: Props = $props()
+  let { id, load = getJob, review = {}, expiry = {}, pollMs, recheckMs = WAKE_RECHECK_MS, tickMs = EXPIRY_TICK_MS }: Props = $props()
 
   let job = $state<Status | null>(null)
   /** When `job` arrived, on the monotonic clock: the expiry countdown runs from the server's count anchored here. */
@@ -38,7 +43,7 @@
   let jobState = $state<'review' | 'done'>('review')
   /** Cuts seen finishing; Review fetches the new manifest on each. */
   let cuts = $state(0)
-  // Not reactive: only onstatus reads it, to recognise the `done` that ends a cut.
+  // Not reactive: only onstatus reads it, to recognise the status that ends a cut.
   let cutPending = false
 
   function onstatus(next: Status) {
@@ -54,7 +59,9 @@
       reviewable = true
     } else if (cutPending && !active) {
       cutPending = false
-      if (next.state === 'done') cuts++
+      // A cut we were following that now reads `done` — or already `review`, when an edit landed between its last
+      // section and this poll (gate r2) — has replaced the ZIP: the results are the new manifest either way.
+      if (next.kind === 'cut' && next.state !== 'failed') cuts++
     }
   }
 
@@ -63,7 +70,46 @@
   }
 
   const fromError = (err: ApiError): GoneReason => (err.code === 'not_found' ? 'not_found' : 'expired')
+
+  /** The poll loop has stopped: nothing but this page asks the API again. */
+  const settled = $derived(!gone && job !== null && TERMINAL_STATES.has(job.state))
+
+  /**
+   * Ask the API once more (gate r2). The countdown runs on the monotonic clock and the timers on the same one, and
+   * both stand still through a system suspend, so a page that wakes up has no idea how long it slept: the server's
+   * fresh `seconds_left` re-anchors it, and only the server's 404/410 makes it the deleted screen. While the job is
+   * still queued/running the loop is polling anyway.
+   */
+  function recheck() {
+    if (settled) resume++
+  }
+
+  // Wake-ups that fire no event (a headless or lidless machine) are caught by the two clocks drifting apart: the
+  // wall clock keeps counting through a suspend and the monotonic one does not. A gap of a minute — the countdown's
+  // own resolution — counts; the wall clock still never sets the countdown, it only prompts asking the server. The
+  // interval also paces the plain periodic re-check.
+  $effect(() => {
+    if (!settled) return
+    let wall = Date.now()
+    let mono = performance.now()
+    let due = mono + recheckMs
+    const timer = setInterval(() => {
+      const w = Date.now()
+      const m = performance.now()
+      const slept = w - wall - (m - mono) > EXPIRY_TICK_MS
+      wall = w
+      mono = m
+      if (slept || m >= due) {
+        due = m + recheckMs
+        recheck()
+      }
+    }, tickMs)
+    return () => clearInterval(timer)
+  })
 </script>
+
+<svelte:window onpageshow={recheck} ononline={recheck} />
+<svelte:document onvisibilitychange={() => document.visibilityState === 'visible' && recheck()} />
 
 {#if gone}
   <Expired reason={gone} />

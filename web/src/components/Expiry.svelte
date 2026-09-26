@@ -39,12 +39,17 @@
   let error = $state<string | null>(null)
 
   $effect(() => {
+    // Re-read at every status too: a re-check after a suspend (gate r2) must show the server's figure at once, not
+    // one that a tick up to a minute old skews.
+    void receivedAt
     clock = now()
     const timer = setInterval(() => (clock = now()), tickMs)
     return () => clearInterval(timer)
   })
 
-  const left = $derived(timeLeft(secondsLeft * 1000 - (clock - receivedAt)))
+  // Whole seconds elapsed, like the server's count: the milliseconds between the answer and this render would
+  // otherwise floor a fresh "1 h" to "59 min".
+  const left = $derived(timeLeft((secondsLeft - Math.floor(Math.max(clock - receivedAt, 0) / 1000)) * 1000))
 
   // Re-armed by every status: when the server's count runs out, one more poll settles it (a 410, or a fresh count).
   $effect(() => {

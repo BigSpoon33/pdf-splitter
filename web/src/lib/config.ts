@@ -30,5 +30,12 @@ export const EXPIRY_TICK_MS = 60_000
  */
 export const EXPIRY_GRACE_MS = 1500
 
+/**
+ * A page left open in `review`/`done` asks the API for its status again this often (gate r2): the countdown runs on
+ * the monotonic clock, which stands still through a system suspend, so only a fresh `seconds_left` can say how much
+ * of the 24 h the sleep took. Wake-up events (visibility, pageshow, online, a wall-clock jump) ask sooner.
+ */
+export const WAKE_RECHECK_MS = 5 * 60_000
+
 /** A results refresh that fails after a cut is retried once by itself this long later, before the visitor has to. */
 export const MANIFEST_RETRY_MS = 2000

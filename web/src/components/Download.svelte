@@ -31,8 +31,8 @@
   let posting = $state(false)
   let error = $state<string | null>(null)
   /**
-   * The status this click's cut has yet to show up in: Split stays disabled until the poll reports the cut, so the
-   * gap between the 202 and the first poll cannot take a second click (gate r1).
+   * The status on screen when the API accepted this click's cut: Split stays disabled until a later one arrives, so
+   * the gap between the 202 and the first poll cannot take a second click (gate r1). `posting` covers the POST itself.
    */
   let requestedOn = $state<JobStatus | null | undefined>(undefined)
 
@@ -43,13 +43,15 @@
   const requested = $derived(requestedOn !== undefined)
   const disabled = $derived(posting || requested || cutting || failed || editor.saving || editor.gone || count === 0)
 
-  // Each status is a new object; the first one after the click that reports a cut is ours, and any split error
-  // that came before it is history.
+  // Each status is a new object, and the page restarts its poll on the 202, so every one after `requestedOn` is the
+  // server's word from after the cut was queued: a `cut` of any state — `review` included, when an edit landed
+  // between the cut's last section and the poll's first answer (gate r2) — or a failure frees the button. Any split
+  // error that came before it is history.
   $effect(() => {
     const now = job
     if (now === untrack(() => requestedOn)) return
     error = null
-    if (now?.kind === 'cut' && now.state !== 'review') requestedOn = undefined
+    if (now?.kind === 'cut' || now?.state === 'failed') requestedOn = undefined
   })
 
   async function split() {
@@ -65,17 +67,15 @@
         error = 'Fix the section list first: the plan on screen has not been saved.'
         return
       }
-      requestedOn = job
       try {
         await cut(id)
       } catch (err) {
         // `busy` means a cut is already running — ours, from a click the answer to which never arrived — so it is
-        // followed like any other; every other refusal frees the button for another try.
-        if (!(err instanceof ApiError && err.code === 'busy')) {
-          requestedOn = undefined
-          throw err
-        }
+        // followed like any other; every other refusal leaves the button free for another try.
+        if (!(err instanceof ApiError && err.code === 'busy')) throw err
       }
+      // Anchored now, not at the click: a status that answered during the POST still describes the job before it.
+      requestedOn = job
       // The cut follows the plan as saved now; only edits from here on make its files stale.
       editor.edited = false
       oncut?.()

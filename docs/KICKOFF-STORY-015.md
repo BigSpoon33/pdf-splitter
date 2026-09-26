@@ -11,10 +11,12 @@ new Plan *source*, not a new pipeline.
   `68769d3 feat: STORY-011 - split, download, delete-now and expiry UX`, its docs commit `5754c1d`, and the gate r1
   fix `fix: STORY-011 - gate r1: server decides expiry, results never outlive a failed refresh, one split per click`
   (`docs/findings/STORY-011-findings.md` § Gate r1 fixes — read it: it changed `Expiry`, `Review`, `Download` and
-  added `seconds_left` to the status). Anything after those is the orchestrator's gate work — check
+  added `seconds_left` to the status), then the gate r2 fix `fix: STORY-011 - gate r2: re-check the server after
+  wake, never strand the Split button` (§ Gate r2 fixes — the settled page re-polls on wake-up and by itself, and
+  `requestedOn` is released by any `cut` status). Anything after those is the orchestrator's gate work — check
   `git log --oneline -8` and `docs/findings/STORY-011-review.md`.
-  **Baselines:** `cd web && bun run test` → **238 pass** (17 files), `bun run check` 0 errors 0 warnings (330 files),
-  `bun run build` ≈ 102 kB JS (36.6 kB gzip); `uv run pytest -q` → **345 pass** (≈ 80 s), `uv run ruff check` clean.
+  **Baselines:** `cd web && bun run test` → **246 pass** (17 files), `bun run check` 0 errors 0 warnings (330 files),
+  `bun run build` ≈ 103 kB JS (36.8 kB gzip); `uv run pytest -q` → **345 pass** (≈ 80 s), `uv run ruff check` clean.
   `docs/loop-state.json` belongs to the orchestrator: never stage it.
 - **Engine (read-only):** `~/Documents/Repos/monograph-splitter` pinned at `v0.4.1` (STORY-016 bumps it to v0.4.2
   later). The ranges cut must NOT use it — PyMuPDF only (ADR-009).
@@ -32,16 +34,21 @@ Port 8000 is taken on this laptop: API on 8010, Vite with `API_PORT=8010 bun run
 - **Job page** `web/src/components/JobPage.svelte`: owns the job-level state — `job` (latest status) + `receivedAt`
   (`performance.now()` when it arrived), `gone` (`GoneReason`, the single "deleted screen" signal; `goneWith()`
   first-reason-wins — fed ONLY by API 404/410s, never by a clock), `resume` (bumped to restart the status poll
-  after a terminal state, also when the expiry countdown runs out), `jobState` (last of `review`/`done`), `cuts` (cuts seen finishing),
-  `reviewable` (sticky: the editor is never unmounted mid-edit, through a cut and a failed cut). `onstatus()`
-  detects the `done` that ends a cut (`cutPending`). Props `load`, `pollMs`, `review`, `expiry` are the test seam
-  (`JobPage.test.ts` `fakeApi()` follows the API's transitions).
+  after a terminal state, when the expiry countdown runs out, and by `recheck()` — gate r2: on `visibilitychange`
+  → visible, `pageshow`, `online`, every `WAKE_RECHECK_MS` 5 min, and when the wall clock outruns the monotonic one
+  by a minute, i.e. a suspend; only while `settled`), `jobState` (last of `review`/`done`), `cuts` (cuts seen
+  finishing), `reviewable` (sticky: the editor is never unmounted mid-edit, through a cut and a failed cut).
+  `onstatus()` detects the status that ends a cut (`cutPending` → a `cut` in `done` OR `review`, gate r2). Props
+  `load`, `pollMs`, `review`, `expiry`, `recheckMs`, `tickMs` are the test seam (`JobPage.test.ts` `fakeApi()`
+  follows the API's transitions; its `straightTo` skips the poll straight to a cut's end state).
 - **Poll** `JobStatus.svelte`: new props `resume` (a counter the effect reads) and `ongone(err)`.
 - **Split/results** `Download.svelte` (mounted INSIDE `Review.svelte`, which owns the `PlanEditor`): props
   `id, editor, job, results, resultsError?, retrying?, stale, cut?, oncut?, onretry?, ongone?`. `split()` commits a
   draft, `editor.flush()`, refuses to cut an unsaved/refused plan, `postCut`, sets `editor.edited = false`,
-  `oncut()`; `requestedOn` keeps the button disabled from the click until the poll reports the cut (gate r1 F3 —
-  keep that if you add a ranges Split), a 409 `busy` to our own POST is followed, not shown. Progress "Cutting
+  `oncut()`; `requestedOn` (the status on screen when the API ACCEPTED the cut — anchored after the 202, not at the
+  click; `posting` covers the POST) keeps the button disabled until any later status whose `kind` is `cut` — `review`
+  included — or that is `failed` (gate r1 F3 + gate r2 — keep that if you add a ranges Split), a 409 `busy` to our
+  own POST is followed, not shown. Progress "Cutting
   section N of M…" from `job.progress/total`; results = per-row `<a href={sectionUrl(id, row.index)} download>` +
   size + flags (`badgeFlags`/`flagLabel`) + "Download all (ZIP)" (`resultUrl`); `resultsError` renders an inline
   alert + Retry in place of any list. Ranges manifests have `flags: []` — nothing to change there.
@@ -51,8 +58,9 @@ Port 8000 is taken on this laptop: API on 8010, Vite with `API_PORT=8010 bun run
   effect on `editor.saves` calls `onsaved()` when the job was `done` (AC-2 of 011: one poll shows `review`); effect
   on `editor.gone` → `ongone`. A ranges review must go through the same `loadResults` path.
 - **Expiry / deleted screen** `Expiry.svelte` (props `secondsLeft` = the status's `seconds_left`, `receivedAt`;
-  "Files deleted in 23 h" counts down on `performance.now()` — never `Date` vs `expires_at`, gate r1 F1; when the
-  count runs out `onexpired` makes the page poll once and only a 404/410 is the deleted screen; Delete now with
+  "Files deleted in 23 h" counts down on `performance.now()` in whole seconds — never `Date` vs `expires_at`, gate
+  r1 F1 — and re-reads its clock at every status so a wake-up re-check shows the server's figure at once (gate r2);
+  when the count runs out `onexpired` makes the page poll once and only a 404/410 is the deleted screen; Delete now with
   injectable `confirmDelete`/`remove`/`now`/`graceMs`), `Expired.svelte` (`GoneReason` exported from its module
   script), `lib/expiry.ts` (`timeLeft(ms)`, `formatBytes`). Any new status fixture needs `seconds_left`
   (`tests/test_api_e2e.py::test_seconds_left_counts_down_on_the_servers_clock` is the contract).

@@ -151,3 +151,58 @@ Decisions: `seconds_left` is derived at response time (not stored); the grace af
 if the API keeps answering 200 with 0 left (the server compares whole-second strings, so the 410 follows within a
 second). The old rows are cleared on the `done` that ends a cut, not on the click: a failed cut keeps the previous
 ZIP downloadable (Architecture § Job states).
+
+## Gate r2 fixes (2026-09-25)
+
+Review: `docs/findings/STORY-011-review.md` round 2 — 2 confirmed (incomplete F1, F3 regression). One commit on the
+feature/mvp tip, `fix: STORY-011 - gate r2: re-check the server after wake, never strand the Split button`. Its 8 new
+tests were run against `9eeb9a2` in a scratch worktree: 7 fail there (the five `after a suspend` cases and both
+"first status is already review" cases); the eighth (`Download.test.ts` "a status that answers while the POST is
+out…") passes on both and guards the new anchor against regressing, it is not a repro.
+
+1. **Wake re-check (F1).** `JobPage.svelte:83` `recheck()` bumps `resume` (one more `JobStatus` poll) while the
+   page is `settled` (`:75` — a terminal status and not gone; while queued/running the loop polls anyway, so a
+   wake-up never doubles it). Triggers: `<svelte:document onvisibilitychange>` when `visible`, `<svelte:window
+   onpageshow ononline>` (`:111-112`), and an interval (`:86-108`, `tickMs` = `EXPIRY_TICK_MS` 60 s) that re-checks
+   every `recheckMs` (`WAKE_RECHECK_MS` 5 min, `config.ts:38`) AND at once when the wall clock has moved more than
+   a minute further than the monotonic one since the last tick (`:99` — a suspend the page slept through; on a
+   headless or lidless machine no event fires, and the reviewer's `suspend.py` fires none either). The wall clock
+   still never sets the countdown: it only prompts asking the server, and each answer re-anchors the countdown
+   (`onstatus` → `receivedAt`; `Expiry.svelte:44` re-reads its clock at every status, `:52` subtracts whole seconds
+   like the server counts so a fresh 3600 reads "1 h", not "59 min"). Only the poll's 404/410 shows the deleted
+   screen (unchanged). One poll per event: the three events fired back to back in one task are batched into one
+   effect run by Svelte, fewer never more.
+   Tests: `JobPage.test.ts` `describe('after a suspend (gate r2 F1)')` (:294) — `suspended()` moves `Date` 24 h and
+   the API's next `seconds_left`, leaves `performance.now()` and the timers alone: visibilitychange → exactly one
+   poll → "Files deleted in 30 min.", page stays; pageshow → 410 → deleted screen after exactly one poll; one poll
+   per event, none while `hidden`, none on top of a running cut's loop (a hanging `load` counts calls); a Date jump
+   with no event → one re-check within `tickMs`, then nothing; `recheckMs: 40` → the settled page polls by itself
+   and shows the server's new count.
+   Live (reviewer's `rv011-r2/suspend.py`, API :8041 + worker + Vite :5241, Playwright clock +24.5 h, deadline
+   moved into the past in `jobs.db`, no event fired): 65 s after "waking": deleted screen `expired`, 1 poll, 0
+   rows. Same script, 22 h jump with 1800 s left server-side after a cut: "Files deleted in 29 min.", 3 rows + ZIP
+   link still listed, the first section link answers 200, 1 poll (`shots/s3-suspend.png`, `s4-suspend.png`).
+2. **Split never stranded (F3).** `Download.svelte:78` anchors `requestedOn` AFTER the API accepted the cut (202 or
+   our own `busy`), not at the click — a status that answered during the POST still describes the job before it —
+   and `:54` releases it on ANY later status whose `kind` is `cut` (`review` included: the cut finished and an edit
+   landed before the poll's first answer) or that is `failed`. The page restarts the poll on the 202 (`oncut` →
+   `resume++`, which aborts an in-flight poll), so every status after the anchor is post-cut. `JobPage.svelte:64`
+   treats that first `review`/`done` `cut` status as the cut finishing (`cuts++`), so `Review.loadResults()` fetches
+   the manifest the new ZIP serves. Double-click stays one POST: `posting` covers the POST, `requestedOn` the gap to
+   the first poll.
+   Tests: `Download.test.ts:123` (202 → clicks → 1 POST → `review/cut` frees the button, no alert), `:134` (a
+   `review/cut` rerender while the POST is out does not free it; queued keeps it; done frees it), `JobPage.test.ts:268`
+   (cut 1, edit → review, then `api.straightTo = 'review'`: two clicks → 2 POSTs total, status `review`, "Files from
+   the last cut" lists `003 - 3 The End.pdf` and not cut 1's file, Split enabled, no alert).
+   Live (reviewer's `stuck.py`: status route aborted from the click through cut 2 and an edit saved meanwhile): 8 s
+   after the network is back — "Ready for review", `Split disabled=False`, rows `001…`, `002 - Renamed Two.pdf`,
+   `003…` = the server's manifest, alerts `[]`; still enabled 28 s later. `slowedit.py` (300 ms latency on every
+   request, rename 1.5 s after the click): 20 s later "Ready for review", Split enabled, "Saved", server review/cut.
+
+Counts after the fix: `bun run test` **246 pass** (17 files; +8), `bun run check` 0 errors 0 warnings (330 files),
+`bun run build` 102.81 kB JS (36.84 kB gzip). No Python change (`uv run pytest` untouched at 345).
+
+Decisions: the drift trigger is an addition to the kickoff's four (it is what makes the reviewer's event-less repro
+pass; threshold = the countdown's minute resolution, so `vi.waitFor` nudging a faked `Date` by 50 ms never trips
+it); `settled` includes `failed` (its countdown is just as stale after a sleep); the periodic re-check runs only
+while settled, so a page mid-cut is not polled twice.

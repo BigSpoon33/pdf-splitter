@@ -120,6 +120,37 @@ describe('Download', () => {
     await vi.waitFor(() => expect(cut).toHaveBeenCalledTimes(2))
   })
 
+  it('a cut whose first status is already review (an edit landed before the poll answered) frees Split; a double-click still posts once (gate r2 F3)', async () => {
+    const { cut, oncut, rerender } = mount({ job: status({ state: 'done', kind: 'cut' }), results: ROWS })
+    await fireEvent.click(splitButton())
+    await vi.waitFor(() => expect(oncut).toHaveBeenCalledTimes(1))
+    await fireEvent.click(splitButton())
+    expect(cut).toHaveBeenCalledTimes(1)
+    await rerender({ job: status({ state: 'review', kind: 'cut' }) })
+    expect(splitButton().disabled).toBe(false)
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  it('a status that answers while the POST is out still describes the job before the cut: it does not free Split (gate r2 F3)', async () => {
+    let accept!: (job: CreatedJob) => void
+    const { cut, rerender } = mount({
+      job: status({ state: 'review', kind: 'cut' }),
+      results: ROWS,
+      stale: true,
+      cut: () => new Promise<CreatedJob>((resolve) => (accept = resolve)),
+    })
+    await fireEvent.click(splitButton())
+    await vi.waitFor(() => expect(cut).toHaveBeenCalledTimes(1))
+    await rerender({ job: status({ state: 'review', kind: 'cut' }) })
+    accept({ id: ID, state: 'queued' })
+    await vi.waitFor(() => expect(screen.queryByText('Starting the cut…')).toBeNull())
+    expect(splitButton().disabled).toBe(true)
+    await rerender({ job: status({ state: 'queued', kind: 'cut' }) })
+    expect(splitButton().disabled).toBe(true)
+    await rerender({ job: status({ state: 'done', kind: 'cut' }) })
+    expect(splitButton().disabled).toBe(false)
+  })
+
   it('a split refused by the API frees the button again, and the message goes once a later status arrives (gate r1 F3)', async () => {
     const { cut, rerender } = mount({ cut: async () => Promise.reject(new ApiError(500, 'internal')) })
     await fireEvent.click(splitButton())

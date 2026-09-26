@@ -46,6 +46,11 @@ function fakeApi(start: Partial<JobStatus> = {}) {
   const api = {
     /** What the next cut writes. */
     rows: ROWS,
+    /**
+     * The next cut's first status, when the poll cannot follow it: `review` is a cut that finished AND took an edit
+     * before the page heard back (the r2 stranded-Split case).
+     */
+    straightTo: null as 'review' | 'done' | null,
     load: vi.fn(async () => {
       if (deleted) throw gone()
       const next = phases.shift()
@@ -60,11 +65,13 @@ function fakeApi(start: Partial<JobStatus> = {}) {
     cut: vi.fn(async () => {
       if (deleted) throw gone()
       row = { ...row, state: 'queued', kind: 'cut' }
-      phases = [
-        row,
-        { ...row, state: 'running', progress: 1, total: 3, message: 'Cutting sections' },
-        { ...row, state: 'done', progress: 3, total: 3, message: null },
-      ]
+      phases = api.straightTo
+        ? [{ ...row, state: api.straightTo, progress: 3, total: 3, message: null }]
+        : [
+            row,
+            { ...row, state: 'running', progress: 1, total: 3, message: 'Cutting sections' },
+            { ...row, state: 'done', progress: 3, total: 3, message: null },
+          ]
       manifest = api.rows
       return { id: ID, state: 'queued' as const }
     }),
@@ -83,11 +90,12 @@ function fakeApi(start: Partial<JobStatus> = {}) {
   return api
 }
 
-function mount(api: ReturnType<typeof fakeApi>, confirmDelete = vi.fn(() => true)) {
+function mount(api: ReturnType<typeof fakeApi>, confirmDelete = vi.fn(() => true), page: { recheckMs?: number; tickMs?: number } = {}) {
   return render(JobPage, {
     id: ID,
     load: api.load,
     pollMs: 5,
+    ...page,
     review: {
       loadAnalysis: async () => analysisOf(),
       loadPlan: async () => planOf(),
@@ -255,5 +263,129 @@ describe('JobPage', () => {
     expect(screen.queryByRole('alert')).toBeNull()
     expect(screen.getByRole('heading', { name: 'Your files' })).toBeTruthy()
     expect(api.loadManifest).toHaveBeenCalledTimes(4) // mount (409), cut 1, cut 2 (502), the automatic retry
+  })
+
+  it("a re-cut whose first status is already review (an edit saved before the poll could answer) frees Split and lists the new files (gate r2 F3)", async () => {
+    const api = fakeApi()
+    mount(api)
+    await vi.waitFor(() => expect(splitButton()).toBeTruthy())
+    await fireEvent.click(splitButton())
+    await vi.waitFor(() => expect(screen.getByRole('heading', { name: 'Your files' })).toBeTruthy())
+    const name = screen.getByLabelText('Name of section 3')
+    await fireEvent.input(name, { target: { value: 'The End' } })
+    await fireEvent.blur(name)
+    await vi.waitFor(() => expect(stateShown()).toBe('review'))
+    await vi.waitFor(() => expect(splitButton().hasAttribute('disabled')).toBe(false))
+
+    // The poll is unreachable while cut 2 runs and a further edit is saved: the first status it gets is review/cut.
+    api.rows = [rowOf(0, '1 Foundations of Testing'), rowOf(1, '2 Chapter Two'), rowOf(2, '3 The End')]
+    api.straightTo = 'review'
+    await fireEvent.click(splitButton())
+    await fireEvent.click(splitButton())
+    await vi.waitFor(() => expect(screen.getByRole('link', { name: '003 - 3 The End.pdf' })).toBeTruthy())
+    expect(api.cut).toHaveBeenCalledTimes(2)
+    expect(stateShown()).toBe('review')
+    expect(screen.getByRole('heading', { name: 'Files from the last cut' })).toBeTruthy()
+    expect(screen.queryByRole('link', { name: '003 - 3 Closing Chapter.pdf' })).toBeNull()
+    await vi.waitFor(() => expect(splitButton().hasAttribute('disabled')).toBe(false))
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  describe('after a suspend (gate r2 F1)', () => {
+    /**
+     * A system suspend stops the monotonic clock and every timer with it, while the server's clock (and the visitor's
+     * wall clock) keep going: the page wakes up believing no time has passed. Here the API's next answer carries the
+     * server's figure, `Date` jumps a day, and neither `performance.now()` nor the timers move.
+     */
+    async function suspended(api: ReturnType<typeof fakeApi>, hours: number, secondsLeft: number) {
+      await vi.waitFor(() => expect(splitButton()).toBeTruthy())
+      expect(screen.getByText('Files deleted in 23 h.')).toBeTruthy()
+      vi.useFakeTimers({ toFake: ['Date'] })
+      vi.setSystemTime(Date.now() + hours * HOUR)
+      api.load.mockImplementation(async () => status({ seconds_left: secondsLeft }))
+      return api.load.mock.calls.length
+    }
+    const wake = (type: string, target: EventTarget = window) => target.dispatchEvent(new Event(type))
+
+    it("becoming visible again asks the API once, and the countdown shows the server's figure", async () => {
+      const api = fakeApi()
+      mount(api)
+      const polls = await suspended(api, 24, 30 * 60)
+      wake('visibilitychange', document)
+      await vi.waitFor(() => expect(screen.getByText('Files deleted in 30 min.')).toBeTruthy())
+      expect(api.load).toHaveBeenCalledTimes(polls + 1)
+      await new Promise((r) => setTimeout(r, 30))
+      expect(api.load).toHaveBeenCalledTimes(polls + 1)
+      expect(goneScreen()).toBeUndefined()
+      expect(screen.getByRole('button', { name: 'Delete now' })).toBeTruthy()
+    })
+
+    it('a 410 from that re-check is the deleted screen; the countdown alone never is', async () => {
+      const api = fakeApi()
+      mount(api)
+      const polls = await suspended(api, 25, 0)
+      api.load.mockRejectedValue(new ApiError(410, 'expired'))
+      expect(goneScreen()).toBeUndefined()
+      wake('pageshow')
+      await vi.waitFor(() => expect(goneScreen()).toBe('expired'))
+      expect(api.load).toHaveBeenCalledTimes(polls + 1)
+    })
+
+    it('one poll per wake-up event, none while hidden, none while the job is still running', async () => {
+      const api = fakeApi()
+      mount(api)
+      const polls = await suspended(api, 1, 22 * 3600)
+      wake('visibilitychange', document)
+      await vi.waitFor(() => expect(api.load).toHaveBeenCalledTimes(polls + 1))
+      wake('pageshow')
+      await vi.waitFor(() => expect(api.load).toHaveBeenCalledTimes(polls + 2))
+      wake('online')
+      await vi.waitFor(() => expect(api.load).toHaveBeenCalledTimes(polls + 3))
+      await new Promise((r) => setTimeout(r, 30))
+      expect(api.load).toHaveBeenCalledTimes(polls + 3)
+
+      Object.defineProperty(document, 'visibilityState', { value: 'hidden', configurable: true })
+      wake('visibilitychange', document)
+      await new Promise((r) => setTimeout(r, 30))
+      expect(api.load).toHaveBeenCalledTimes(polls + 3)
+      Reflect.deleteProperty(document, 'visibilityState')
+
+      // Mid-cut the loop polls by itself: a wake-up must not restart it on top.
+      let hung = 0
+      api.load
+        .mockImplementationOnce(async () => status({ state: 'running', kind: 'cut', progress: 1, total: 3 }))
+        .mockImplementation(() => new Promise<JobStatus>(() => hung++))
+      wake('online')
+      await vi.waitFor(() => expect(hung).toBe(1))
+      wake('online')
+      wake('pageshow')
+      wake('visibilitychange', document)
+      await new Promise((r) => setTimeout(r, 30))
+      expect(hung).toBe(1)
+    })
+
+    it('a wake-up that fires no event is caught by the wall clock outrunning the monotonic one: one re-check, then nothing', async () => {
+      const api = fakeApi()
+      mount(api, undefined, { recheckMs: 10_000, tickMs: 10 })
+      await vi.waitFor(() => expect(splitButton()).toBeTruthy())
+      const polls = api.load.mock.calls.length
+      await new Promise((r) => setTimeout(r, 60))
+      expect(api.load).toHaveBeenCalledTimes(polls)
+      await suspended(api, 24, 45 * 60)
+      await vi.waitFor(() => expect(screen.getByText('Files deleted in 45 min.')).toBeTruthy())
+      expect(api.load).toHaveBeenCalledTimes(polls + 1)
+      await new Promise((r) => setTimeout(r, 60))
+      expect(api.load).toHaveBeenCalledTimes(polls + 1)
+    })
+
+    it('a settled page re-checks by itself every recheckMs, and each answer re-anchors the countdown', async () => {
+      const api = fakeApi()
+      mount(api, undefined, { recheckMs: 40, tickMs: 10 })
+      await vi.waitFor(() => expect(splitButton()).toBeTruthy())
+      const polls = api.load.mock.calls.length
+      api.load.mockImplementation(async () => status({ seconds_left: 5 * 3600 }))
+      await vi.waitFor(() => expect(api.load.mock.calls.length).toBeGreaterThanOrEqual(polls + 2), { timeout: 1000 })
+      expect(screen.getByText('Files deleted in 5 h.')).toBeTruthy()
+    })
   })
 })
