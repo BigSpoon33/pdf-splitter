@@ -38,7 +38,7 @@ Job ids are the only credential (capability URLs); errors are `{code, message}` 
 has every code), 422s add `errors: [{loc, msg, type}]`.
 
 ```
-POST   /api/jobs                             multipart file → 201 {id, state}
+POST   /api/jobs                             multipart file [+ mode=chapters|ranges] → 201 {id, state}
 GET    /api/jobs/{id}                        {id, state, kind, progress, total, queue_position, message,
                                               error_code (failed only), expires_at, seconds_left, filename, pages}
                                               (seconds_left: until expires_at by the server's clock — the SPA counts

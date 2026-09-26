@@ -152,6 +152,7 @@ deploy/
 
 ```
 Browser ──upload──▶ api ──preflight (fitz: pages, encrypted, text probe)──▶ /jobs/<id>/source.pdf
+/jobs/<id>/mode.json                  only for page-range uploads ({"mode":"ranges"}; absent = chapters)
                      │                                                       jobs row: queued/analyze
                      ▼
                   worker ──subprocess──▶ engine.index_book (cache .book-index.json)
