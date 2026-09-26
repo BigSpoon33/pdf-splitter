@@ -10,16 +10,18 @@ The product lives in two repos:
   `784b31d feat: STORY-009 - source picker, editable section list and layout panel`, its docs commit
   `955ab62`, then the gate r1 fix `9e29032 fix: STORY-009 - gate r1: overrides follow boundaries, undo/paste/picker
   state, saves survive leaving, badges after reload` and its docs commit `docs: STORY-009 - gate r1 fixes in findings
-  + KICKOFF-STORY-010`. Anything after those is the orchestrator's gate work; check `git log --oneline -8`.
-  **Baselines:** `cd web && bun run test` → **147 pass** (11 files, ≈ 3 s), `bun run check` 0 errors 0 warnings
-  (316 files), `bun run build` ≈ 77 kB JS (28.5 kB gzip); `uv run pytest` → **335 pass** (≈ 75 s), `uv run ruff check`
-  clean. `docs/loop-state.json` belongs to the orchestrator: never stage it. Line numbers below are as of `9e29032`.
+  + KICKOFF-STORY-010`, then the gate r2 fix `fix: STORY-009 - gate r2: large plans save on tab switch and are never
+  silently lost on close`. Anything after those is the orchestrator's gate work; check `git log --oneline -8`.
+  **Baselines:** `cd web && bun run test` → **153 pass** (11 files, ≈ 3 s), `bun run check` 0 errors 0 warnings
+  (316 files), `bun run build` ≈ 78 kB JS (28.6 kB gzip); `uv run pytest` → **335 pass** (≈ 75 s), `uv run ruff check`
+  clean. `docs/loop-state.json` belongs to the orchestrator: never stage it. Line numbers below are as of `9e29032`
+  except where the gate r2 fix moved them (`editor.svelte.ts`: see its § in the findings).
 - **Engine (read-only):** `~/Documents/Repos/monograph-splitter`, pinned at `v0.4.1`. Its review editor
   `src/monograph_splitter/review/app.html` is the prior art for hatching, ruler and band semantics — port the math,
   not the code (story note).
 - Read, in order: `docs/stories/STORY-010.md` (its ACs are authoritative), `docs/Architecture.md` § web (SPA),
   § Data Types (Section plan, Plan `overrides`), § API Interface, ADR-003 (sheet numbers), then
-  `docs/findings/STORY-009-findings.md` (§ Gate r1 fixes, § Decisions, § Handoff, § Out-of-Scope) and
+  `docs/findings/STORY-009-findings.md` (§ Gate r2 fix, § Gate r1 fixes, § Decisions, § Handoff, § Out-of-Scope) and
   `docs/findings/STORY-007-findings.md` AC-2/AC-3 (the preview subprocess and its 410 rules).
 
 Toolchain: the SPA is **Bun only** (`bun install` / `bun run dev|check|test|build`, `bunx`; never npm/npx/yarn/pnpm).
@@ -45,11 +47,16 @@ Toolchain: the SPA is **Bun only** (`bun install` / `bun run dev|check|test|buil
   `replaceSections(source, sections, label, picker)` :121, `rename` :151, `setPage` :171, `remove` :178,
   `merge` :185, `add` :195, `setSetting(key, value)` :203 (**a gutter drag = `setSetting('column_split', x / W)`, a
   band drag = `setSetting('header_band' | 'footer_band', pt)`**), `errorAt(...loc)` :214 (a 422 message for a
-  control), `flush()` :235 (send now), `destroy()` :293 (commits the draft, sends what is pending, unbinds the
-  `pagehide`/`visibilitychange` listeners the constructor added — `UnloadSource` :21; tests pass a stand-in `page`).
+  control), `flush()` :253 (send now), `destroy()` :325 (commits the draft, sends what is pending, unbinds the
+  `pagehide`/`visibilitychange`/`beforeunload` listeners the constructor added — `UnloadSource` :25; tests pass a
+  stand-in `page` whose `fire(type, event?)` passes an event with `preventDefault`).
   Every edit goes through the private `touch()` → a debounced PUT (600 ms, one in flight, latest after; the 200 body
-  is adopted unless an edit happened meanwhile; an unsent edit goes out with `keepalive` when the tab hides or
-  unloads, `sendBeforeUnload` :257). The save callback is `SavePlan = (plan, opts?: {keepalive?}) => Promise<Plan>`.
+  is adopted unless an edit happened meanwhile). Leaving (gate r2): a hidden tab flushes an ORDINARY PUT; `pagehide`
+  sends at once with `keepalive` only when `fitsKeepalive(plan)` (`api.ts:243`, ≤ `KEEPALIVE_MAX_BYTES` 60,000 —
+  Chromium refuses bigger keepalive bodies), else best-effort; `beforeunload` → `preventDefault()` while `dirty`, so
+  the browser prompts before a large plan could be lost; a failed send leaves the edit pending for the next flush.
+  Don't add a second `beforeunload`/keepalive path in the preview — an override edit through `touch()` inherits all
+  of it. The save callback is `SavePlan = (plan, opts?: {keepalive?}) => Promise<Plan>`.
   **There is no override method yet:** add `setOverride(i, override | null)` (write `plan.overrides[String(i)]` or
   delete the key, then `touch()`); keep the re-keying in `web/src/lib/plan.ts` (`shiftOverrides` :147,
   `removeSection` :168, `mergeWithNext` :178, `insertSection` :196, `dropEnd` :160 — **since gate r1 F2 the section
@@ -59,8 +66,8 @@ Toolchain: the SPA is **Bun only** (`bun install` / `bun run dev|check|test|buil
 - **Types and client** `web/src/lib/api.ts`: `Analysis` (:174; `size[{W,H}]` per sheet, `pageLabels`), `Plan` (:208),
   `Override` (:201 — only the keys sent are applied: `startCut: null` REMOVES a cut, an absent key keeps the engine's;
   `startCol`/`endCol` ∈ `full|left|right`), `Section`, `PlanSettings` (:184, incl. optional `heading_wrap_gap`),
-  `ManifestRow` (:217), `getAnalysis` :227, `getPlan` :231, `putPlan(id, plan, {signal?, keepalive?})` :242
-  (`SaveOptions` :235), `getManifest` :252, all through the private `request()`; `isGone(err)` for 404/410. **Add `getSectionPlan(id, i, body?)` and a `sheetUrl(id, n, dpi)`** on top
+  `ManifestRow` (:218), `getAnalysis` :228, `getPlan` :232, `putPlan(id, plan, {signal?, keepalive?})` :248
+  (`SaveOptions` :236, `fitsKeepalive` :243), `getManifest` :258, all through the private `request()`; `isGone(err)` for 404/410. **Add `getSectionPlan(id, i, body?)` and a `sheetUrl(id, n, dpi)`** on top
   (a PNG is an `<img src>`, not a fetch — but a 410 on it needs handling: see gotcha 3).
 - **Pure helpers** `web/src/lib/plan.ts`: `badgeFlags`/`rowFor`/`flagLabel` (the flag badges; `SectionList` reads
   `editor.rows`, it takes no `rows` prop), `parseList`, sources (`headingSections(analysis, {level, threshold,

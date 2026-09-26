@@ -1,5 +1,6 @@
 /** Typed client for the pdf-splitter API. Every non-2xx answer becomes an `ApiError` carrying the API's `code`. */
 import { messageFor } from './errors'
+import { KEEPALIVE_MAX_BYTES } from './config'
 
 export type JobState = 'queued' | 'running' | 'review' | 'done' | 'failed'
 export type JobKind = 'analyze' | 'cut'
@@ -234,8 +235,13 @@ export function getPlan(id: string, signal?: AbortSignal): Promise<Plan> {
 
 export interface SaveOptions {
   signal?: AbortSignal
-  /** The page is going away: the browser finishes the request after unload. */
+  /** The page is going away: the browser finishes the request after unload (only for bodies `fitsKeepalive` allows). */
   keepalive?: boolean
+}
+
+/** Whether the plan's JSON body is small enough for a keepalive request (`KEEPALIVE_MAX_BYTES`, in UTF-8 bytes). */
+export function fitsKeepalive(plan: Plan): boolean {
+  return new TextEncoder().encode(JSON.stringify(plan)).byteLength <= KEEPALIVE_MAX_BYTES
 }
 
 /** 200 returns the NORMALIZED plan (names trimmed, duplicates suffixed); 422 carries `errors[].loc` per field. */

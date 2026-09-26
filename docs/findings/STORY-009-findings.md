@@ -4,8 +4,50 @@
 
 Commits: `784b31d feat: STORY-009 - source picker, editable section list and layout panel`, then the gate r1 fix
 `9e29032 fix: STORY-009 - gate r1: overrides follow boundaries, undo/paste/picker state, saves survive leaving, badges
-after reload` (feature/mvp, pushed to `origin` and `gitea`). § Gate r1 fixes cites lines as of `9e29032`; the AC
-section below cites `784b31d` (its anchors moved by the fix — the function names still hold).
+after reload`, then the gate r2 fix `fix: STORY-009 - gate r2: large plans save on tab switch and are never silently
+lost on close` (feature/mvp, pushed to `origin` and `gitea`). § Gate r2 fix cites lines as of that commit; § Gate r1
+fixes cites lines as of `9e29032`; the AC section below cites `784b31d` (anchors moved by the fixes — the function
+names still hold).
+
+## Gate r2 fix (`fix: STORY-009 - gate r2: …`)
+
+`docs/findings/STORY-009-review.md` round 2: one confirmed regression in the r1 F7 fix — `sendBeforeUnload` always
+used `fetch` `keepalive`, Chromium refuses keepalive bodies over 64 KiB (`TypeError: Failed to fetch`) and `unsent`
+was already cleared, so on Maciocia "Headings → Any level" (1,654 sections, 142 KB) a tab switch showed "Could not
+reach the server" and a later close lost the rename. Fixed per the standing auto-fix policy, all in
+`web/src/lib/editor.svelte.ts` unless noted:
+- **A hidden tab is not an unload** — `onVisibility` (:108): `visibilitychange → hidden` commits the draft and calls
+  `flush()` — an ORDINARY PUT through the one-in-flight rule (the page lives on, the request completes whatever the
+  size; 784b31d's behaviour for big plans is back). Going `visible` again re-flushes only an edit a failed send left
+  behind (`unsent && error`), so a refused or dropped save lands as soon as the tab returns.
+- **`pagehide` sends keepalive only under the budget** — `sendBeforeUnload` (:287) sends `{keepalive:
+  fitsKeepalive(plan)}`; `fitsKeepalive` (`api.ts:243`) measures the UTF-8 JSON body against `KEEPALIVE_MAX_BYTES`
+  = 60,000 (`config.ts:19`, a margin under Chromium's 65,536 which counts headers too). A bigger plan goes as an
+  ordinary best-effort PUT (locally it completes; a slow link may cut it — that is what the prompt below is for).
+  The unload send now takes the in-flight slot (`track`, :264) because on a real unload the spec fires `pagehide`
+  BEFORE `visibilitychange → hidden`: without that, the hidden flush repeated the same 143 KB body (seen live).
+- **The browser warns before a lost save** — `onBeforeUnload` (:116) calls `event.preventDefault()` (the "leave
+  site?" prompt) while `dirty && !gone` — an edit unsent, still out, or a name still being typed. Chromium shows the
+  prompt only after a user gesture on the page (typing/clicking qualifies, so an editing user always has it);
+  Firefox drops such pages from bfcache — accepted, the alternative is silent loss.
+- **Nothing is cleared before acceptance** — `send` (:309): a failed or refused send sets `unsent = true` again (and
+  `dirty` was never cleared), so the next flush — a Retry, another `pagehide`, the tab returning — carries the edit.
+- `UnloadSource` (:25) now covers `beforeunload` and passes the event to listeners; `destroy` (:325) unbinds all
+  three. Tests, `editor.test.ts` "PlanEditor large plans on leaving (gate r2)" ×6 (+ the two r1 tests that pinned the
+  old behaviour, updated) — each fails on `9e29032` (run there in a throwaway worktree: 6 failed / 20 passed):
+  a >64 KB plan (`fixtures.ts` `bigPlanOf`, 1,700 sections ≈ 108 KB) + hidden → `{}` opts and the edit persists;
+  the same plan on `pagehide` through the real `putPlan` against a stubbed `fetch` that throws for keepalive bodies
+  > 65,536 → the request goes without keepalive and lands, a small plan still gets `keepalive: true`; a save that
+  refuses keepalive → `dirty` stays, a second `pagehide` re-sends, `visible` re-flushes with `{}` and it lands; an
+  unload sends once (pagehide then hidden = one PUT); `beforeunload` → `preventDefault` called while unsaved / still
+  out / a draft is open, not when clean.
+- Live (Maciocia, API 8010 + worker + `bun run dev --port 5177`, headless Chromium via the Browser skill's
+  playwright, `fetch` wrapped to log `keepalive` and body bytes): Headings → Any level → `PUT keepalive=undefined
+  bytes=142276`, `GET /plan` 1,654 sections; rename + `visibilitychange(hidden)` → `PUT keepalive=undefined
+  bytes=143095`, status "Saved", `GET /plan` shows the name; rename + `goto` away → a `beforeunload` dialog,
+  dismissed → navigation aborted, the PUT lands; clean page closed with `runBeforeUnload` → no dialog; rename + close
+  accepting the dialog → exactly one `PUT keepalive=false bytes=143079`, `GET /plan` shows the name. Outline (23
+  sections, 2 KB) rename + close → `PUT keepalive=true bytes=2042`, saved.
 
 ## Gate r1 fixes (`9e29032`)
 
@@ -152,8 +194,8 @@ the manifest before a cut — the same class of line as attempt 1's 422 ones, no
 **Result:** pass
 ```
 svelte-check: COMPLETED 316 FILES 0 ERRORS 0 WARNINGS 0 FILES_WITH_PROBLEMS
-vitest:       Test Files  11 passed (11) · Tests  127 passed (127)        (before: 68 in 5 files)
-vite build:   dist/index.html 0.53 kB · index-*.css 7.31 kB (gzip 2.10) · index-*.js 74.04 kB (gzip 27.54)   (before 44.12 / 17.39)
+vitest:       Test Files  11 passed (11) · Tests  153 passed (153)        (before: 68 in 5 files; 127 at 784b31d, 147 at 9e29032)
+vite build:   dist/index.html 0.53 kB · index-*.css 7.39 kB (gzip 2.10) · index-*.js 77.74 kB (gzip 28.60)   (before 44.12 / 17.39)
 ```
 **Command:** `uv run pytest -q && uv run ruff check` → `335 passed in 77.08s` (before 332; +3 in `tests/test_api_e2e.py`) ·
 `All checks passed!`
@@ -225,8 +267,10 @@ was exercised by `SectionList.test.ts` "changes the page and shows the printed l
 preview, `editor.setSetting('column_split', …)` is how a gutter drag lands, and overrides go through
 `editor.plan.overrides[String(i)]` + a `touch`-style method you add — none exists yet since nothing in STORY-009
 edits an override). Since gate r1 the editor also owns `picker` (the SourcePicker controls), `rows` (the last cut's
-manifest), `draft` (a name being typed) and `edited`; it listens to `pagehide`/`visibilitychange` itself and
-`destroy()` sends what is pending — a component that unmounts the editor must call `destroy()`, never just drop it.
+manifest), `draft` (a name being typed) and `edited`; it listens to `pagehide`/`visibilitychange`/`beforeunload`
+itself (since gate r2: a hidden tab = an ordinary flush, `pagehide` = keepalive only under 60 KB, `beforeunload` =
+the browser's prompt while dirty) and `destroy()` sends what is pending — a component that unmounts the editor must
+call `destroy()`, never just drop it.
 `Review` takes `jobState: 'review' | 'done'`. Preview endpoints are unchanged from STORY-007 and their contracts are
 the tests (`::test_section_plan_returns_the_engine_view_with_rects`,
 `::test_sheet_png_renders_through_the_sandboxed_subprocess_and_caches`, the 410-during-render tests at

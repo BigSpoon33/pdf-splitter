@@ -4,10 +4,12 @@
  * the local plan when nothing changed while the request was out (the server normalizes names, so the body
  * is the truth for what was sent — not for what was typed since). 422 field errors are kept by `loc` so a
  * control can show its own (AC-5); 409 `busy` and network failures are shown, never retried in a loop.
- * Leaving the page never loses an edit: `destroy()` sends what is pending, and `pagehide` / a hidden tab send
- * it with `keepalive` so the browser finishes the request after unload.
+ * Leaving the page never loses an edit silently: `destroy()` and a hidden tab send what is pending as ordinary
+ * requests (the page lives on); `pagehide` sends it with `keepalive` when the body is small enough for the browser
+ * to carry after unload, otherwise best-effort — and `beforeunload` asks the browser to warn while an edit is
+ * unsaved, so a large plan is never lost without the user being told.
  */
-import { ApiError, isGone, type ManifestRow, type Plan, type PlanSettings, type Section, type Source } from './api'
+import { ApiError, fitsKeepalive, isGone, type ManifestRow, type Plan, type PlanSettings, type Section, type Source } from './api'
 import { SAVE_DEBOUNCE_MS, UNDO_MS } from './config'
 import { insertSection, mergeWithNext, removeSection, type PickerState } from './plan'
 
@@ -17,10 +19,12 @@ export interface SendOptions {
 
 export type SavePlan = (plan: Plan, opts?: SendOptions) => Promise<Plan>
 
-/** The page's `pagehide` / `visibilitychange` source: the real window in the app, a stand-in in tests. */
+export type UnloadEventType = 'pagehide' | 'visibilitychange' | 'beforeunload'
+
+/** The page's unload events: the real window in the app, a stand-in in tests. */
 export interface UnloadSource {
-  addEventListener(type: 'pagehide' | 'visibilitychange', listener: () => void): void
-  removeEventListener(type: 'pagehide' | 'visibilitychange', listener: () => void): void
+  addEventListener(type: UnloadEventType, listener: (event: { preventDefault(): void }) => void): void
+  removeEventListener(type: UnloadEventType, listener: (event: { preventDefault(): void }) => void): void
   document?: { visibilityState: DocumentVisibilityState }
 }
 
@@ -97,8 +101,21 @@ export class PlanEditor {
   /** Bumped by every edit; a response is adopted only when it still matches. */
   private version = 0
   private readonly onHide = () => this.sendBeforeUnload()
+  /**
+   * A hidden tab is not an unload: the page keeps running, so an ordinary flush completes whatever its size. A tab
+   * coming back retries an edit a failed send left behind (a refused keepalive, a dropped connection).
+   */
   private readonly onVisibility = () => {
-    if (this.page?.document?.visibilityState === 'hidden') this.sendBeforeUnload()
+    if (!this.page?.document) return
+    if (this.page.document.visibilityState === 'hidden') {
+      this.commitDraft()
+      void this.flush()
+    } else if (this.unsent && this.error) void this.flush()
+  }
+  /** The browser's "leave site?" prompt while an edit is unsaved or still out: the only warning a lost save gets. */
+  private readonly onBeforeUnload = (event: { preventDefault(): void }) => {
+    this.commitDraft()
+    if (this.dirty && !this.gone) event.preventDefault()
   }
 
   constructor(plan: Plan, save: SavePlan, opts: EditorOptions = {}) {
@@ -110,6 +127,7 @@ export class PlanEditor {
     this.page = opts.page ?? (typeof window === 'undefined' ? undefined : window)
     this.page?.addEventListener('pagehide', this.onHide)
     this.page?.addEventListener('visibilitychange', this.onVisibility)
+    this.page?.addEventListener('beforeunload', this.onBeforeUnload)
   }
 
   // ── Edits ──
@@ -239,27 +257,39 @@ export class PlanEditor {
       if (this.unsent) this.queued = true
       return this.inflight
     }
-    this.inflight = this.send().finally(() => {
-      this.inflight = null
-    })
-    return this.inflight.then(() => {
-      if (this.queued) {
-        this.queued = false
-        return this.flush()
-      }
-    })
+    return this.track(this.send())
+  }
+
+  /** Makes `send` the request in flight; when it settles, a plan queued behind it goes next. */
+  private track(send: Promise<void>): Promise<void> {
+    const done: Promise<void> = send
+      .finally(() => {
+        // An unload send may have replaced this one meanwhile; only the newest clears the slot.
+        if (this.inflight === done) this.inflight = null
+      })
+      .then(() => {
+        if (this.queued && !this.inflight) {
+          this.queued = false
+          return this.flush()
+        }
+      })
+    this.inflight = done
+    return done
   }
 
   /**
-   * The page is unloading or hidden: a request still out may be cut short and nothing will run after it, so an
-   * unsent edit goes now with `keepalive`, ahead of the one-in-flight rule (the older request left first).
+   * The page is unloading: a request still out may be cut short and nothing will run after it, so an unsent edit
+   * goes now, ahead of the one-in-flight rule (the older request left first). `keepalive` lets the browser finish
+   * it after unload, but only for a body under the keepalive budget — a bigger one is refused outright, so it goes
+   * as an ordinary PUT that may or may not complete (the `beforeunload` prompt is what covers that case). It takes
+   * the in-flight slot so the `visibilitychange → hidden` that follows `pagehide` on unload does not send it again.
    */
   private sendBeforeUnload(): void {
     this.commitDraft()
     if (this.gone || !this.unsent) return
     clearTimeout(this.timer)
     this.queued = false
-    void this.send({ keepalive: true })
+    void this.track(this.send({ keepalive: fitsKeepalive($state.snapshot(this.plan)) }))
   }
 
   private async send(opts: SendOptions = {}): Promise<void> {
@@ -275,6 +305,8 @@ export class PlanEditor {
         this.dirty = false
       }
     } catch (err) {
+      // Not accepted: the edit is pending again, so the next flush (a Retry, unload, the tab returning) carries it.
+      this.unsent = true
       const apiErr = err instanceof ApiError ? err : new ApiError(0, 'network')
       if (apiErr.status === 422 && apiErr.errors) {
         const next: Record<string, string> = {}
@@ -293,6 +325,7 @@ export class PlanEditor {
   destroy(): void {
     this.page?.removeEventListener('pagehide', this.onHide)
     this.page?.removeEventListener('visibilitychange', this.onVisibility)
+    this.page?.removeEventListener('beforeunload', this.onBeforeUnload)
     clearTimeout(this.undoTimer)
     this.commitDraft()
     void this.flush()

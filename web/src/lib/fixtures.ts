@@ -64,3 +64,16 @@ export function planOf(over: Partial<Plan> = {}): Plan {
 export function rowOf(index: number, name: string, flags: string[] = []): ManifestRow {
   return { index, name, file: `${String(index + 1).padStart(3, '0')} - ${name}.pdf`, flags, notes: [], leaks: [], bytes: 1000 }
 }
+
+/**
+ * A plan past the keepalive budget (`KEEPALIVE_MAX_BYTES`): Maciocia "Headings → any level" is ~1,650 sections
+ * and ~142 KB of JSON, the case that made a keepalive PUT refused (gate r2).
+ */
+export function bigPlanOf(count = 1700): Plan {
+  return planOf({
+    source: 'headings',
+    sections: sectionsOf(
+      Array.from({ length: count }, (_, i) => [`${i + 1} A heading long enough to make the plan heavy`, (i % 6) + 1]),
+    ),
+  })
+}

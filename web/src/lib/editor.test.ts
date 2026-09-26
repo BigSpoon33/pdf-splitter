@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { ApiError, type Plan } from './api'
+import { ApiError, putPlan, type Plan } from './api'
+import { KEEPALIVE_MAX_BYTES } from './config'
 import { PlanEditor, type SendOptions } from './editor.svelte'
-import { planOf, rowOf, sectionsOf } from './fixtures'
+import { bigPlanOf, planOf, rowOf, sectionsOf } from './fixtures'
 
 /** A save whose answers are released by the test, so requests can overlap deterministically. */
 function deferredSave() {
@@ -219,13 +220,17 @@ describe('PlanEditor source switch + undo (AC-2, AC-6)', () => {
 
 describe('PlanEditor never loses a save (gate r1 F7)', () => {
   /** A stand-in for the window: the editor listens here, the test fires the events. */
+  type Listener = (event: { preventDefault(): void }) => void
   function fakePage(visibility: DocumentVisibilityState = 'visible') {
-    const listeners = new Map<string, () => void>()
+    const listeners = new Map<string, Listener>()
     return {
       document: { visibilityState: visibility },
-      addEventListener: (type: string, fn: () => void) => void listeners.set(type, fn),
+      addEventListener: (type: string, fn: Listener) => void listeners.set(type, fn),
       removeEventListener: (type: string) => void listeners.delete(type),
-      fire: (type: string) => listeners.get(type)?.(),
+      fire: (type: string, event = { preventDefault: vi.fn() }) => {
+        listeners.get(type)?.(event)
+        return event
+      },
       listening: () => [...listeners.keys()].sort(),
     }
   }
@@ -233,7 +238,7 @@ describe('PlanEditor never loses a save (gate r1 F7)', () => {
   it('destroy() sends a pending edit without awaiting it', async () => {
     const page = fakePage()
     const editor = new PlanEditor(planOf(), echo, { page })
-    expect(page.listening()).toEqual(['pagehide', 'visibilitychange'])
+    expect(page.listening()).toEqual(['beforeunload', 'pagehide', 'visibilitychange'])
     editor.setPage(0, 2)
     editor.destroy()
     expect(echo).toHaveBeenCalledTimes(1)
@@ -274,7 +279,7 @@ describe('PlanEditor never loses a save (gate r1 F7)', () => {
     expect(save).toHaveBeenCalledTimes(2)
   })
 
-  it('a tab going hidden sends like pagehide; going visible does not', () => {
+  it('a tab going hidden sends the pending edit at once as an ordinary PUT; going visible with nothing pending does not', () => {
     const page = fakePage('visible')
     const editor = new PlanEditor(planOf(), echo, { page })
     editor.rename(0, 'A')
@@ -283,7 +288,10 @@ describe('PlanEditor never loses a save (gate r1 F7)', () => {
     page.document.visibilityState = 'hidden'
     page.fire('visibilitychange')
     expect(echo).toHaveBeenCalledTimes(1)
-    expect(echo.mock.calls[0]?.[1]).toEqual({ keepalive: true })
+    expect(echo.mock.calls[0]?.[1]).toEqual({})
+    page.document.visibilityState = 'visible'
+    page.fire('visibilitychange')
+    expect(echo).toHaveBeenCalledTimes(1)
   })
 
   it('a gone job sends nothing on unload', async () => {
@@ -297,6 +305,142 @@ describe('PlanEditor never loses a save (gate r1 F7)', () => {
     page.fire('pagehide')
     editor.destroy()
     expect(save).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('PlanEditor large plans on leaving (gate r2)', () => {
+  type Listener = (event: { preventDefault(): void }) => void
+  function fakePage(visibility: DocumentVisibilityState = 'visible') {
+    const listeners = new Map<string, Listener>()
+    return {
+      document: { visibilityState: visibility },
+      addEventListener: (type: string, fn: Listener) => void listeners.set(type, fn),
+      removeEventListener: (type: string) => void listeners.delete(type),
+      fire: (type: string, event = { preventDefault: vi.fn() }) => {
+        listeners.get(type)?.(event)
+        return event
+      },
+    }
+  }
+
+  /** Chromium's rule: a keepalive body over 64 KiB is refused before it leaves (`TypeError: Failed to fetch`). */
+  function browserFetch(seen: RequestInit[]) {
+    return vi.fn(async (_url: string, init: RequestInit) => {
+      seen.push(init)
+      if (init.keepalive && new TextEncoder().encode(String(init.body)).byteLength > 65_536) {
+        throw new TypeError('Failed to fetch')
+      }
+      return new Response(String(init.body), { status: 200 })
+    })
+  }
+
+  it('the fixture is past the budget', () => {
+    expect(new TextEncoder().encode(JSON.stringify(bigPlanOf())).byteLength).toBeGreaterThan(65_536)
+    expect(KEEPALIVE_MAX_BYTES).toBeLessThan(65_536)
+  })
+
+  it('a >64 KB plan and a hidden tab: an ordinary PUT is made and the edit persists', async () => {
+    const page = fakePage('visible')
+    const editor = new PlanEditor(bigPlanOf(), echo, { page })
+    editor.rename(0, 'Renamed while big')
+    page.document.visibilityState = 'hidden'
+    page.fire('visibilitychange')
+    expect(echo).toHaveBeenCalledTimes(1)
+    expect(echo.mock.calls[0]?.[1]).toEqual({})
+    expect(echo.mock.calls[0]?.[0].sections[0]?.name).toBe('Renamed while big')
+    await vi.advanceTimersByTimeAsync(0)
+    expect(editor.dirty).toBe(false)
+    expect(editor.error).toBeNull()
+    expect(editor.plan.sections[0]?.name).toBe('Renamed while big')
+  })
+
+  it('a >64 KB plan on pagehide goes without keepalive, so the browser does not refuse it', async () => {
+    const seen: RequestInit[] = []
+    vi.stubGlobal('fetch', browserFetch(seen))
+    try {
+      const page = fakePage()
+      const editor = new PlanEditor(bigPlanOf(), (p, o) => putPlan('job-1', p, o), { page })
+      editor.setPage(0, 3)
+      page.fire('pagehide')
+      expect(seen).toHaveLength(1)
+      expect(seen[0]?.keepalive).toBeFalsy()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(editor.dirty).toBe(false)
+      expect(editor.error).toBeNull()
+      // A small plan still gets keepalive: the browser carries it after unload.
+      const smallPage = fakePage()
+      const small = new PlanEditor(planOf(), (p, o) => putPlan('job-1', p, o), { page: smallPage })
+      small.setPage(0, 3)
+      seen.length = 0
+      smallPage.fire('pagehide')
+      expect(seen[0]?.keepalive).toBe(true)
+      await vi.advanceTimersByTimeAsync(0)
+      expect(small.dirty).toBe(false)
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('a refused keepalive leaves the edit pending, and the next flush sends it again', async () => {
+    const refusing = vi.fn(async (plan: Plan, opts?: SendOptions) => {
+      if (opts?.keepalive) throw new TypeError('Failed to fetch')
+      return plan
+    })
+    const page = fakePage('visible')
+    const editor = new PlanEditor(planOf(), refusing, { page })
+    editor.rename(0, 'Kept')
+    page.fire('pagehide')
+    expect(refusing).toHaveBeenCalledTimes(1)
+    expect(refusing.mock.calls[0]?.[1]).toEqual({ keepalive: true })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(editor.dirty).toBe(true)
+    expect(editor.error?.code).toBe('network')
+    // The page was not unloaded after all (bfcache, a cancelled close): the edit still goes out.
+    page.fire('pagehide')
+    expect(refusing).toHaveBeenCalledTimes(2)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(editor.dirty).toBe(true)
+    // The tab is back: the pending edit is flushed as an ordinary PUT and lands.
+    page.fire('visibilitychange')
+    expect(refusing).toHaveBeenCalledTimes(3)
+    expect(refusing.mock.calls[2]?.[1]).toEqual({})
+    await vi.advanceTimersByTimeAsync(0)
+    expect(editor.dirty).toBe(false)
+    expect(editor.plan.sections[0]?.name).toBe('Kept')
+  })
+
+  it('an unload sends once: the hidden-tab flush that follows pagehide on unload does not repeat it', async () => {
+    const page = fakePage('visible')
+    const editor = new PlanEditor(bigPlanOf(), echo, { page })
+    editor.rename(0, 'Once')
+    page.fire('pagehide')
+    page.document.visibilityState = 'hidden'
+    page.fire('visibilitychange')
+    expect(echo).toHaveBeenCalledTimes(1)
+    expect(echo.mock.calls[0]?.[1]).toEqual({ keepalive: false })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(editor.dirty).toBe(false)
+  })
+
+  it('beforeunload asks the browser to warn while an edit is unsaved or still out, not when clean', async () => {
+    const { save, release } = deferredSave()
+    const page = fakePage()
+    const editor = new PlanEditor(planOf(), save, { page })
+    expect(page.fire('beforeunload').preventDefault).not.toHaveBeenCalled()
+    editor.rename(0, 'Unsaved')
+    expect(page.fire('beforeunload').preventDefault).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(600)
+    expect(save).toHaveBeenCalledTimes(1)
+    // Sent but not yet accepted: still at risk.
+    expect(page.fire('beforeunload').preventDefault).toHaveBeenCalledTimes(1)
+    release(0)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(editor.dirty).toBe(false)
+    expect(page.fire('beforeunload').preventDefault).not.toHaveBeenCalled()
+    // A name still being typed counts as unsaved.
+    editor.setDraft(1, 'Typing')
+    expect(page.fire('beforeunload').preventDefault).toHaveBeenCalledTimes(1)
+    editor.destroy()
   })
 })
 
