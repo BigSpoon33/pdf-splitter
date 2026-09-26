@@ -1,6 +1,6 @@
 # STORY-013: Deploy: containers, compose, Caddy, local smoke test
 
-> **Status:** Pending
+> **Status:** Done (2026-09-26)
 > **Size:** M
 > **Date:** 2026-09-25
 > **Architecture ref:** `docs/Architecture.md#ADR-008`
@@ -95,12 +95,12 @@ feat: STORY-013 - containers, compose, Caddy and an end-to-end smoke test
 
 ## Status
 
-**Pending**
+**Done** (2026-09-26, `cce9bd1` on `feature/mvp`; findings in `docs/findings/STORY-013-findings.md`)
 
-- [ ] AC-1
-- [ ] AC-2
-- [ ] AC-3
-- [ ] AC-4
-- [ ] AC-5
+- [x] AC-1
+- [x] AC-2
+- [x] AC-3
+- [x] AC-4
+- [x] AC-5 (by construction on this laptop; the VM build is the non-LAN proof)
 
 > **Orchestrator addendum (from STORY-012 review):** uvicorn must not trust X-Forwarded-For on its own: run it with `proxy_headers=False` (the app's `PDFSPLIT_TRUSTED_PROXY` rule is the only XFF logic) and set `PDFSPLIT_TRUSTED_PROXY` to Caddy's container address in compose (a fixed IP on the compose network). Set `PDFSPLIT_IP_SALT` from an env secret (not in git). Test in smoke.sh: an upload with a spoofed XFF straight to the api port (bypassing Caddy) is counted under the real peer.
