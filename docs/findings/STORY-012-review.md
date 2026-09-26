@@ -20,3 +20,6 @@ Verified live: 30/50/120-request bursts from one client → exactly 6; 0 × "dat
 ## Round 3 (re-review of 802fdfc) — 1 test-gap (code correct) → auto-fix per standing policy (vacuous/insufficient test of the fix)
 Verified live: 64 straddling bursts → exactly 6 each (old: up to 10); ~7,000 requests, 0 × 500 / locked, no latency regression; EFBIG form stable across 19 fsize values; hit_file_limit has no false positives; section EFBIG → too_large_output on both paths.
 1. [test-gap] cut.py:140-142 — nothing pins that a NON-EFBIG MuPDF error inside `_within_budget` (allocator failure) stays `resources`; deleting the `hit_file_limit` guard keeps all 426 tests green while a link_uri_bomb ranges job would report too_large_output. Mutation-proven by the reviewer.
+
+## Round 3b (orchestrator check of cbb1a76, test-only) — PASSED
+cbb1a76 touches only tests/test_cut.py + findings (no src/web); the new test passes (1.2 s) and was mutation-proven (guard removed → too_large_output). Auto-review trail: r1 4 confirmed → 76940a7; r2 2 confirmed → 802fdfc; r3 1 test gap → cbb1a76.
