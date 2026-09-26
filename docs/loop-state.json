@@ -1,9 +1,8 @@
 {
   "mode": "auto",
-  "active_story": "STORY-016",
+  "active_story": "STORY-013",
   "loop_phase": "implement",
   "queue": [
-    "STORY-016",
     "STORY-013"
   ],
   "held": {
@@ -22,7 +21,8 @@
     "STORY-010",
     "STORY-011",
     "STORY-015",
-    "STORY-012"
+    "STORY-012",
+    "STORY-016"
   ],
   "attempts": {
     "STORY-001": 1,
@@ -38,7 +38,8 @@
     "STORY-011": 3,
     "STORY-015": 2,
     "STORY-012": 3,
-    "STORY-016": 2
+    "STORY-016": 2,
+    "STORY-013": 1
   },
   "failed": {},
   "consecutive_failures": 0,
@@ -54,7 +55,7 @@
   "run": {
     "started": "2026-09-25",
     "runner": "in-session background subagent (tmux --dangerously-skip-permissions route denied by the auto-mode classifier)",
-    "active": "STORY-016 (retry: test gap)"
+    "active": "STORY-013"
   },
   "last_updated": "2026-09-25",
   "exceptions": {
@@ -73,7 +74,7 @@
     "2,000-section preview \u224818\u201320 s (at the 20 s preview timeout)",
     "landed rename triggers an extra preview (7\u20139 s on 1,654 sections): key/send the list without names"
   ],
-  "engine_release": "v0.4.1 (8e52cc3) on origin+gitea; engine main still 6fd22fc \u2014 ff-merge feature/web-mode at sprint end",
+  "engine_release": "v0.4.2 (116a4bb) on origin+gitea; engine main still 6fd22fc \u2014 ff-merge feature/web-mode (tip 4f1644a) at sprint end",
   "policy": {
     "fix_regressions": "Shuma 2026-09-25: for the rest of this run, a retry that fails ONLY on a confirmed regression introduced by its own fix gets one more narrow fix + re-review without asking. Halt and ask if a story fails twice on anything else, or if the spec/architecture looks wrong. WIDENED 2026-09-25 (Shuma): an incomplete fix of the SAME confirmed finding, or a vacuous test of it, is also auto-fixed once. Still halt on a new kind of failure or a wrong spec/architecture."
   },

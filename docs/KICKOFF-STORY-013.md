@@ -229,3 +229,14 @@ the XFF check's evidence, teardown clean — `docker volume ls`/`docker ps -a` s
 counts (`uv run pytest -q` 427 → N, `bun run test` 284 → N, `bun run check`, `bun run build`); `caddy validate`;
 what was verified about "no LAN" for AC-5; the commit sha on both remotes; decisions taken; what STORY-014 should
 know (which env vars the VM needs, what `PUBLIC_HOST` does to TLS, where the volume lives).
+
+## Orchestrator addendum (binding)
+
+- This laptop runs OTHER docker/compose stacks (e.g. an Inkwell docs stack). Never use the default
+  project name, default network, or host ports 80/443/8000: run everything under a unique compose
+  project (`-p pdfsplit-smoke`), a dedicated network/subnet, and high host ports (e.g. 18080/18443);
+  never `docker compose down` / `docker rm` / `docker network prune` anything you didn't create; clean up
+  only your own project (`docker compose -p pdfsplit-smoke down -v`). Check `docker ps` before and after.
+- Images/build cache live under /var/lib/docker (not /tmp); still prune only your own dangling images.
+- The STORY-013 story addendum (uvicorn proxy_headers=False, PDFSPLIT_TRUSTED_PROXY = Caddy's fixed
+  compose IP, PDFSPLIT_IP_SALT from an env secret, smoke test for spoofed XFF) is binding.
