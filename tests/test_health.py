@@ -24,7 +24,7 @@ def test_health_shape_and_jobs_dir_created(settings: Settings) -> None:
     assert body["ok"] is True
     assert body["queue"] == 0
     assert isinstance(body["disk_free_gb"], float) and body["disk_free_gb"] >= 0
-    assert body["engine_version"] == monograph_splitter.__version__ == "0.4.1"
+    assert body["engine_version"] == monograph_splitter.__version__ == "0.4.2"
     assert settings.db_path.exists()
 
 

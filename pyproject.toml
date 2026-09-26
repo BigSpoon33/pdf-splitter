@@ -9,7 +9,7 @@ dependencies = [
     "uvicorn",
     "pydantic-settings",
     "python-multipart",
-    "monograph-splitter @ git+https://github.com/BigSpoon33/pdf-splitter-engine@v0.4.1",
+    "monograph-splitter @ git+https://github.com/BigSpoon33/pdf-splitter-engine@v0.4.2",
     # Pinned exactly (Architecture § Dependency Map): MuPDF parses hostile input, so upgrades are deliberate.
     "pymupdf==1.28.2",
 ]

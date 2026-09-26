@@ -25,7 +25,7 @@ then zips the excerpts with a manifest for download. A janitor deletes every job
 ## Component Map
 
 ```
-monograph-splitter (engine, github.com/BigSpoon33/pdf-splitter-engine, v0.4.1)          ← library; the ONLY code that cuts PDFs
+monograph-splitter (engine, github.com/BigSpoon33/pdf-splitter-engine, v0.4.2)          ← library; the ONLY code that cuts PDFs
 ├── profile.profile_from_dict / WEB_KEYS          ← build a Profile from JSON settings (whitelisted keys)
 ├── detect.outline_entries / heading_candidates   ← NEW: candidate section lists from a PDF
 ├── session.Book.open(entries=EntryList|list)     ← accepts in-memory entries, no files needed
@@ -90,6 +90,13 @@ deploy/
     Profile the cut uses — the worker passes ONE `profile_from_dict(settings)` to both. Engine version is
     `monograph_splitter.__version__` (the int `ENGINE_VERSION` is only the index-cache key).
     `cli.main`'s loop moves here, and the CLI calls it (diff gate 0).
+  - **0.4.2 (STORY-016, as built): per-sheet geometry.** `cuts.cut_rects(p, w, h, prof, last_size=None)`:
+    `w, h` size the excerpt's first sheet (the start cut), `last_size` its last sheet (the end cut), so a
+    section spanning two page sizes gets its gutter (`column_split × W`) and footer edge (`H − footer_band`)
+    from the sheet each rectangle lands on. `Book.rects` reads both sizes from the index (`page_size(sheet0)`,
+    `page_size(sheet1)`), `write_excerpt`/`render_review` from the open pages — the preview's rects and the
+    output PDF agree on mixed-size books. Uniform books are unchanged (diff gate 0 on the synthetic books,
+    Maciocia and Chen & Chen); `ENGINE_VERSION` stays 17 (no indexing rule changed).
 - **Failure mode:** loud. A bad settings key raises `ProfileError`. A heading not found → the
   entry gets a whole-page start + a `heading-not-found` flag (the existing behaviour), which is
   shown in the UI.
@@ -260,7 +267,7 @@ never appear in logs (logs carry a short hash).
 
 - **Status:** Accepted (Shuma, 2026-09-25)
 - **Context:** The engine is a library that the Inkwell adapters pin by tag.
-- **Decision:** `pdf-splitter` depends on `monograph-splitter @ git+https://github.com/BigSpoon33/pdf-splitter-engine@v0.4.1`. Engine changes go to the engine repo with tests + diff gate, then get a tag bump here.
+- **Decision:** `pdf-splitter` depends on `monograph-splitter @ git+https://github.com/BigSpoon33/pdf-splitter-engine@v0.4.2`. Engine changes go to the engine repo with tests + diff gate, then get a tag bump here.
 - **Consequences:** Two-repo stories, but the engine stays clean, and the web service can't regress Inkwell's books.
 - **Hosting (2026-09-25):** both repos are public on GitHub (`BigSpoon33/pdf-splitter`, `BigSpoon33/pdf-splitter-engine`) as `origin`; Gitea (`gitea` remote) is a LAN mirror. Inkwell's adapters keep pinning the Gitea URL until repointed.
 
@@ -341,7 +348,7 @@ CREATE INDEX rate_window ON rate(ip_hash, at);
 
 | Dependency | Type | Version | Why Needed | Fallback |
 |------------|------|---------|------------|----------|
-| monograph-splitter | git dep | v0.4.1 | the engine | — |
+| monograph-splitter | git dep | v0.4.2 | the engine | — |
 | pymupdf | PyPI | ≥1.24 (pin exact, track CVEs) | PDF parse/render/redact | — |
 | fastapi, uvicorn, pydantic-settings, python-multipart | PyPI | current | API | — |
 | svelte, vite, typescript | npm via Bun | current | SPA | — |

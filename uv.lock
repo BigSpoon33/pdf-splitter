@@ -135,8 +135,8 @@ wheels = [
 
 [[package]]
 name = "monograph-splitter"
-version = "0.4.1"
-source = { git = "https://github.com/BigSpoon33/pdf-splitter-engine?rev=v0.4.1#8e52cc342aa8eab39a1bbbc2d16fbe7aa6306715" }
+version = "0.4.2"
+source = { git = "https://github.com/BigSpoon33/pdf-splitter-engine?rev=v0.4.2#116a4bb7b0a08001a27f8efcaeb9289ed62bd0d7" }
 dependencies = [
     { name = "pymupdf" },
 ]
@@ -173,7 +173,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "fastapi" },
-    { name = "monograph-splitter", git = "https://github.com/BigSpoon33/pdf-splitter-engine?rev=v0.4.1" },
+    { name = "monograph-splitter", git = "https://github.com/BigSpoon33/pdf-splitter-engine?rev=v0.4.2" },
     { name = "pydantic-settings" },
     { name = "pymupdf", specifier = "==1.28.2" },
     { name = "python-multipart" },
