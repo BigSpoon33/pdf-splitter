@@ -9,3 +9,5 @@ Clients using several IPv6 /64s (or many IPv4 addresses) can still hold the 4 up
 ## Acceptance Criteria
 - [ ] AC-1: N concurrent slow uploads from distinct /64s beyond a configured threshold are refused at the edge; genuine visitors unaffected.
 - [ ] AC-2: documented and covered by the smoke test.
+
+> Note (STORY-013 round 4): the same several-/64s mechanism also fills uvicorn's `limit_concurrency` (8 client keys × `MAX_BODIES_PER_CLIENT` 8 = 64 held PUTs, re-opened every 20 s). Edge limiting must cover all bodies, not only uploads.

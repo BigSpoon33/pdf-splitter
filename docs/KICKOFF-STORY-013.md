@@ -344,3 +344,14 @@ Shuma chose to simplify. One commit on the feature/mvp tip:
    hold the 4 upload slots for up to the Caddy read_body bound; follow-up story STORY-017 (per-IP
    connection limiting: CrowdSec/fail2ban or a Caddy rate-limit module).
 All suites green (pytest, ruff, web check/test/build). ISOLATION rules unchanged.
+
+## Attempt 3b — log hygiene (standing auto-fix policy) — READ THIS FIRST
+
+One commit: `fix: STORY-013 - refusal logs never carry a raw path or a cross-day client id`
+- Every log line in upload.py / body_guard.py that prints a path uses `access_log.loggable_path`
+  (redacted + escaped), incl. the older 408 line.
+- Refusal logs print the DATED `ip_hash` prefix (as before 8b0dfed), never `client_key`; `client_key`
+  stays in memory only. Fix ADR-007's as-built line.
+- Tests: trigger the body cap and the upload cap in `test_logs_never_contain_a_job_id`-style tests
+  (no raw id, no raw control chars, dated prefix differs across days for the same address).
+All suites green; no docker needed. Push to origin + gitea.

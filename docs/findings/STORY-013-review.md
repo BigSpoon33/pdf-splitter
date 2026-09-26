@@ -27,3 +27,9 @@ Verified: all 450/286 tests; isolated smoke passes; flood/caps/XFF/v6-/64/63 hel
 5. [correctness] findings :438-440 — "nft -f /etc/nftables.conf" runs Debian's `flush ruleset` → wipes Docker's nat/filter tables (ACME renewal + DNAT/real client IPs break).
 6. [correctness] body_guard.py:66-68 — mid-body disconnect returns no response → access_log's call_next raises "No response returned." → 500 + traceback.
 Also: 2+ client keys at the floor rate can still hold all 4 upload slots (follows from the spec's parameters).
+
+## Round 4 (light re-review of 8b0dfed, simplify) — 2 confirmed log-hygiene regressions → auto-fix per standing policy
+Verified: no receive() cancelled (12/12 uploads byte-identical; parent-with-watchdog 4/12 truncated); Caddy timeouts adapt correctly; midnight-proof per-client caps; BodyGuard cap + silent 499; ufw v4/v6 + separate nft file validated in namespaces; residual risk documented. Suites green (one known MuPDF-size flake in test_cut, passed on rerun).
+1. [correctness] body_guard.py:75-76 (and the older :109 408 line) — cap-refusal log lines print the raw, unescaped scope["path"] → job ids (the credential) and forged log lines reach the api log. Reproduced.
+2. [contract-divergence] upload.py:106,113 + body_guard.py:71-76 vs ADR-007 — refusal logs print a prefix of the UNDATED client_key (never-rotating salt) → links an address across days; ADR-007 as-built line stale. Reproduced.
+Note (spec scope, → STORY-017): several /64s can also fill uvicorn's connection ceiling (8 keys × 8 bodies = 64).
