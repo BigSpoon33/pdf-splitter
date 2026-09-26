@@ -220,6 +220,8 @@ never appear in logs (logs carry a short hash).
 `failed` (with error_code), and any → `deleted`. From `done`, editing the Plan returns to
 `review`. Old outputs stay downloadable until the next cut replaces them.
 
+**Failed cuts are recoverable (Shuma-approved framing, 2026-09-25):** a job that is `failed` with `kind: cut` (timeout/resources/internal while cutting) keeps its analysis and plan, so `PUT /plan` and `POST /cut` treat it like `review` (failed/cut → review on a saved edit; failed/cut → queued/cut on POST /cut). A failed ANALYZE stays terminal (there is nothing to edit). The previous result.zip, if any, stays downloadable.
+
 ### File layout
 
 ```

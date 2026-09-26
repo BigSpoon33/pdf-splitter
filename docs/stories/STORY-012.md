@@ -105,3 +105,5 @@ feat: STORY-012 - rate limit, disk guard, 24 h janitor and queue position
 > **Orchestrator addendum (from STORY-007 review):** the janitor must also remove the directory of any row in state `deleted` (defence in depth against a late write recreating it), not only expired rows and row-less dirs. Test it.
 
 > **Orchestrator addendum (from STORY-007 r3):** `routes/common.py` `saved_plan` (exists() → read_json) and any other read of job files after `load_job` must map a vanished file for a deleted/expired job to 410, not 500 `internal`. Test with a DELETE hooked between the check and the read.
+
+> **Orchestrator addendum (from STORY-011 findings):** implement the recoverable failed cut (Architecture § Job states): `failed` + `kind: cut` behaves like `review` for `PUT /plan` (→ review) and `POST /cut` (→ queued/cut); a failed analyze stays terminal. SPA: the Split button and the editor stay enabled after a failed cut, with the failure message shown above Split. Tests on both sides (pytest transitions incl. a failed analyze staying 409; vitest for the re-enabled UI).
