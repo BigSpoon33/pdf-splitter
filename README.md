@@ -92,10 +92,20 @@ bun run build                # static files in web/dist/
 ```
 
 `API_PORT` can also go in `web/.env.local`. `VITE_MAX_BYTES` (build time) changes the client-side size
-precheck; it should match `PDFSPLIT_MAX_BYTES`. Routes are `/` (upload), `/j/<id>` (a job), `/privacy` and `/terms`,
-so whatever serves `web/dist/` in production must answer `index.html` for all of them.
+precheck; it should match `PDFSPLIT_MAX_BYTES`. Routes are `/` (the home page: **Split by chapters** and **Split by
+page ranges**, each with its own drop zone), `/j/<id>` (a job; `?mode=ranges` after an upload through the second
+entry point), `/privacy` and `/terms`, so whatever serves `web/dist/` in production must answer `index.html` for
+all of them.
 
-Once a job reaches `review`, `/j/<id>` shows the plan editor: the source picker (outline level, detected headings by
+**Page ranges** (ADR-009): the job analyzes like any other; on first load the SPA saves an empty plan with
+`source: "ranges"`, and from then on that source is the mode (a reload with or without the query lands in it).
+The review screen is the range field (`1-10, 15-20, 40` — ranges may overlap or leave pages out, each bad entry
+gets its own error and the plan only follows an error-free text), an "every N pages" fill, and the section list
+with rename and delete; no source picker, preview or layout panel. Each section carries `endPage` (inclusive);
+the cut copies the whole-page spans with PyMuPDF into the same ZIP + manifest shape (flags empty). `endPage` is
+refused on any other source, and overrides on a `ranges` plan.
+
+Once a chapter job reaches `review`, `/j/<id>` shows the plan editor: the source picker (outline level, detected headings by
 size threshold and level, or a pasted `Name, page` list), the editable section list (rename, page, add, delete,
 merge-with-next; after a cut, the manifest's flags as badges) and the layout panel (columns, gutter, header/footer
 bands, heading size, heading wrap gap). Every edit is `PUT` to `/api/jobs/{id}/plan` 600 ms after the last

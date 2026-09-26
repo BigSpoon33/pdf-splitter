@@ -23,7 +23,7 @@ from pydantic import (
 from .worker.analyze import DEFAULT_SETTINGS, MAX_HEADING, MAX_SECTION_NAME, clean_text
 
 MAX_SECTIONS = 2000
-Source = Literal["outline", "headings", "manual"]
+Source = Literal["outline", "headings", "manual", "ranges"]
 Col = Literal["full", "left", "right"]
 Cut = Annotated[float, Field(ge=0)]
 
@@ -61,6 +61,10 @@ class Section(_Strict):
     name: str = Field(min_length=1, max_length=MAX_SECTION_NAME)
     page: int = Field(ge=1)
     heading: str = Field(default="", max_length=MAX_HEADING)
+    # ADR-009: the last page of a whole-page span (inclusive, 1-based). Only a `ranges` plan carries it — there
+    # every section needs one; a chapter plan with one is refused rather than silently cut short. Validated on
+    # its default too, so a missing one in ranges mode is reported at the field a client can point at.
+    endPage: int | None = Field(default=None, ge=1, validate_default=True)
 
     @field_validator("name", "heading", mode="before")
     @classmethod
@@ -76,6 +80,28 @@ class Section(_Strict):
         if pages is not None and v > pages:
             raise ValueError(f"page must be at most {pages}, the last page of the book")
         return v
+
+    @field_validator("endPage")
+    @classmethod
+    def _span_in_book(cls, v: int | None, info: ValidationInfo) -> int | None:
+        context = info.context or {}
+        if not context.get("ranges"):
+            if v is not None:
+                raise ValueError("endPage only applies to a page-range plan")
+            return None
+        if v is None:
+            raise ValueError("endPage is required in page-range mode")
+        pages = context.get("pages")
+        if pages is not None and v > pages:
+            raise ValueError(f"endPage must be at most {pages}, the last page of the book")
+        page = info.data.get("page")
+        if page is not None and v < page:
+            raise ValueError("endPage must be at least the section's first page")
+        return v
+
+    def dump(self) -> dict[str, Any]:
+        """As `plan.json` carries it: `endPage` only where it applies, so a chapter plan keeps its three keys."""
+        return self.model_dump(exclude={"endPage"} if self.endPage is None else set())
 
 
 class Override(_Strict):
@@ -133,6 +159,9 @@ class Plan(_Strict):
         sections: list[Section] | None = info.data.get("sections")
         if sections is None:
             return v          # sections already failed; their error is the one to report
+        if v and info.data.get("source") == "ranges":
+            # ADR-009: a range is a whole-page span, there is no cut to place on its sheets.
+            raise ValueError("overrides do not apply to a page-range plan")
         heights = _heights(info)
         for key, ov in v.items():
             if not key.isdecimal() or str(int(key)) != key or int(key) >= len(sections):
@@ -153,7 +182,7 @@ class Plan(_Strict):
         return {
             "source": self.source,
             "settings": self.settings.dump(),
-            "sections": [s.model_dump() for s in self.sections],
+            "sections": [s.dump() for s in self.sections],
             "overrides": {k: v.dump() for k, v in self.overrides.items()},
         }
 
@@ -177,7 +206,9 @@ class PreviewRequest(_Strict):
 
 def validate_plan(raw: Any, *, pages: int, sizes: list[dict[str, float]]) -> Plan:
     """Raises `pydantic.ValidationError` (the route turns it into the 422)."""
-    return Plan.model_validate(raw, context={"pages": pages, "sizes": sizes})
+    # The section rules depend on the plan's source, which a nested validator cannot see: it rides the context.
+    ranges = isinstance(raw, dict) and raw.get("source") == "ranges"
+    return Plan.model_validate(raw, context={"pages": pages, "sizes": sizes, "ranges": ranges})
 
 
 __all__ = [

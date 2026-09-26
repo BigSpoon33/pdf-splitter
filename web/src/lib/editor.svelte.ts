@@ -152,6 +152,17 @@ export class PlanEditor {
     this.touch()
   }
 
+  /**
+   * Page-range mode (ADR-009): the list IS the text field's spans, so each parse replaces it whole — no Undo (the
+   * text is still there to edit), no overrides (a span has no cuts). Also the switch into the mode on a job that
+   * analyzed as chapters: an empty `ranges` plan is saved so a reload keeps the mode from the plan's `source`.
+   */
+  setRanges(sections: Section[]): void {
+    this.plan = { ...this.plan, source: 'ranges', sections, overrides: {} }
+    this.selected = null
+    this.touch()
+  }
+
   /** Only the picker's controls changed (a filter that narrows the count): nothing to save. */
   setPicker(picker: PickerState): void {
     this.picker = picker

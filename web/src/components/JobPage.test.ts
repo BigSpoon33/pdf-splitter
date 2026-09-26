@@ -90,15 +90,20 @@ function fakeApi(start: Partial<JobStatus> = {}) {
   return api
 }
 
-function mount(api: ReturnType<typeof fakeApi>, confirmDelete = vi.fn(() => true), page: { recheckMs?: number; tickMs?: number } = {}) {
+function mount(
+  api: ReturnType<typeof fakeApi>,
+  confirmDelete = vi.fn(() => true),
+  page: { recheckMs?: number; tickMs?: number; mode?: 'ranges'; plan?: Plan } = {},
+) {
+  const { plan, ...rest } = page
   return render(JobPage, {
     id: ID,
     load: api.load,
     pollMs: 5,
-    ...page,
+    ...rest,
     review: {
       loadAnalysis: async () => analysisOf(),
-      loadPlan: async () => planOf(),
+      loadPlan: async () => plan ?? planOf(),
       loadManifest: api.loadManifest,
       loadSectionPlan: async () => Promise.reject(new ApiError(500, 'preview_failed')),
       loadSheet: async () => new Blob(),
@@ -387,5 +392,79 @@ describe('JobPage', () => {
       await vi.waitFor(() => expect(api.load.mock.calls.length).toBeGreaterThanOrEqual(polls + 2), { timeout: 1000 })
       expect(screen.getByText('Files deleted in 5 h.')).toBeTruthy()
     })
+  })
+})
+
+describe('page-range mode (STORY-015, ADR-009)', () => {
+  const RANGE_ROWS: ManifestRow[] = [rowOf(0, 'Pages 1–3'), rowOf(1, 'Page 5')]
+  const field = () => screen.getByLabelText(/pages to keep/i) as HTMLInputElement
+
+  it('a job opened with ?mode=ranges saves an empty ranges plan, shows the range editor and no chapter tools; typing ranges enables Split → cut → files (AC-1, AC-5)', async () => {
+    const api = fakeApi()
+    api.rows = RANGE_ROWS
+    mount(api, undefined, { mode: 'ranges' })
+    await vi.waitFor(() => expect(field()).toBeTruthy())
+    expect(document.querySelector('.review')?.getAttribute('data-mode')).toBe('ranges')
+    expect(screen.queryByLabelText('Outline')).toBeNull()
+    expect(screen.queryByText('Layout')).toBeNull()
+    expect(screen.queryByText('Select a section to preview where it will be cut.')).toBeNull()
+    expect(screen.queryByLabelText('Select section 1')).toBeNull()
+    // The chapter plan the upload analyzed to became an empty ranges plan, saved at once.
+    await vi.waitFor(() => expect(api.save).toHaveBeenCalledTimes(1))
+    expect(api.save.mock.calls[0]?.[1]).toMatchObject({ source: 'ranges', sections: [], overrides: {} })
+    expect(field().value).toBe('')
+    expect((splitButton() as HTMLButtonElement).disabled).toBe(true)
+    expect(screen.getByText('No ranges yet. Type them above.')).toBeTruthy()
+
+    await fireEvent.input(field(), { target: { value: '1-3, 5' } })
+    expect(screen.getByText('2 sections')).toBeTruthy()
+    expect(screen.getByLabelText('Pages of section 1').textContent?.replace(/\s+/g, ' ').trim()).toBe('p. 1–3 · 3 pages')
+    expect(screen.getByLabelText('Pages of section 2').textContent?.replace(/\s+/g, ' ').trim()).toBe('p. 5 · 1 page')
+    expect(screen.queryByLabelText('Start page of section 1')).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Merge ↓' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Add section' })).toBeNull()
+    await vi.waitFor(() => expect(api.save).toHaveBeenCalledTimes(2))
+    expect(api.save.mock.calls[1]?.[1].sections).toEqual([
+      { name: 'Pages 1–3', page: 1, heading: '', endPage: 3 },
+      { name: 'Page 5', page: 5, heading: '', endPage: 5 },
+    ])
+    await vi.waitFor(() => expect((splitButton() as HTMLButtonElement).disabled).toBe(false))
+    expect(splitButton().textContent?.trim()).toBe('Split into 2 PDFs')
+    await fireEvent.click(splitButton())
+    await vi.waitFor(() => expect(stateShown()).toBe('done'))
+    await vi.waitFor(() => expect(screen.getByRole('link', { name: 'Download all (ZIP)' })).toBeTruthy())
+    expect(screen.getByRole('link', { name: '001 - Pages 1–3.pdf' }).getAttribute('href')).toBe(`/api/jobs/${ID}/sections/0.pdf`)
+    expect(screen.getByRole('link', { name: '002 - Page 5.pdf' })).toBeTruthy()
+    expect(api.cut).toHaveBeenCalledTimes(1)
+    expect(document.querySelectorAll('.badge')).toHaveLength(0)
+  })
+
+  it('a reload without the query keeps the mode from the saved plan (AC-1) and shows its ranges', async () => {
+    const api = fakeApi({ state: 'done', kind: 'cut' })
+    const plan = planOf({
+      source: 'ranges',
+      sections: [
+        { name: 'Pages 1–3', page: 1, heading: '', endPage: 3 },
+        { name: 'Page 5', page: 5, heading: '', endPage: 5 },
+      ],
+    })
+    mount(api, undefined, { plan })
+    await vi.waitFor(() => expect(field()).toBeTruthy())
+    expect(field().value).toBe('1-3, 5')
+    expect(screen.queryByLabelText('Outline')).toBeNull()
+    expect(splitButton().textContent?.trim()).toBe('Split into 2 PDFs')
+    await new Promise((r) => setTimeout(r, 30))
+    expect(api.save).not.toHaveBeenCalled()
+  })
+
+  it('a chapter job stays a chapter job without the query: nothing is saved and the source picker shows', async () => {
+    const api = fakeApi()
+    mount(api)
+    await vi.waitFor(() => expect(splitButton()).toBeTruthy())
+    expect(screen.getByLabelText('Outline')).toBeTruthy()
+    expect(screen.queryByLabelText(/pages to keep/i)).toBeNull()
+    expect(document.querySelector('.review')?.getAttribute('data-mode')).toBe('chapters')
+    await new Promise((r) => setTimeout(r, 30))
+    expect(api.save).not.toHaveBeenCalled()
   })
 })

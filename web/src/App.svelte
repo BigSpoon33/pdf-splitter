@@ -1,27 +1,27 @@
 <script lang="ts">
-  import DropZone from './components/DropZone.svelte'
+  import Home from './components/Home.svelte'
   import JobPage from './components/JobPage.svelte'
   import Privacy from './components/Privacy.svelte'
   import Terms from './components/Terms.svelte'
-  import { jobPath, linkClick, navigate, onNavigate, parseRoute } from './lib/route'
+  import { href, jobPath, linkClick, navigate, onNavigate, parseRoute } from './lib/route'
 
-  let pathname = $state(location.pathname)
-  const route = $derived(parseRoute(pathname))
+  let path = $state(href())
+  const route = $derived(parseRoute(path))
 
-  $effect(() => onNavigate((p) => (pathname = p)))
+  $effect(() => onNavigate((p) => (path = p)))
 </script>
 
 <header class="site">
   <a href="/" onclick={(e) => linkClick(e, '/')} class="brand">PDF Splitter</a>
-  <p class="tagline">One big PDF in, one PDF per chapter out.</p>
+  <p class="tagline">One big PDF in, one PDF per chapter — or per page range — out.</p>
 </header>
 
 <main>
   {#if route.name === 'home'}
-    <DropZone oncreated={(id) => navigate(jobPath(id))} />
+    <Home oncreated={(id, mode) => navigate(jobPath(id, mode))} />
   {:else if route.name === 'job'}
     {#key route.id}
-      <JobPage id={route.id} />
+      <JobPage id={route.id} mode={route.mode} />
     {/key}
   {:else if route.name === 'privacy'}
     <Privacy />

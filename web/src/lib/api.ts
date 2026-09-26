@@ -151,7 +151,8 @@ export function createJob(
 // ::test_analyze_headings_book_without_outline, ::test_default_plan_from_outline_and_headings and
 // src/pdf_splitter/models.py (the PUT side).
 
-export type Source = 'outline' | 'headings' | 'manual'
+/** `ranges` (ADR-009): whole-page spans, no engine — `tests/test_ranges.py` pins what the API accepts. */
+export type Source = 'outline' | 'headings' | 'manual' | 'ranges'
 export type Col = 'full' | 'left' | 'right'
 
 export interface OutlineItem {
@@ -203,6 +204,11 @@ export interface Section {
   name: string
   page: number
   heading: string
+  /**
+   * The last sheet of a whole-page span, inclusive (1-based). Required in a `ranges` plan and refused in any other
+   * (`::test_put_plan_rejects_bad_range_plans_with_field_errors`), so chapter code never sets it.
+   */
+  endPage?: number
 }
 
 /** A cut's y in points, or null for no cut (the section starts at the top / ends at the bottom of its sheet). */

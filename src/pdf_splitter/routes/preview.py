@@ -113,13 +113,16 @@ def post_section_plan(
 ) -> dict[str, Any]:
     job = load_job(store, job_id)
     plan = saved_plan(settings, job)
+    if plan["source"] == "ranges":
+        # ADR-009: a whole-page span has no heading and no cut to preview; the SPA never asks for one.
+        raise invalid_field(["plan", "source"], "A page-range plan has no section preview.")
     try:
         req = PreviewRequest.model_validate(body or {}, context={"pages": job["pages"]})
     except ValidationError as e:
         raise invalid(e) from None
     # The list `i` is looked up in: the client's (what its user sees — a save may still be on its way) or the
     # saved one. An index past its end is a bad request, not a missing job: the SPA treats 404 as "gone".
-    sections = [s.model_dump() for s in req.sections] if req.sections is not None else plan["sections"]
+    sections = [s.dump() for s in req.sections] if req.sections is not None else plan["sections"]
     if not 0 <= i < len(sections):
         raise ApiError(422, "no_section")
     try:

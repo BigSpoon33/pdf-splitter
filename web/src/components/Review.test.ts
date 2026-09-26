@@ -17,7 +17,7 @@ const cut: LoadManifest = async () => ROWS
 const VIEW: SectionPlan = { pages: [3, 4], startCut: null, startCol: 'full', endCut: 400, endCol: 'right', flags: [], notes: [], rects: [[4, [254.5, 400, 522.7, 757.6]]] }
 
 /** Renders with fake loaders; returns the DEFAULT save mock (a test that passes its own keeps its own handle). */
-function mount(over: { jobState?: 'review' | 'done'; save?: Save; loadPlan?: LoadPlan; loadManifest?: LoadManifest; cuts?: number } = {}) {
+function mount(over: { jobState?: 'review' | 'done'; save?: Save; loadPlan?: LoadPlan; loadManifest?: LoadManifest; cuts?: number; mode?: 'ranges' } = {}) {
   const save = vi.fn<Save>(async (_id, plan) => plan)
   const loadAnalysis = vi.fn(async () => analysisOf())
   const loadPlan = vi.fn<LoadPlan>(async () => planOf())
@@ -28,6 +28,7 @@ function mount(over: { jobState?: 'review' | 'done'; save?: Save; loadPlan?: Loa
     id: ID,
     pages: 6,
     jobState: over.jobState ?? 'review',
+    mode: over.mode,
     loadAnalysis,
     loadPlan: over.loadPlan ?? loadPlan,
     loadManifest,
@@ -187,5 +188,68 @@ describe('Review', () => {
     unmount()
     expect(save).toHaveBeenCalledTimes(1)
     expect(save.mock.calls[0]?.[1].sections[0]?.page).toBe(2)
+  })
+})
+
+describe('Review in page-range mode (STORY-015, ADR-009)', () => {
+  const field = () => screen.getByLabelText(/pages to keep/i) as HTMLInputElement
+  const RANGES: Plan = planOf({
+    source: 'ranges',
+    sections: [
+      { name: 'Pages 1–2', page: 1, heading: '', endPage: 2 },
+      { name: 'Custom', page: 4, heading: '', endPage: 6 },
+    ],
+  })
+
+  it('mode=ranges on a chapter plan: one save of an empty ranges plan, no picker/preview/layout (AC-1, AC-4)', async () => {
+    const { save, loadSectionPlan, loadSheet } = mount({ mode: 'ranges' })
+    await vi.waitFor(() => expect(field()).toBeTruthy())
+    await vi.waitFor(() => expect(save).toHaveBeenCalledTimes(1))
+    expect(save.mock.calls[0]?.[1]).toEqual({ ...planOf(), source: 'ranges', sections: [], overrides: {} })
+    expect(screen.queryByLabelText('Outline')).toBeNull()
+    expect(screen.queryByLabelText('Headings')).toBeNull()
+    expect(screen.queryByText('Layout')).toBeNull()
+    expect(screen.queryByLabelText('Header band (pt)')).toBeNull()
+    expect(screen.queryByText('Select a section to preview where it will be cut.')).toBeNull()
+    expect(loadSectionPlan).not.toHaveBeenCalled()
+    expect(loadSheet).not.toHaveBeenCalled()
+    expect(screen.getByText('0 sections')).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Undo' })).toBeNull()
+  })
+
+  it('a saved ranges plan opens in range mode by itself, with rename and delete on the rows (AC-1, AC-4)', async () => {
+    const { save } = mount({ loadPlan: async () => RANGES })
+    await vi.waitFor(() => expect(field()).toBeTruthy())
+    expect(field().value).toBe('1-2, 4-6')
+    expect(names()).toEqual(['Pages 1–2', 'Custom'])
+    expect(screen.queryByLabelText('Outline')).toBeNull()
+    expect(screen.getByRole('button', { name: /^Split into 2/ })).toBeTruthy()
+    const name = screen.getByLabelText('Name of section 1')
+    await fireEvent.input(name, { target: { value: 'Opening' } })
+    await fireEvent.blur(name)
+    await vi.waitFor(() => expect(save).toHaveBeenCalledTimes(1))
+    expect(save.mock.calls[0]?.[1].sections[0]).toEqual({ name: 'Opening', page: 1, heading: '', endPage: 2 })
+    await fireEvent.click(screen.getByLabelText('Delete section 2'))
+    expect(names()).toEqual(['Opening'])
+    await vi.waitFor(() => expect(field().value).toBe('1-2'))
+    await vi.waitFor(() => expect(save).toHaveBeenCalledTimes(2))
+    expect(save.mock.calls[1]?.[1]).toMatchObject({ source: 'ranges', sections: [{ name: 'Opening', page: 1, endPage: 2 }], overrides: {} })
+  })
+
+  it("a 422 on a range's endPage shows under the range field (the list has no control for it) and clears on the next success", async () => {
+    const save = vi
+      .fn()
+      .mockRejectedValueOnce(new ApiError(422, 'invalid', 'invalid', [{ loc: ['body', 'sections', 0, 'endPage'], msg: 'Value error, endPage must be at most 6, the last page of the book', type: 'value_error' }]))
+      .mockImplementation(async (_id: string, plan: Plan) => plan)
+    mount({ loadPlan: async () => RANGES, save })
+    await vi.waitFor(() => expect(field()).toBeTruthy())
+    await fireEvent.input(field(), { target: { value: '1-2, 4-6, 3' } })
+    await vi.waitFor(() => expect(save).toHaveBeenCalledTimes(1))
+    await vi.waitFor(() => expect(screen.getByText('Range 1 — endPage must be at most 6, the last page of the book')).toBeTruthy())
+    expect(field().getAttribute('aria-invalid')).toBe('true')
+    await fireEvent.input(field(), { target: { value: '1-2, 4-6' } })
+    await vi.waitFor(() => expect(save).toHaveBeenCalledTimes(2))
+    await vi.waitFor(() => expect(screen.queryByText(/endPage must be at most 6/)).toBeNull())
+    expect(field().getAttribute('aria-invalid')).toBe('false')
   })
 })

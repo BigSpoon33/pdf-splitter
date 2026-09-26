@@ -4,6 +4,9 @@ The engine never sees a display name. Each section goes in as `NNN-<ascii-slug>`
 so a name with `/` or one that repeats can't be refused or collide), overrides are re-keyed from the Plan's
 section index to that name, and the ZIP carries `NNN - <display name>.pdf` plus a `manifest.json` whose rows
 are the engine's with the Plan's `index`, `name` and the ZIP `file`. The task (`worker/task.py`) owns the row.
+
+A `ranges` plan (ADR-009) never reaches the engine: `cut_ranges` copies each whole-page span with PyMuPDF into
+the same file names and manifest shape, so the ZIP, the manifest route and the SPA cannot tell the two apart.
 """
 
 from __future__ import annotations
@@ -16,6 +19,7 @@ import zipfile
 from pathlib import Path
 from typing import Any
 
+import pymupdf
 from monograph_splitter.profile import profile_from_dict
 from monograph_splitter.session import MANIFEST_NAME, OVERRIDES_NAME, Book
 
@@ -88,6 +92,47 @@ def cut_book(job_dir: Path, plan: dict[str, Any], progress: Progress) -> tuple[l
         if row is not None:
             rows.append({**row, "index": i, "name": section["name"], "file": zip_entry(i, section["name"])})
     return rows, result
+
+
+def cut_ranges(job_dir: Path, plan: dict[str, Any], progress: Progress) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Copy every `[page, endPage]` span of a `ranges` plan into its own PDF (no heading search, no redaction,
+    no verify); returns (manifest rows in plan order, a summary in `cut_all`'s shape). Spans may overlap or
+    leave gaps: each is copied from the source on its own."""
+    work = job_dir / "work"
+    _reset_outputs(work)
+    sections = plan["sections"]
+    total = len(sections)
+    progress(0, total, MSG_PREPARING)
+    rows: list[dict[str, Any]] = []
+    src = pymupdf.open(job_dir / "source.pdf")
+    try:
+        for i, section in enumerate(sections):
+            name = engine_name(i, section["name"])
+            dest = work / f"{name}.pdf"
+            page, end_page = section["page"], section["endPage"]
+            out = pymupdf.open()
+            try:
+                # 1-based inclusive sheets (ADR-003) → PyMuPDF's 0-based inclusive pair.
+                out.insert_pdf(src, from_page=page - 1, to_page=end_page - 1)
+                out.save(dest, garbage=4, deflate=True)
+            finally:
+                out.close()
+            rows.append({
+                "formula": name,
+                "file": zip_entry(i, section["name"]),
+                "printedPages": [page, end_page],
+                "pageCount": end_page - page + 1,
+                "flags": [],
+                "notes": [],
+                "leaks": [],
+                "bytes": dest.stat().st_size,
+                "index": i,
+                "name": section["name"],
+            })
+            progress(i + 1, total, MSG_CUTTING)
+    finally:
+        src.close()
+    return rows, {"written": rows, "missing": [], "unknown": [], "leaks": {}}
 
 
 def write_zip(path: Path, work: Path, rows: list[dict[str, Any]]) -> None:

@@ -21,9 +21,11 @@
   import { PlanEditor } from '../lib/editor.svelte'
   import { messageFor } from '../lib/errors'
   import { initialPicker } from '../lib/plan'
+  import type { JobMode } from '../lib/route'
   import Download from './Download.svelte'
   import LayoutPanel from './LayoutPanel.svelte'
   import PagePreview from './PagePreview.svelte'
+  import RangeEditor from './RangeEditor.svelte'
   import SectionList from './SectionList.svelte'
   import SourcePicker from './SourcePicker.svelte'
 
@@ -32,6 +34,12 @@
     pages: number
     /** `done`: the last cut matches the saved plan; `review`: no cut yet, or the plan changed since one. */
     jobState: 'review' | 'done'
+    /**
+     * `ranges` (from `/j/<id>?mode=ranges`, ADR-009): the job was uploaded through "Split by page ranges". Its plan
+     * analyzed as chapters like any other; the first load turns it into an empty `ranges` plan and saves that, so
+     * from then on — and after a reload with or without the query — the plan's own `source` is the mode.
+     */
+    mode?: JobMode
     loadAnalysis?: (id: string, signal: AbortSignal) => Promise<Analysis>
     loadPlan?: (id: string, signal: AbortSignal) => Promise<Plan>
     loadManifest?: (id: string, signal: AbortSignal) => Promise<ManifestRow[]>
@@ -59,6 +67,7 @@
     id,
     pages,
     jobState,
+    mode,
     loadAnalysis = getAnalysis,
     loadPlan = getPlan,
     loadManifest = getManifest,
@@ -101,6 +110,7 @@
         if (ctrl.signal.aborted) return
         analysis = a
         created = new PlanEditor(plan, (p, o) => save(id, p, o), { debounceMs, undoMs, picker: initialPicker(a) })
+        if (mode === 'ranges' && plan.source !== 'ranges') created.setRanges([])
         editor = created
         const rows = await manifest
         if (ctrl.signal.aborted || !rows) return
@@ -127,6 +137,9 @@
   })
 
   const cutting = $derived(job?.kind === 'cut' && (job.state === 'queued' || job.state === 'running'))
+
+  /** Page-range mode shows the range editor and the list; the source picker, preview and layout are chapter tools. */
+  const ranges = $derived(editor?.plan.source === 'ranges')
 
   /** The files of the last cut follow an older plan: from `review` they already do; from `done`, once an edit lands. */
   const stale = $derived(!cutting && hasManifest && (jobState === 'review' || (editor?.edited ?? false)))
@@ -196,35 +209,48 @@
 {:else if !analysis || !editor}
   <section class="card" aria-busy="true"><p class="muted">Loading the analysis…</p></section>
 {:else}
-  <div class="review">
-    <section class="card">
-      <h2>Sections</h2>
-      <SourcePicker
-        {analysis}
-        {pages}
-        source={editor.plan.source}
-        sections={editor.plan.sections}
-        picker={editor.picker}
-        settings={editor.plan.settings}
-        onpick={(source, sections, label, picker) => editor?.replaceSections(source, sections, label, picker)}
-      />
-      {#if editor.errorAt('source')}
-        <p class="field-error" role="alert">{editor.errorAt('source')}</p>
-      {/if}
-    </section>
+  <div class="review" data-mode={ranges ? 'ranges' : 'chapters'}>
+    {#if ranges}
+      <section class="card">
+        <RangeEditor {editor} {pages} />
+        {#if editor.errorAt('source')}
+          <p class="field-error" role="alert">{editor.errorAt('source')}</p>
+        {/if}
+      </section>
 
-    <section class="card">
-      <SectionList {editor} {analysis} />
-    </section>
+      <section class="card">
+        <SectionList {editor} {analysis} ranges />
+      </section>
+    {:else}
+      <section class="card">
+        <h2>Sections</h2>
+        <SourcePicker
+          {analysis}
+          {pages}
+          source={editor.plan.source}
+          sections={editor.plan.sections}
+          picker={editor.picker}
+          settings={editor.plan.settings}
+          onpick={(source, sections, label, picker) => editor?.replaceSections(source, sections, label, picker)}
+        />
+        {#if editor.errorAt('source')}
+          <p class="field-error" role="alert">{editor.errorAt('source')}</p>
+        {/if}
+      </section>
 
-    <section class="card">
-      <PagePreview {editor} {analysis} {id} {loadSectionPlan} {loadSheet} />
-    </section>
+      <section class="card">
+        <SectionList {editor} {analysis} />
+      </section>
 
-    <section class="card">
-      <h2>Layout</h2>
-      <LayoutPanel {editor} />
-    </section>
+      <section class="card">
+        <PagePreview {editor} {analysis} {id} {loadSectionPlan} {loadSheet} />
+      </section>
+
+      <section class="card">
+        <h2>Layout</h2>
+        <LayoutPanel {editor} />
+      </section>
+    {/if}
 
     <p class="save-state" role="status" aria-live="polite">
       {#if editor.error}

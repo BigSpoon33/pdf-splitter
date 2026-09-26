@@ -24,7 +24,7 @@ from ..config import Settings
 from ..files import read_json, write_json
 from ..store import Store
 from .analyze import MUPDF_ERRORS, analyze, default_plan
-from .cut import MSG_PACKAGING, cut_book, write_zip
+from .cut import MSG_PACKAGING, cut_book, cut_ranges, write_zip
 
 PROGRESS_INTERVAL_S = 0.5
 EXIT_INTERNAL = 1
@@ -91,7 +91,9 @@ def run_cut(settings: Settings, job_id: str, store: Store) -> bool:
         return False
     job_dir = settings.jobs_dir / job_id
     throttle = Throttle(lambda done, total, msg: store.update_progress(job_id, done, total, msg))
-    rows, _ = cut_book(job_dir, read_json(job_dir / "plan.json"), throttle)
+    plan = read_json(job_dir / "plan.json")
+    # ADR-009: a page-range plan is whole-page copies, not an engine cut.
+    rows, _ = (cut_ranges if plan["source"] == "ranges" else cut_book)(job_dir, plan, throttle)
     # A job deleted while the engine ran must not get its directory back: the check sits right before the
     # only write the api serves (the engine's work files are already on disk and go with the row's TTL).
     row = store.get_job(job_id)

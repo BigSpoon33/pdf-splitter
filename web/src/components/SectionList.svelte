@@ -6,9 +6,15 @@
   interface Props {
     editor: PlanEditor
     analysis: Analysis
+    /**
+     * Page-range mode (ADR-009): the rows are whole-page spans the text field owns, so the list keeps rename and
+     * delete (AC-4) and drops what has no meaning there — the start-page input, merge, add, and the selection that
+     * drives the preview.
+     */
+    ranges?: boolean
   }
 
-  let { editor, analysis }: Props = $props()
+  let { editor, analysis, ranges = false }: Props = $props()
 
   const sections = $derived(editor.plan.sections)
   const last = $derived(sections.length - 1)
@@ -54,7 +60,7 @@
 <div class="head">
   <h2>{sections.length} {sections.length === 1 ? 'section' : 'sections'}</h2>
   {#if sections.length === 0}
-    <p class="muted">No sections yet. Choose a source above or add one below.</p>
+    <p class="muted">{ranges ? 'No ranges yet. Type them above.' : 'No sections yet. Choose a source above or add one below.'}</p>
   {/if}
 </div>
 
@@ -68,10 +74,14 @@
     {@const pageError = editor.errorAt('sections', i, 'page')}
     {@const flags = badgesFor(editor.plan, editor.rows, i)}
     <li class="row" class:selected={editor.selected === i}>
-      <label class="select">
-        <input type="radio" name="selected" value={i} aria-label="Select section {i + 1}" checked={editor.selected === i} onchange={() => editor.select(i)} />
-        <span class="num" aria-hidden="true">{i + 1}</span>
-      </label>
+      {#if ranges}
+        <span class="select num">{i + 1}</span>
+      {:else}
+        <label class="select">
+          <input type="radio" name="selected" value={i} aria-label="Select section {i + 1}" checked={editor.selected === i} onchange={() => editor.select(i)} />
+          <span class="num" aria-hidden="true">{i + 1}</span>
+        </label>
+      {/if}
       <div class="field name">
         <input
           type="text"
@@ -90,6 +100,12 @@
         {/if}
       </div>
       <div class="field page">
+        {#if ranges}
+          {@const count = (s.endPage ?? s.page) - s.page + 1}
+          <span class="page-line printed" aria-label="Pages of section {i + 1}">
+            {s.endPage === undefined || s.endPage === s.page ? `p. ${s.page}` : `p. ${s.page}–${s.endPage}`} · {count} {count === 1 ? 'page' : 'pages'}
+          </span>
+        {:else}
         <span class="page-line">
           <input
             type="number"
@@ -106,6 +122,7 @@
             <span class="printed" title="The page number printed on the sheet">p. {label(s.page)}</span>
           {/if}
         </span>
+        {/if}
         {#if pageError}
           <p class="field-error" id="page-error-{i}">{pageError}</p>
         {/if}
@@ -118,15 +135,18 @@
         </ul>
       {/if}
       <div class="actions">
-        <button type="button" disabled={i === last} onclick={() => editor.merge(i)} title="Absorb the next section into this one">
-          Merge ↓
-        </button>
+        {#if !ranges}
+          <button type="button" disabled={i === last} onclick={() => editor.merge(i)} title="Absorb the next section into this one">
+            Merge ↓
+          </button>
+        {/if}
         <button type="button" onclick={() => editor.remove(i)} aria-label="Delete section {i + 1}">Delete</button>
       </div>
     </li>
   {/each}
 </ol>
 
+{#if !ranges}
 <!-- novalidate: the range error is shown inline in the same style as the API's, not as the browser's tooltip -->
 <form class="add" onsubmit={add} novalidate>
   <label class="field name">
@@ -142,6 +162,7 @@
     <p class="field-error" role="alert">{addError}</p>
   {/if}
 </form>
+{/if}
 
 <style>
   .head h2 {
