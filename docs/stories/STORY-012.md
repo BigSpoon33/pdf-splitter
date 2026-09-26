@@ -1,6 +1,6 @@
 # STORY-012: Limits: rate limiting, disk guard, janitor, queue position
 
-> **Status:** Pending
+> **Status:** Done (2026-09-26)
 > **Size:** S
 > **Date:** 2026-09-25
 > **Architecture ref:** `docs/Architecture.md#janitor`
@@ -28,11 +28,11 @@ PRD AC-10, AC-11.
 
 ## Acceptance Criteria
 
-- [ ] AC-1: Per-IP (salted-hash, daily-rotating salt) sliding-window limit `RATE_PER_HOUR` on `POST /api/jobs` → 429 `rate_limited` with `Retry-After`; client IP from `X-Forwarded-For` only when the peer is the trusted proxy
-- [ ] AC-2: Uploads refused with 503 `disk_full` when free space on JOBS_DIR < `MIN_FREE_GB` (2)
-- [ ] AC-3: Janitor (in the worker process, every 5 min): deletes expired job dirs + marks rows `deleted`, deletes orphan dirs, prunes `rate` rows and deleted rows older than 7 days
-- [ ] AC-4: `GET /api/jobs/{id}` includes `queue_position` for queued jobs
-- [ ] AC-5: Tests with a frozen clock: TTL expiry, orphan removal, rate window, disk guard (monkeypatched `shutil.disk_usage`)
+- [x] AC-1: Per-IP (salted-hash, daily-rotating salt) sliding-window limit `RATE_PER_HOUR` on `POST /api/jobs` → 429 `rate_limited` with `Retry-After`; client IP from `X-Forwarded-For` only when the peer is the trusted proxy
+- [x] AC-2: Uploads refused with 503 `disk_full` when free space on JOBS_DIR < `MIN_FREE_GB` (2)
+- [x] AC-3: Janitor (in the worker process, every 5 min): deletes expired job dirs + marks rows `deleted`, deletes orphan dirs, prunes `rate` rows and deleted rows older than 7 days
+- [x] AC-4: `GET /api/jobs/{id}` includes `queue_position` for queued jobs
+- [x] AC-5: Tests with a frozen clock: TTL expiry, orphan removal, rate window, disk guard (monkeypatched `shutil.disk_usage`)
 
 ---
 
@@ -94,13 +94,17 @@ feat: STORY-012 - rate limit, disk guard, 24 h janitor and queue position
 
 ## Status
 
-**Pending**
+**Done** — 2026-09-26, commit `7e5af5e` on `feature/mvp` (findings: `docs/findings/STORY-012-findings.md`)
 
-- [ ] AC-1
-- [ ] AC-2
-- [ ] AC-3
-- [ ] AC-4
-- [ ] AC-5
+- [x] AC-1
+- [x] AC-2
+- [x] AC-3
+- [x] AC-4
+- [x] AC-5
+- [x] Addendum: `deleted` rows' directories removed by the janitor
+- [x] Addendum: a vanished job file after `load_job` is 410, not 500
+- [x] Addendum: recoverable failed cut (API + SPA)
+- [x] Addendum: per-job output budget on both cut paths (`failed/too_large_output`)
 
 > **Orchestrator addendum (from STORY-007 review):** the janitor must also remove the directory of any row in state `deleted` (defence in depth against a late write recreating it), not only expired rows and row-less dirs. Test it.
 
