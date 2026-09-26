@@ -9,9 +9,16 @@
     pollMs?: number
     /** Every status the poll receives, so the page can mount the review UI once the job is in `review`/`done`. */
     onstatus?: (job: JobStatus) => void
+    /**
+     * Bumped by the page when the job leaves a terminal state behind it (a cut was queued, a save moved `done` back
+     * to `review`): the loop stopped at the terminal state, so it has to start again to see what follows.
+     */
+    resume?: number
+    /** 404/410: the job will never answer again. */
+    ongone?: (err: ApiError) => void
   }
 
-  let { id, load = getJob, pollMs = POLL_MS, onstatus }: Props = $props()
+  let { id, load = getJob, pollMs = POLL_MS, onstatus, resume = 0, ongone }: Props = $props()
 
   let job = $state<JobStatus | null>(null)
   /** A final error: the job is gone or the address is wrong. Nothing more to poll. */
@@ -20,6 +27,7 @@
   let hiccup = $state<string | null>(null)
 
   $effect(() => {
+    void resume
     const ctrl = new AbortController()
     let timer: ReturnType<typeof setTimeout> | undefined
 
@@ -35,6 +43,7 @@
         if (ctrl.signal.aborted) return
         if (isGone(err)) {
           fatal = (err as ApiError).userMessage
+          ongone?.(err as ApiError)
           return
         }
         hiccup = err instanceof ApiError ? err.userMessage : messageFor(null)

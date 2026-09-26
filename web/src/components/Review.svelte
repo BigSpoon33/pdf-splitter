@@ -1,11 +1,15 @@
 <script lang="ts">
+  import { untrack } from 'svelte'
   import {
     ApiError,
     getAnalysis,
     getManifest,
     getPlan,
     putPlan,
+    isGone,
     type Analysis,
+    type CreatedJob,
+    type JobStatus,
     type ManifestRow,
     type Plan,
     type SaveOptions,
@@ -16,6 +20,7 @@
   import { PlanEditor } from '../lib/editor.svelte'
   import { messageFor } from '../lib/errors'
   import { initialPicker } from '../lib/plan'
+  import Download from './Download.svelte'
   import LayoutPanel from './LayoutPanel.svelte'
   import PagePreview from './PagePreview.svelte'
   import SectionList from './SectionList.svelte'
@@ -32,8 +37,19 @@
     loadSectionPlan?: (id: string, i: number, body: SectionPlanRequest, signal: AbortSignal) => Promise<SectionPlan>
     loadSheet?: (id: string, n: number, dpi: SheetDpi, signal: AbortSignal) => Promise<Blob>
     save?: (id: string, plan: Plan, opts?: SaveOptions) => Promise<Plan>
+    cut?: (id: string) => Promise<CreatedJob>
     debounceMs?: number
     undoMs?: number
+    /** The latest status (the cut's progress and outcome). */
+    job?: JobStatus | null
+    /** Cuts the page has seen finish; each new one replaces the results with the new manifest. */
+    cuts?: number
+    /** A cut was queued: the page polls again to follow it. */
+    oncut?: () => void
+    /** A save landed while the job was `done`: the API moved it back to `review`, and the page polls once to show that. */
+    onsaved?: () => void
+    /** A 404/410 from a save, a preview, a cut or the manifest: the whole page becomes the deleted screen. */
+    ongone?: (err: ApiError) => void
   }
 
   let {
@@ -46,14 +62,22 @@
     loadSectionPlan,
     loadSheet,
     save = putPlan,
+    cut,
     debounceMs,
     undoMs,
+    job = null,
+    cuts = 0,
+    oncut,
+    onsaved,
+    ongone,
   }: Props = $props()
 
   let analysis = $state<Analysis | null>(null)
   let editor = $state<PlanEditor | null>(null)
   /** A cut happened at some point (its manifest exists), so the badges and the "cut again" note apply. */
   let hasManifest = $state(false)
+  /** The last cut's rows as the results list shows them: unlike `editor.rows` (badges), edits never drop one. */
+  let results = $state<ManifestRow[] | null>(null)
   let loadError = $state<string | null>(null)
 
   $effect(() => {
@@ -74,6 +98,7 @@
         const rows = await manifest
         if (ctrl.signal.aborted || !rows) return
         created.rows = rows
+        results = rows
         hasManifest = true
       } catch (err) {
         if (ctrl.signal.aborted) return
@@ -94,8 +119,48 @@
     return 'Saved'
   })
 
+  const cutting = $derived(job?.kind === 'cut' && (job.state === 'queued' || job.state === 'running'))
+
   /** The files of the last cut follow an older plan: from `review` they already do; from `done`, once an edit lands. */
-  const stale = $derived(hasManifest && (jobState === 'review' || (editor?.edited ?? false)))
+  const stale = $derived(!cutting && hasManifest && (jobState === 'review' || (editor?.edited ?? false)))
+
+  // A finished cut replaced the ZIP: its manifest is the new results list and the new badges.
+  let refreshed = 0
+  $effect(() => {
+    const n = cuts
+    const ed = editor
+    if (!ed || n <= refreshed) return
+    refreshed = n
+    const ctrl = new AbortController()
+    loadManifest(id, ctrl.signal).then(
+      (rows) => {
+        if (ctrl.signal.aborted) return
+        results = rows
+        ed.rows = rows
+        hasManifest = true
+        // Only an edit made while the cut ran (refused as `busy`) is newer than these files.
+        ed.edited = ed.dirty
+        if (ed.error?.code === 'busy') void ed.flush()
+      },
+      (err: unknown) => {
+        if (!ctrl.signal.aborted && isGone(err)) ongone?.(err as ApiError)
+      },
+    )
+    return () => ctrl.abort()
+  })
+
+  // AC-2: a save from `done` puts the job back in `review` server-side; the status card should say so.
+  let seenSaves = 0
+  $effect(() => {
+    const n = editor?.saves ?? 0
+    if (n <= seenSaves) return
+    seenSaves = n
+    if (untrack(() => jobState) === 'done') onsaved?.()
+  })
+
+  $effect(() => {
+    if (editor?.gone) ongone?.(untrack(() => editor?.error) ?? new ApiError(410, 'expired'))
+  })
 </script>
 
 {#if loadError}
@@ -146,6 +211,10 @@
         <span class="muted">Your edits replace the plan of the last cut; cut again to refresh the files.</span>
       {/if}
     </p>
+
+    <section class="card">
+      <Download {id} {editor} {job} {results} {stale} {cut} {oncut} {ongone} />
+    </section>
 
     {#if editor.undo}
       <div class="toast" role="status">

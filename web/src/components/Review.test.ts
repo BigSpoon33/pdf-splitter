@@ -40,7 +40,8 @@ function mount(over: { jobState?: 'review' | 'done'; save?: Save; loadPlan?: Loa
 }
 
 const names = () => screen.getAllByLabelText(/^Name of section/).map((el) => (el as HTMLInputElement).value)
-const badges = () => [...document.querySelectorAll('.badge')].map((b) => b.textContent)
+// The section list's badges; the results list (Download) repeats a row's flags on its file.
+const badges = () => [...document.querySelectorAll('.badge')].filter((b) => !b.closest('.results')).map((b) => b.textContent)
 const STALE = /cut again to refresh the files/
 
 describe('Review', () => {
@@ -124,7 +125,7 @@ describe('Review', () => {
   it('shows the last cut flags as badges after a cut, and a busy answer with a Retry', async () => {
     const save = vi.fn().mockRejectedValue(new ApiError(409, 'busy'))
     const { loadManifest } = mount({ jobState: 'done', save, loadManifest: cut })
-    await vi.waitFor(() => expect(screen.getByText('Heading not found on its page')).toBeTruthy())
+    await vi.waitFor(() => expect(badges()).toContain('Heading not found on its page'))
     expect(loadManifest).toHaveBeenCalledWith(ID, expect.any(AbortSignal))
     expect(screen.queryByText(STALE)).toBeNull() // the files match the plan until an edit
     const name = screen.getByLabelText('Name of section 3')
@@ -138,7 +139,7 @@ describe('Review', () => {
 
   it('a job back in review after an edit still shows the last cut badges and the stale note on reload (gate r1 F4)', async () => {
     mount({ jobState: 'review', loadManifest: cut })
-    await vi.waitFor(() => expect(screen.getByText('Heading not found on its page')).toBeTruthy())
+    await vi.waitFor(() => expect(badges()).toContain('Heading not found on its page'))
     expect(badges()).toEqual(['Heading not found on its page'])
     expect(screen.getByText(STALE)).toBeTruthy()
   })

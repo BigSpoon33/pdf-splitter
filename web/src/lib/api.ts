@@ -324,3 +324,30 @@ export async function getSheet(id: string, n: number, dpi: SheetDpi, signal?: Ab
   const res = await fetchOk(sheetUrl(id, n, dpi), { signal }, 'image/png')
   return res.blob()
 }
+
+// ── Cut, downloads and deletion (STORY-011). Shapes: tests/test_api_e2e.py::test_cut_queues_once_and_resets_the_row,
+// ::test_end_to_end_upload_analyze_plan_cut_download, ::test_section_pdf_comes_from_the_zip_by_plan_index and
+// ::test_delete_marks_the_row_before_removing_the_directory.
+
+/** 202: the job is `queued` with `kind: "cut"`; 409 `busy` while one is queued or running, 422 for an empty plan. */
+export function postCut(id: string, signal?: AbortSignal): Promise<CreatedJob> {
+  return request<CreatedJob>(jobUrl(id, '/cut'), { method: 'POST', signal })
+}
+
+/** 204; every route answers 410 `expired` afterwards. */
+export async function deleteJob(id: string, signal?: AbortSignal): Promise<void> {
+  await fetchOk(jobUrl(id), { method: 'DELETE', signal }, 'application/json')
+}
+
+/**
+ * Downloads are plain `<a href download>` links: the API answers with an attachment, and a ZIP of a whole book is
+ * not something to hold in memory as a Blob.
+ */
+export function resultUrl(id: string): string {
+  return jobUrl(id, '/result.zip')
+}
+
+/** `i` is the PLAN index (`ManifestRow.index`), not the position in the manifest. */
+export function sectionUrl(id: string, i: number): string {
+  return jobUrl(id, `/sections/${i}.pdf`)
+}

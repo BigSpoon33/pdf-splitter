@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   ApiError,
   createJob,
+  deleteJob,
   errorFromBody,
   getAnalysis,
   getJob,
@@ -10,7 +11,10 @@ import {
   getSectionPlan,
   getSheet,
   isGone,
+  postCut,
   putPlan,
+  resultUrl,
+  sectionUrl,
   sheetUrl,
   type JobStatus,
   type Plan,
@@ -230,5 +234,40 @@ describe('preview payloads (STORY-010)', () => {
     const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
     expect(url).toBe('/api/jobs/id-1/sheets/3.png?dpi=110')
     expect(init.headers).toMatchObject({ Accept: 'image/png' })
+  })
+})
+
+describe('cut, downloads and deletion (STORY-011)', () => {
+  it('POSTs /cut and returns the queued job (::test_cut_queues_once_and_resets_the_row)', async () => {
+    const fetchMock = stubFetch(202, JSON.stringify({ id: 'id-1', state: 'queued' }))
+    await expect(postCut('id-1')).resolves.toEqual({ id: 'id-1', state: 'queued' })
+    const [url, init] = fetchMock.mock.calls[0]!
+    expect(url).toBe('/api/jobs/id-1/cut')
+    expect(init?.method).toBe('POST')
+  })
+
+  it('a second cut while one runs is 409 busy; an empty plan is 422 invalid', async () => {
+    stubFetch(409, JSON.stringify({ code: 'busy', message: 'm' }))
+    await expect(postCut('id-1')).rejects.toMatchObject({ status: 409, code: 'busy', userMessage: MESSAGES.busy })
+    stubFetch(422, JSON.stringify({ code: 'invalid', message: 'm', errors: [{ loc: ['plan', 'sections'], msg: 'x', type: 'value_error' }] }))
+    await expect(postCut('id-1')).rejects.toMatchObject({ status: 422, code: 'invalid' })
+  })
+
+  it('DELETEs the job (204, no body); a job already gone is 410', async () => {
+    // A 204 cannot carry a body, so this stub is not `stubFetch`.
+    const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => new Response(null, { status: 204 }))
+    vi.stubGlobal('fetch', fetchMock)
+    await expect(deleteJob('id-1')).resolves.toBeUndefined()
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/jobs/id-1')
+    expect(fetchMock.mock.calls[0]?.[1]?.method).toBe('DELETE')
+    stubFetch(410, JSON.stringify({ code: 'expired', message: 'm' }))
+    const gone = await deleteJob('id-1').catch((e: unknown) => e)
+    expect(isGone(gone)).toBe(true)
+  })
+
+  it('builds the download URLs; a section is addressed by its PLAN index, the id escaped into one segment', () => {
+    expect(resultUrl('id-1')).toBe('/api/jobs/id-1/result.zip')
+    expect(sectionUrl('id-1', 12)).toBe('/api/jobs/id-1/sections/12.pdf')
+    expect(resultUrl('../x')).toBe('/api/jobs/..%2Fx/result.zip')
   })
 })

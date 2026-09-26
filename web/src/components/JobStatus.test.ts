@@ -161,4 +161,40 @@ describe('JobStatus', () => {
     await vi.advanceTimersByTimeAsync(10_000)
     expect(load).toHaveBeenCalledTimes(1)
   })
+
+  it('polls again when resumed after a terminal state: a cut goes queued → running (per section) → done (STORY-011 AC-1)', async () => {
+    const load = sequence(
+      status({ state: 'review' }),
+      status({ state: 'queued', kind: 'cut' }),
+      status({ state: 'running', kind: 'cut', progress: 2, total: 3, message: 'Cutting sections' }),
+      status({ state: 'done', kind: 'cut', progress: 3, total: 3 }),
+    )
+    const { rerender } = render(JobStatus, { id: ID, load, resume: 0 })
+    await settle()
+    expect(stateShown()).toBe('review')
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(load).toHaveBeenCalledTimes(1)
+
+    await rerender({ id: ID, load, resume: 1 })
+    await settle()
+    expect(load).toHaveBeenCalledTimes(2)
+    expect(screen.getByRole('heading').textContent).toBe('Waiting to cut')
+    await vi.advanceTimersByTimeAsync(1500)
+    await settle()
+    expect(screen.getByRole('heading').textContent).toBe('Cutting sections')
+    expect(screen.getByText('2 / 3')).toBeTruthy()
+    await vi.advanceTimersByTimeAsync(1500)
+    await settle()
+    expect(stateShown()).toBe('done')
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(load).toHaveBeenCalledTimes(4)
+  })
+
+  it('reports a 410 to the page once, so the whole page can become the deleted screen (AC-4)', async () => {
+    const ongone = vi.fn()
+    render(JobStatus, { id: ID, load: sequence(new ApiError(410, 'expired')), ongone })
+    await settle()
+    expect(ongone).toHaveBeenCalledTimes(1)
+    expect(ongone.mock.calls[0]?.[0]).toMatchObject({ code: 'expired' })
+  })
 })

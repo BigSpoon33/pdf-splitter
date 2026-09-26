@@ -1,23 +1,18 @@
 <script lang="ts">
   import DropZone from './components/DropZone.svelte'
   import JobPage from './components/JobPage.svelte'
-  import { jobPath, navigate, onNavigate, parseRoute } from './lib/route'
+  import Privacy from './components/Privacy.svelte'
+  import Terms from './components/Terms.svelte'
+  import { jobPath, linkClick, navigate, onNavigate, parseRoute } from './lib/route'
 
   let pathname = $state(location.pathname)
   const route = $derived(parseRoute(pathname))
 
   $effect(() => onNavigate((p) => (pathname = p)))
-
-  function home(e: MouseEvent) {
-    // Let modified clicks open a new tab as usual.
-    if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return
-    e.preventDefault()
-    navigate('/')
-  }
 </script>
 
 <header class="site">
-  <a href="/" onclick={home} class="brand">PDF Splitter</a>
+  <a href="/" onclick={(e) => linkClick(e, '/')} class="brand">PDF Splitter</a>
   <p class="tagline">One big PDF in, one PDF per chapter out.</p>
 </header>
 
@@ -28,14 +23,22 @@
     {#key route.id}
       <JobPage id={route.id} />
     {/key}
-    <p class="again"><a href="/" onclick={home}>Split another PDF</a></p>
+  {:else if route.name === 'privacy'}
+    <Privacy />
+  {:else if route.name === 'terms'}
+    <Terms />
   {:else}
     <section class="card" role="alert">
       <h1>Page not found</h1>
-      <p><a href="/" onclick={home}>Go to the upload page</a></p>
+      <p><a href="/" onclick={(e) => linkClick(e, '/')}>Go to the upload page</a></p>
     </section>
   {/if}
 </main>
+
+<footer class="site-footer">
+  <a href="/privacy" onclick={(e) => linkClick(e, '/privacy')}>Privacy</a>
+  <a href="/terms" onclick={(e) => linkClick(e, '/terms')}>Terms</a>
+</footer>
 
 <style>
   .site {
@@ -51,11 +54,19 @@
     margin: 0.25rem 0 0;
     color: var(--muted);
   }
-  .again {
-    margin-top: 1rem;
-  }
   h1 {
     font-size: 1.25rem;
     margin: 0 0 0.5rem;
+  }
+  .site-footer {
+    display: flex;
+    gap: 1.25rem;
+    margin-top: 2.5rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--border);
+    font-size: 0.9rem;
+  }
+  .site-footer a {
+    color: var(--muted);
   }
 </style>

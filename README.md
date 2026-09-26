@@ -90,11 +90,18 @@ bun run build                # static files in web/dist/
 ```
 
 `API_PORT` can also go in `web/.env.local`. `VITE_MAX_BYTES` (build time) changes the client-side size
-precheck; it should match `PDFSPLIT_MAX_BYTES`. Routes are `/` (upload) and `/j/<id>` (a job), so whatever serves
-`web/dist/` in production must answer `index.html` for `/j/*`.
+precheck; it should match `PDFSPLIT_MAX_BYTES`. Routes are `/` (upload), `/j/<id>` (a job), `/privacy` and `/terms`,
+so whatever serves `web/dist/` in production must answer `index.html` for all of them.
 
 Once a job reaches `review`, `/j/<id>` shows the plan editor: the source picker (outline level, detected headings by
 size threshold and level, or a pasted `Name, page` list), the editable section list (rename, page, add, delete,
 merge-with-next; after a cut, the manifest's flags as badges) and the layout panel (columns, gutter, header/footer
 bands, heading size, heading wrap gap). Every edit is `PUT` to `/api/jobs/{id}/plan` 600 ms after the last
 keystroke; a 422 shows next to the field it names.
+
+**Split** posts `/api/jobs/{id}/cut` (a pending edit is saved first); the status poll resumes and follows the cut
+section by section, then the results list shows one download link per section (with its flags) and "Download all
+(ZIP)" — plain `<a download>` links to the API, never fetched into memory. An edit after a cut puts the job back in
+`review` while the last cut's files stay downloadable until the next cut. "Files deleted in N h" (from `expires_at`)
+and **Delete now** (confirm → `DELETE /api/jobs/{id}`) are always on the job page; a deleted, expired or unknown job
+turns the whole page into the deleted screen with a "Split another PDF" link.

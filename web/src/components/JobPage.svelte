@@ -1,16 +1,100 @@
 <script lang="ts">
-  import type { JobStatus as Status } from '../lib/api'
+  import type { ComponentProps } from 'svelte'
+  import { getJob, type ApiError, type JobStatus as Status } from '../lib/api'
+  import { linkClick } from '../lib/route'
+  import Expired, { type GoneReason } from './Expired.svelte'
+  import Expiry from './Expiry.svelte'
   import JobStatus from './JobStatus.svelte'
   import Review from './Review.svelte'
 
-  let { id }: { id: string } = $props()
+  interface Props {
+    id: string
+    /** Everything Review, Expiry and JobStatus load, injectable so the page's state transitions are testable. */
+    load?: (id: string, signal: AbortSignal) => Promise<Status>
+    review?: Partial<ComponentProps<typeof Review>>
+    expiry?: Partial<ComponentProps<typeof Expiry>>
+    pollMs?: number
+  }
+
+  let { id, load = getJob, review = {}, expiry = {}, pollMs }: Props = $props()
 
   let job = $state<Status | null>(null)
-  // The analysis and plan exist from `review` on; the poll has stopped by then, so mounting here never races it.
-  const ready = $derived(job !== null && (job.state === 'review' || job.state === 'done') ? job.state : null)
+  /**
+   * The page's single "this job is gone" signal: the poll, a save, a preview, a cut, the expiry clock and "Delete now"
+   * all feed it, and the first reason wins — the deleted screen then replaces everything, error lines included.
+   */
+  let gone = $state<GoneReason | null>(null)
+  /** Bumped to make the status poll run again after a terminal state (a cut queued, a save that left `done`). */
+  let resume = $state(0)
+  /**
+   * The review UI stays mounted from the first `review` on — through a cut's `queued`/`running` and a failed cut — so
+   * the editor is never destroyed mid-edit. A reload during a cut mounts it too: the analysis exists once `kind` is `cut`.
+   */
+  let reviewable = $state(false)
+  /** The last of `review`/`done` seen: whether the last cut's files still match the saved plan. */
+  let jobState = $state<'review' | 'done'>('review')
+  /** Cuts seen finishing; Review fetches the new manifest on each. */
+  let cuts = $state(0)
+  // Not reactive: only onstatus reads it, to recognise the `done` that ends a cut.
+  let cutPending = false
+
+  function onstatus(next: Status) {
+    job = next
+    const active = next.state === 'queued' || next.state === 'running'
+    if (next.state === 'review' || next.state === 'done') {
+      reviewable = true
+      jobState = next.state
+    }
+    if (next.kind === 'cut' && active) {
+      cutPending = true
+      reviewable = true
+    } else if (cutPending && !active) {
+      cutPending = false
+      if (next.state === 'done') cuts++
+    }
+  }
+
+  function goneWith(reason: GoneReason) {
+    gone ??= reason
+  }
+
+  const fromError = (err: ApiError): GoneReason => (err.code === 'not_found' ? 'not_found' : 'expired')
 </script>
 
-<JobStatus {id} onstatus={(next) => (job = next)} />
-{#if ready && job}
-  <Review {id} pages={job.pages} jobState={ready} />
+{#if gone}
+  <Expired reason={gone} />
+{:else}
+  <JobStatus {id} {load} {pollMs} {resume} {onstatus} ongone={(err) => goneWith(fromError(err))} />
+  {#if job}
+    <Expiry
+      {id}
+      expiresAt={job.expires_at}
+      ondeleted={() => goneWith('deleted')}
+      onexpired={() => goneWith('expired')}
+      {...expiry}
+    />
+  {/if}
+  {#if reviewable && job}
+    <Review
+      {id}
+      pages={job.pages}
+      {jobState}
+      {job}
+      {cuts}
+      oncut={() => {
+        cutPending = true
+        resume++
+      }}
+      onsaved={() => resume++}
+      ongone={(err) => goneWith(fromError(err))}
+      {...review}
+    />
+  {/if}
+  <p class="again"><a href="/" onclick={(e) => linkClick(e, '/')}>Split another PDF</a></p>
 {/if}
+
+<style>
+  .again {
+    margin-top: 1rem;
+  }
+</style>

@@ -20,3 +20,6 @@ export const KEEPALIVE_MAX_BYTES = 60_000
 
 /** The sheet PNGs the preview shows (`GET /sheets/{n}.png?dpi=`): 110 keeps small type readable when the image is scaled down. */
 export const PREVIEW_DPI = 110 as const
+
+/** The "files deleted in 23 h" line counts in whole minutes at best, so it re-reads the clock this often. */
+export const EXPIRY_TICK_MS = 60_000
