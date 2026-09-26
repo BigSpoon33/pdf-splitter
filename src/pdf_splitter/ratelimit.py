@@ -73,6 +73,12 @@ def ip_hash(ip: str, now: datetime | None = None, secret: str | None = None) -> 
     return hashlib.sha256(salt + rate_key(ip).encode()).hexdigest()
 
 
+def log_tag(ip: str, secret: str | None = None) -> str:
+    """How a log line names a client: the first 8 characters of TODAY's hash (ADR-007). Never a prefix of
+    `client_key`, whose salt never turns, so the same address would read the same in every day's log."""
+    return ip_hash(ip, secret=secret)[:8]
+
+
 def client_key(ip: str, secret: str | None = None) -> str:
     """What the in-flight caps (upload.UploadGuard, body_guard.BodyGuard) count a client under: the same
     `rate_key` the window hashes, salted with the secret but NOT the date. A cap is charged when a body starts

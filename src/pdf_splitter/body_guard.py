@@ -23,6 +23,7 @@ from starlette.datastructures import Headers
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from . import ratelimit
+from .access_log import loggable_path
 from .config import Settings
 from .upload import UPLOAD_PATH, refuse
 
@@ -68,12 +69,12 @@ class BodyGuard:
 
         # The undated key the upload cap uses too (ratelimit.client_key): a cap charged before midnight must be
         # released under the same key after it. Charged for as long as the body is being read, not for the route.
-        client = ratelimit.client_key(
-            ratelimit.client_ip(Request(scope), self.settings.trusted_proxy), self.settings.ip_salt
-        )
+        ip = ratelimit.client_ip(Request(scope), self.settings.trusted_proxy)
+        client = ratelimit.client_key(ip, self.settings.ip_salt)
         if self.per_client.get(client, 0) >= self.settings.max_bodies_per_client:
             log.info("%s %s refused: %s already has %d bodies in flight",
-                     scope["method"], scope["path"], client[:8], self.settings.max_bodies_per_client)
+                     scope["method"], loggable_path(scope["path"]), ratelimit.log_tag(ip, self.settings.ip_salt),
+                     self.settings.max_bodies_per_client)
             await refuse("rate_limited", {"Retry-After": RETRY_AFTER_BODY})(scope, receive, send)
             return
         self.per_client[client] = self.per_client.get(client, 0) + 1
@@ -106,7 +107,8 @@ class BodyGuard:
             try:
                 message = await asyncio.wait_for(receive(), max(0.0, deadline - self.clock()))
             except TimeoutError:
-                log.info("%s %s: body not complete after %.0fs", scope["method"], scope["path"], self.settings.body_timeout)
+                log.info("%s %s: body not complete after %.0fs",
+                         scope["method"], loggable_path(scope["path"]), self.settings.body_timeout)
                 await refuse("too_slow")(scope, receive, send)
                 return None
             if message["type"] == "http.disconnect":

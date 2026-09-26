@@ -499,6 +499,28 @@ project `pdfsplit-r3probe` on `172.29.101/102.0/24` + `fd29:5eaf:9a13::/64` and 
 `172.27.13/14.0/24` + `fd27:` ULAs and 18080/18443; no `:smoke`/`:r3probe` tag left; nothing pushed; no daemon or host
 firewall change (the firewall files were only ever applied inside `unshare -rn`).
 
+## Gate r4 fixes (2026-09-26, attempt 3b — log hygiene)
+
+Round 4 (§ Round 4 of the review) confirmed 2 log-hygiene regressions from `8b0dfed`; the fix is `fix: STORY-013 -
+refusal logs never carry a raw path or a cross-day client id`.
+
+1. **No raw path in a refusal log.** `src/pdf_splitter/body_guard.py:75-77` (per-client body cap, 429) and `:110-111`
+   (the older 408 "body not complete") now print `access_log.loggable_path(scope["path"])` — the job id hashed, control
+   and non-ASCII characters percent-escaped — as the access log already did. `upload.py` logs no path (its guard only
+   ever sees `/api/jobs`).
+2. **No cross-day client id in a log.** New `ratelimit.log_tag(ip, secret)` (`src/pdf_splitter/ratelimit.py:76-79`) =
+   the first 8 characters of TODAY's dated `ip_hash` — the form logs carried before `8b0dfed`. The upload per-client
+   refusal (`upload.py:113-114`) and the body cap refusal use it; the undated `client_key` stays in memory only
+   (the caps' dict keys). The rate-limited line (`upload.py:163`) already printed the dated hash from `take_slot`.
+   ADR-007's as-built line and § api (Architecture) now say so.
+3. **Tests** (both fail on `8b0dfed`'s code, pass now): `tests/test_body_guard.py::test_refusal_logs_carry_neither_the_id_nor_a_raw_path_nor_a_cross_day_client_id`
+   (a path with the job id + ESC + U+2028 through the cap refusal on two days and the 408: printable ASCII, no id
+   window, the day's `ip_hash` prefix present, no `client_key` prefix, different prefix across days);
+   `tests/test_upload.py::test_the_upload_cap_refusal_logs_todays_dated_hash_not_the_undated_key` (23:59 vs 00:01 UTC).
+
+**Result:** `uv run pytest -q` → `454 passed in 94.46s`; `uv run ruff check` → `All checks passed!`; `cd web && bun run
+test` → `286 passed (21 files)` (unaffected). No docker run (none needed).
+
 ## Bugs Found
 - **`docker compose down --rmi all` under a throwaway project untagged another project's image.** First teardown design.
   The smoke build is byte-identical to a `:local` build, so both tags share one image ID and compose's remove-by-ID took

@@ -7,12 +7,13 @@ import asyncio
 import json
 import logging
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-from test_upload import assert_unread, reading_client
+from test_upload import JOB_ID, assert_id_gone, assert_unread, reading_client
 
-from pdf_splitter import body_guard
+from pdf_splitter import body_guard, ratelimit
 from pdf_splitter.app import create_app
 from pdf_splitter.config import Settings
 from pdf_splitter.errors import MESSAGES
@@ -248,3 +249,46 @@ def test_the_upload_is_left_to_the_upload_guard(tmp_path: Path) -> None:
     scope = {**put_scope(None, [(b"transfer-encoding", b"chunked")]), "method": "POST", "path": "/api/jobs"}
     asyncio.run(guard(scope, playing(Clock(), [(0.0, chunk(b"x", more=False))]), send))
     assert echo.ran and statuses(sent) == [200]
+
+
+# --- gate r4: what a refusal writes to the log -----------------------------------------------------------
+
+
+def test_refusal_logs_carry_neither_the_id_nor_a_raw_path_nor_a_cross_day_client_id(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Gate r4: the cap refusal and the 408 printed `scope["path"]` raw — the job id (the credential) and any
+    control bytes reached the log — and named the client by a prefix of the undated `client_key`, which reads
+    the same every day. Both lines now carry the redacted, escaped path and today's dated hash prefix."""
+    caplog.set_level(logging.INFO, logger="pdf_splitter.body_guard")
+    path = f"/api/jobs/{JOB_ID}/plan\x1b[31m\u2028"
+    ip = "203.0.113.9"
+
+    def refused_at(day: datetime) -> str:
+        monkeypatch.setattr(ratelimit, "utcnow", lambda: day)
+        caplog.clear()
+        guard, echo, _sent, send = harness(tmp_path, Clock(), max_bodies_per_client=1)
+        guard.per_client[ratelimit.client_key(ip)] = 1
+        asyncio.run(guard({**put_scope(100), "path": path}, playing(Clock(), [(0.0, None)]), send))
+        assert not echo.ran
+        [line] = [r.getMessage() for r in caplog.records]
+        return line
+
+    monday = refused_at(datetime(2026, 9, 28, 12, tzinfo=UTC))
+    tuesday = refused_at(datetime(2026, 9, 29, 12, tzinfo=UTC))
+    for line, day in ((monday, datetime(2026, 9, 28, 12, tzinfo=UTC)), (tuesday, datetime(2026, 9, 29, 12, tzinfo=UTC))):
+        assert line.isascii() and line.isprintable()
+        assert_id_gone(line, JOB_ID)
+        assert ratelimit.ip_hash(ip, day)[:8] in line
+        assert ratelimit.client_key(ip)[:8] not in line
+    assert ratelimit.ip_hash(ip, datetime(2026, 9, 28, tzinfo=UTC))[:8] not in tuesday
+
+    caplog.clear()
+    clock = Clock()
+    guard, _echo, sent, send = harness(tmp_path, clock)
+    receive = playing(clock, [(0.0, chunk(b"0" * 10)), (21.0, chunk(b"0" * 10)), (0.0, None)])
+    asyncio.run(guard({**put_scope(100), "path": path}, receive, send))
+    assert statuses(sent) == [408]
+    [line] = [r.getMessage() for r in caplog.records]
+    assert line.isascii() and line.isprintable()
+    assert_id_gone(line, JOB_ID)

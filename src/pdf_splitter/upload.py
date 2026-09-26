@@ -110,7 +110,8 @@ class UploadGuard:
             await refuse("overloaded", {"Retry-After": RETRY_AFTER_OVERLOADED})(scope, receive, send)
             return
         if self.per_client.get(client, 0) >= settings.max_uploads_per_client:
-            log.info("upload refused: %s already has %d in flight", client[:8], settings.max_uploads_per_client)
+            log.info("upload refused: %s already has %d in flight",
+                     ratelimit.log_tag(ip, settings.ip_salt), settings.max_uploads_per_client)
             await refuse("rate_limited", {"Retry-After": RETRY_AFTER_OVERLOADED})(scope, receive, send)
             return
         self.in_flight += 1

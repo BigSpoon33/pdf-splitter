@@ -638,6 +638,42 @@ def upload_scope(length: int) -> dict:
     }
 
 
+def test_the_upload_cap_refusal_logs_todays_dated_hash_not_the_undated_key(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Gate r4: the per-client refusal named the client by a prefix of `client_key`, whose salt never turns, so
+    one address read the same in every day's log (ADR-007). It now prints today's `ip_hash` prefix."""
+    settings = Settings(jobs_dir=tmp_path / "jobs", max_uploads_per_client=1)
+    ip = "203.0.113.9"
+    caplog.set_level(logging.INFO, logger="pdf_splitter.upload")
+
+    def refused_at(day: datetime) -> str:
+        monkeypatch.setattr(ratelimit, "utcnow", lambda: day)
+        caplog.clear()
+        sink, sent = Sink(), []
+
+        async def send(message):
+            sent.append(message)
+
+        async def receive():
+            raise AssertionError("a refused upload is never read")
+
+        guard = upload.UploadGuard(sink, settings)
+        guard.per_client[ratelimit.client_key(ip)] = 1
+        asyncio.run(guard(upload_scope(1000), receive, send))
+        assert [m["status"] for m in sent if m["type"] == "http.response.start"] == [429]
+        [line] = [r.getMessage() for r in caplog.records]
+        return line
+
+    days = [datetime(2026, 9, 28, 23, 59, tzinfo=UTC), datetime(2026, 9, 29, 0, 1, tzinfo=UTC)]
+    lines = [refused_at(day) for day in days]
+    for line, day in zip(lines, days, strict=True):
+        assert line.isascii() and line.isprintable()
+        assert ratelimit.ip_hash(ip, day)[:8] in line
+        assert ratelimit.client_key(ip)[:8] not in line
+    assert lines[0] != lines[1]
+
+
 def test_an_admitted_upload_streams_through_the_servers_own_receive_however_slowly(tmp_path: Path) -> None:
     """Gate r3 (round 3 finding 1): the watchdog's `wait_for(receive(), …)` cancelled reads that are not
     cancel-safe and lost chunks of genuine uploads. Now the guard hands the app the very `receive` it was
