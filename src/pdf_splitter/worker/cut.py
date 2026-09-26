@@ -11,15 +11,20 @@ the same file names and manifest shape, so the ZIP, the manifest route and the S
 Both paths write under an output budget (STORY-012): the bytes in `work/` are measured after every section and
 the cut stops with `OutputTooLarge` — its files removed, the previous `result.zip` untouched — the moment they
 pass it. Spans may overlap and sections may be the whole book, so nothing else bounds what a plan can write.
+The budget sits under the sandbox's RLIMIT_FSIZE with room for the ZIP, and a write the sandbox refuses anyway
+(EFBIG) is the same failure to the visitor, cleaned up the same way.
 """
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import re
 import unicodedata
 import zipfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +33,7 @@ from monograph_splitter.profile import profile_from_dict
 from monograph_splitter.session import MANIFEST_NAME, OVERRIDES_NAME, Book
 
 from .analyze import Progress
+from .sandbox import FSIZE_BYTES
 
 ENGINE_NAME_BYTES = 80
 ZIP_NAME_CHARS = 120
@@ -36,9 +42,12 @@ MSG_PREPARING = "Preparing the book"
 MSG_CUTTING = "Cutting sections"
 MSG_PACKAGING = "Packaging the sections"
 # The budget is ~10× the upload, never under the floor (a small book whose every section re-embeds its fonts is
-# honest work) and never over `Settings.max_output_bytes`.
+# honest work) and never over `Settings.max_output_bytes` or the ceiling: the ZIP of the sections must still fit
+# the task's RLIMIT_FSIZE (one file), and it is the sections stored plus the manifest and the entry headers.
 OUTPUT_MULTIPLIER = 10
 OUTPUT_FLOOR = 256 * 1024 * 1024
+ZIP_MARGIN = 64 * 1024 * 1024
+OUTPUT_CEILING = FSIZE_BYTES - ZIP_MARGIN
 
 
 class OutputTooLarge(Exception):
@@ -46,7 +55,7 @@ class OutputTooLarge(Exception):
 
 
 def output_budget(max_output_bytes: int, upload_bytes: int) -> int:
-    return min(max_output_bytes, max(OUTPUT_MULTIPLIER * upload_bytes, OUTPUT_FLOOR))
+    return min(max_output_bytes, OUTPUT_CEILING, max(OUTPUT_MULTIPLIER * upload_bytes, OUTPUT_FLOOR))
 
 
 def written_bytes(work: Path) -> int:
@@ -104,6 +113,23 @@ def _reset_outputs(work: Path) -> None:
         stale.unlink(missing_ok=True)
 
 
+@contextmanager
+def _within_budget(work: Path) -> Iterator[None]:
+    """Too much output, whether the budget said so or the sandbox did (a section or the ZIP hitting
+    RLIMIT_FSIZE fails with EFBIG — Python ignores SIGXFSZ): the sections go, `OutputTooLarge` comes out. Anything
+    else the sandbox refuses keeps its own code."""
+    try:
+        yield
+    except OutputTooLarge:
+        _reset_outputs(work)
+        raise
+    except OSError as e:
+        if e.errno != errno.EFBIG:
+            raise
+        _reset_outputs(work)
+        raise OutputTooLarge(FSIZE_BYTES) from e
+
+
 def cut_book(
     job_dir: Path, plan: dict[str, Any], progress: Progress, limit: int | None = None
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -123,12 +149,10 @@ def cut_book(
 
     book = Book.open(pdf=job_dir / "source.pdf", out=work, profile=prof, entries=entries, log=_silent)
     try:
-        for key, override in plan.get("overrides", {}).items():
-            book.set_override(entries[int(key)]["name"], override)
-        result = book.cut_all(progress=tick, verify=True)
-    except OutputTooLarge:
-        _reset_outputs(work)
-        raise
+        with _within_budget(work):
+            for key, override in plan.get("overrides", {}).items():
+                book.set_override(entries[int(key)]["name"], override)
+            result = book.cut_all(progress=tick, verify=True)
     finally:
         book.close()
     written = {row["formula"]: row for row in result["written"]}
@@ -155,34 +179,32 @@ def cut_ranges(
     rows: list[dict[str, Any]] = []
     src = pymupdf.open(job_dir / "source.pdf")
     try:
-        for i, section in enumerate(sections):
-            name = engine_name(i, section["name"])
-            dest = work / f"{name}.pdf"
-            page, end_page = section["page"], section["endPage"]
-            out = pymupdf.open()
-            try:
-                # 1-based inclusive sheets (ADR-003) → PyMuPDF's 0-based inclusive pair.
-                out.insert_pdf(src, from_page=page - 1, to_page=end_page - 1)
-                out.save(dest, garbage=4, deflate=True)
-            finally:
-                out.close()
-            budget.check()
-            rows.append({
-                "formula": name,
-                "file": zip_entry(i, section["name"]),
-                "printedPages": [page, end_page],
-                "pageCount": end_page - page + 1,
-                "flags": [],
-                "notes": [],
-                "leaks": [],
-                "bytes": dest.stat().st_size,
-                "index": i,
-                "name": section["name"],
-            })
-            progress(i + 1, total, MSG_CUTTING)
-    except OutputTooLarge:
-        _reset_outputs(work)
-        raise
+        with _within_budget(work):
+            for i, section in enumerate(sections):
+                name = engine_name(i, section["name"])
+                dest = work / f"{name}.pdf"
+                page, end_page = section["page"], section["endPage"]
+                out = pymupdf.open()
+                try:
+                    # 1-based inclusive sheets (ADR-003) → PyMuPDF's 0-based inclusive pair.
+                    out.insert_pdf(src, from_page=page - 1, to_page=end_page - 1)
+                    out.save(dest, garbage=4, deflate=True)
+                finally:
+                    out.close()
+                budget.check()
+                rows.append({
+                    "formula": name,
+                    "file": zip_entry(i, section["name"]),
+                    "printedPages": [page, end_page],
+                    "pageCount": end_page - page + 1,
+                    "flags": [],
+                    "notes": [],
+                    "leaks": [],
+                    "bytes": dest.stat().st_size,
+                    "index": i,
+                    "name": section["name"],
+                })
+                progress(i + 1, total, MSG_CUTTING)
     finally:
         src.close()
     return rows, {"written": rows, "missing": [], "unknown": [], "leaks": {}}
@@ -202,3 +224,10 @@ def write_zip(path: Path, work: Path, rows: list[dict[str, Any]]) -> None:
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise
+
+
+def package(job_dir: Path, rows: list[dict[str, Any]]) -> None:
+    """`write_zip` for the cut task: a ZIP the sandbox refuses is the cut's output being too large, not a
+    resource failure — the visitor is told to split into fewer or smaller sections, and no section stays."""
+    with _within_budget(job_dir / "work"):
+        write_zip(job_dir / "result.zip", job_dir / "work", rows)

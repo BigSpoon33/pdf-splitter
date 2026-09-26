@@ -25,6 +25,7 @@ from .common import (
     require_analyzed,
     require_editable,
     saved_plan,
+    vanished,
 )
 
 router = APIRouter()
@@ -89,7 +90,15 @@ def put_plan(
     except ValidationError as e:
         raise invalid(e) from None
     data = plan.dump()
-    write_json(job_dir(settings, job) / "plan.json", data)
+    try:
+        write_json(job_dir(settings, job) / "plan.json", data)
+    except FileNotFoundError:
+        # The directory went while the plan was validated: a DELETE (or the janitor) landed, and the row says
+        # so — the 410 that DELETE earned. A live job whose directory is gone is a server fault, and stays one.
+        err = vanished(store, settings, job)
+        if err.status != 410:
+            raise
+        raise err from None
     if job["state"] in ("done", "failed"):
         # The saved outputs no longer match the plan (they stay downloadable until the next cut replaces them),
         # and a failed cut's reason has been acted on: either way the job is back in review.

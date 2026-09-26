@@ -27,7 +27,9 @@ class Settings(BaseSettings):
     # The secret under the daily-rotating IP hash (ADR-007). Unset, each api process draws its own at start, which
     # is fine for the one uvicorn process the CLI runs; several processes must share one so the window is shared.
     ip_salt: str | None = None
-    # The ceiling on what one cut may write; the per-job budget is this or ~10× the upload, whichever is smaller.
+    # The ceiling on what one cut may write; the per-job budget is this or ~10× the upload, whichever is smaller,
+    # and never more than the task's RLIMIT_FSIZE less room for the ZIP (worker/cut.py `OUTPUT_CEILING`), so a
+    # setting this high is the sandbox's 1 GiB − 64 MiB in practice.
     max_output_bytes: int = 2 * 1024 * MB
     analyze_timeout: int = 300
     cut_timeout: int = 600

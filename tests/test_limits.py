@@ -6,6 +6,7 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+import threading
 from collections import namedtuple
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -96,19 +97,127 @@ def test_ip_hash_is_salted_shared_by_secret_and_rotates_daily() -> None:
     assert ratelimit.ip_hash("198.51.100.7", T0) != a
 
 
+def slot(store: Store, hashes: list[str], limit: int, now: datetime) -> int | None:
+    return store.take_rate_slot(hashes, since=now - ratelimit.WINDOW, limit=limit, now=now)
+
+
+def rate_rows(store: Store) -> list[tuple[str, str]]:
+    return [tuple(r) for r in store.conn.execute("SELECT ip_hash, at FROM rate ORDER BY at, rowid")]
+
+
 def test_rate_window_slides_and_says_how_long_to_wait(store: Store) -> None:
-    h = "hash-a"
+    """`Store.take_rate_slot`: a slot taken (None, and a row) or the wait until the oldest counted hit leaves."""
+    h = ["hash-a"]
     for i in range(6):
-        ratelimit.record(store, h, T0 + timedelta(minutes=i))                 # 12:00 … 12:05
-    assert ratelimit.retry_after(store, h, 6, T0 + timedelta(minutes=10)) == 50 * 60
-    assert ratelimit.retry_after(store, h, 6, T0 + timedelta(minutes=59, seconds=59)) == 1
-    assert ratelimit.retry_after(store, h, 6, T0 + timedelta(hours=1)) is None        # 12:00 has left the window
-    assert ratelimit.retry_after(store, h, 7, T0 + timedelta(minutes=10)) is None
-    assert ratelimit.retry_after(store, "hash-b", 6, T0 + timedelta(minutes=10)) is None
-    # Another hit at 13:00 refills the window: the wait is until the OLDEST of the six in it (12:01) is out.
-    ratelimit.record(store, h, T0 + timedelta(hours=1))
-    assert ratelimit.retry_after(store, h, 6, T0 + timedelta(hours=1, seconds=1)) == 59
-    assert ratelimit.retry_after(store, h, 6, T0 + timedelta(hours=1, minutes=1)) is None
+        assert slot(store, h, 6, T0 + timedelta(minutes=i)) is None                 # 12:00 … 12:05
+    assert slot(store, h, 6, T0 + timedelta(minutes=10)) == 50 * 60
+    assert slot(store, h, 6, T0 + timedelta(minutes=59, seconds=59)) == 1
+    assert len(rate_rows(store)) == 6                                              # a refusal records nothing
+    assert slot(store, ["hash-b"], 6, T0 + timedelta(minutes=10)) is None
+    assert slot(store, h, 6, T0 + timedelta(hours=1)) is None                      # 12:00 has left the window
+    # The 13:00 hit refilled the window: the wait is until the OLDEST of the six in it (12:01) is out.
+    assert slot(store, h, 6, T0 + timedelta(hours=1, seconds=1)) == 59
+    assert slot(store, h, 6, T0 + timedelta(hours=1, minutes=1)) is None
+
+
+def test_the_slot_is_taken_atomically_so_a_burst_from_one_client_gets_exactly_the_limit(tmp_path: Path) -> None:
+    """Gate r1 finding 1: the count and the record were two statements, and parallel uploads from one client
+    all read a window with room. Twelve stores (one per thread, like the api's per-request stores) released
+    together by a barrier at limit 6: six slots, six refusals, six rows."""
+    path = tmp_path / "jobs.db"
+    Store(path).init()
+    n, barrier = 12, threading.Barrier(12)
+    results: list[int | None] = []
+    lock = threading.Lock()
+
+    def attempt() -> None:
+        s = Store(path)
+        try:
+            barrier.wait()
+            r = slot(s, ["hash-a"], 6, T0)
+        finally:
+            s.close()
+        with lock:
+            results.append(r)
+
+    threads = [threading.Thread(target=attempt) for _ in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(30)
+    assert results.count(None) == 6 and len(results) == n
+    assert all(r == 3600 for r in results if r is not None)
+    s = Store(path)
+    try:
+        assert len(rate_rows(s)) == 6
+    finally:
+        s.close()
+
+
+def test_parallel_uploads_from_one_client_get_exactly_the_limit(settings: Settings) -> None:
+    """The same burst through `POST /api/jobs` (the review saw 10/10 accepted at limit 6): six 201s, six 429s,
+    six job directories."""
+    n, barrier = 12, threading.Barrier(12)
+    statuses: list[int] = []
+    lock = threading.Lock()
+    with TestClient(create_app(settings)) as client:
+
+        def attempt() -> None:
+            barrier.wait()
+            r = post(client, pdf_bytes())
+            with lock:
+                statuses.append(r.status_code)
+
+        threads = [threading.Thread(target=attempt) for _ in range(n)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(60)
+    assert sorted(statuses) == [201] * 6 + [429] * 6
+    assert job_count(settings) == 6 and len(job_dirs(settings)) == 6
+
+
+def test_window_hashes_reach_into_yesterday_only_during_the_first_hour() -> None:
+    day = datetime(2026, 9, 26, 0, 0, 0, tzinfo=UTC)
+    today, yesterday = ratelimit.ip_hash("ip", day, "s"), ratelimit.ip_hash("ip", day - timedelta(days=1), "s")
+    assert today != yesterday
+    assert ratelimit.window_hashes("ip", day, "s") == [today, yesterday]
+    assert ratelimit.window_hashes("ip", day + timedelta(minutes=59, seconds=59), "s") == [today, yesterday]
+    assert ratelimit.window_hashes("ip", day + timedelta(hours=1), "s") == [today]
+    assert ratelimit.window_hashes("ip", day - timedelta(seconds=1), "s") == [yesterday]
+
+
+def test_the_window_survives_midnight(settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Gate r1 finding 2: the window was looked up under today's hash only, so it emptied at 00:00 UTC. On a
+    frozen clock at `rate_per_hour=2`: an upload at 23:55, one at 00:06 (recorded under the NEW day's hash),
+    and the third at 00:07 is 429 until the 23:55 hit is an hour old."""
+    clock = {"now": datetime(2026, 9, 25, 23, 55, 0, tzinfo=UTC)}
+    monkeypatch.setattr(ratelimit, "utcnow", lambda: clock["now"])
+    limited = settings.model_copy(update={"rate_per_hour": 2})
+    with TestClient(create_app(limited)) as client:
+        first = post(client, pdf_bytes())
+        assert first.status_code == 201
+        clock["now"] = datetime(2026, 9, 26, 0, 6, 0, tzinfo=UTC)
+        second = post(client, pdf_bytes())
+        assert second.status_code == 201
+        clock["now"] = datetime(2026, 9, 26, 0, 7, 0, tzinfo=UTC)
+        r = post(client, pdf_bytes())
+        assert r.status_code == 429, r.text
+        assert int(r.headers["retry-after"]) == 48 * 60
+        clock["now"] = datetime(2026, 9, 26, 0, 54, 59, tzinfo=UTC)
+        r = post(client, pdf_bytes())
+        assert r.status_code == 429 and r.headers["retry-after"] == "1"
+        clock["now"] = datetime(2026, 9, 26, 0, 55, 0, tzinfo=UTC)                  # 23:55 is exactly an hour old
+        assert post(client, pdf_bytes()).status_code == 201
+    store = Store(settings.db_path)
+    try:
+        rows = rate_rows(store)
+        hashes = {store.get_job(r.json()["id"])["ip_hash"] for r in (first, second)}
+    finally:
+        store.close()
+    assert [at for _, at in rows] == ["2026-09-25T23:55:00+00:00", "2026-09-26T00:06:00+00:00", "2026-09-26T00:55:00+00:00"]
+    assert len(hashes) == 2 and [h for h, _ in rows] == [rows[0][0], rows[1][0], rows[1][0]]    # the salt turned once
+    assert job_count(settings) == 3
 
 
 def test_seventh_upload_in_an_hour_is_429_with_retry_after(tmp_path: Path) -> None:

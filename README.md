@@ -83,7 +83,7 @@ All settings are environment variables with the `PDFSPLIT_` prefix (`src/pdf_spl
 | `PDFSPLIT_MIN_FREE_GB` | `2` | uploads are refused (503 `disk_full`) below this much free space on the jobs volume (decimal GB) |
 | `PDFSPLIT_TRUSTED_PROXY` | unset | the one peer address whose `X-Forwarded-For` (last hop) names the client; unset, the peer is the client |
 | `PDFSPLIT_IP_SALT` | unset | secret under the daily-rotating IP hash; set it when more than one api process shares `jobs.db` |
-| `PDFSPLIT_MAX_OUTPUT_BYTES` | `2147483648` | ceiling on what one cut may write (the budget is this or 10× the upload, whichever is smaller, never under 256 MB) |
+| `PDFSPLIT_MAX_OUTPUT_BYTES` | `2147483648` | ceiling on what one cut may write (the budget is this or 10× the upload, whichever is smaller, never under 256 MB, never over the sandbox's 1 GiB file limit less 64 MiB for the ZIP — so the default lands on 960 MiB) |
 | `PDFSPLIT_ANALYZE_TIMEOUT` | `300` | analyze job wall-clock limit, seconds |
 | `PDFSPLIT_CUT_TIMEOUT` | `600` | cut job wall-clock limit, seconds |
 | `PDFSPLIT_PUBLIC_URL` | `http://localhost:8000` | the site's public base URL |

@@ -128,9 +128,20 @@ def test_cut_book_reuses_the_analyze_index_and_leaves_stale_outputs_behind(
 def test_output_budget_is_ten_uploads_within_a_floor_and_the_ceiling() -> None:
     mb = 1024 * 1024
     assert output_budget(2048 * mb, 1 * mb) == cut.OUTPUT_FLOOR                # a small book gets the floor
-    assert output_budget(2048 * mb, 100 * mb) == 1000 * mb                     # 10× the upload
-    assert output_budget(2048 * mb, 300 * mb) == 2048 * mb                     # never past the ceiling
+    assert output_budget(2048 * mb, 50 * mb) == 500 * mb                       # 10× the upload
+    assert output_budget(4096 * mb, 300 * mb) == cut.OUTPUT_CEILING            # never past the ceiling
+    assert output_budget(512 * mb, 300 * mb) == 512 * mb                       # a lower setting still wins
     assert output_budget(300_000, 100 * mb) == 300_000                         # a test-sized ceiling wins
+
+
+def test_output_budget_never_exceeds_the_sandbox_file_limit() -> None:
+    """Gate r1 finding 3: the budget reached ~2 GiB while the task's RLIMIT_FSIZE is 1 GiB, so the ZIP of a
+    cut within budget hit EFBIG. The ceiling is the sandbox's constant less room for the ZIP — one source."""
+    assert cut.OUTPUT_CEILING == sandbox.FSIZE_BYTES - cut.ZIP_MARGIN < sandbox.FSIZE_BYTES
+    for setting, upload in ((2 * 1024**3, 200 * 1024**2), (2**62, 2**40), (Settings().max_output_bytes, 1)):
+        assert output_budget(setting, upload) <= cut.OUTPUT_CEILING
+    # The ceiling is what the default settings and any real upload land on: the setting no longer decides.
+    assert output_budget(Settings().max_output_bytes, 200 * 1024**2) == cut.OUTPUT_CEILING
 
 
 def test_cut_book_stops_at_the_budget_and_leaves_no_section_behind(settings: Settings, analyzed_template: Path) -> None:
@@ -220,6 +231,56 @@ def test_write_zip_removes_a_tmp_cut_short_by_rlimit_fsize(settings: Settings, a
     assert classify(proc.returncode, proc.stdout) == "resources"
     assert not tmp.exists() and not list(job_dir.glob("*.tmp"))
     assert out.read_bytes() == b"previous"
+
+
+def test_a_zip_the_sandbox_refuses_is_too_large_output_and_leaves_no_section(
+    settings: Settings, analyzed_template: Path
+) -> None:
+    """Gate r1 finding 3, the cut's own packaging: the same EFBIG through `package` is the output being too
+    large — `too_large_output`, the sections gone from `work/`, the `.tmp` gone, the previous result kept."""
+    job_dir = seed_job(settings, analyzed_template, DASH_ID)
+    rows, _ = cut_book(job_dir, read_json(job_dir / "plan.json"), lambda *_: None)
+    assert len(list((job_dir / "work").glob("*.pdf"))) == 3
+    out = job_dir / "result.zip"
+    out.write_bytes(b"previous")
+    code = (
+        GUARDED + "import json; from pathlib import Path; from pdf_splitter.worker.cut import package; "
+        f"rows = json.loads({json.dumps(rows)!r}); "
+        f"sys.exit(guarded(lambda: (package(Path({str(job_dir)!r}), rows), True)[1]))"
+    )
+    cmd = sandbox.command({**sandbox.limits(10), "fsize": 4096}, ["-c", code])
+    proc = subprocess.run(cmd, capture_output=True, check=False, stdin=subprocess.DEVNULL, timeout=60)
+    assert classify(proc.returncode, proc.stdout) == "too_large_output", proc.stderr
+    assert list((job_dir / "work").glob("*.pdf")) == [] and not list(job_dir.glob("*.tmp"))
+    assert out.read_bytes() == b"previous"
+
+
+def test_runner_fails_a_cut_whose_zip_hits_rlimit_fsize_as_too_large_output(
+    settings: Settings, wstore: Store, analyzed_template: Path
+) -> None:
+    """Through the real runner and task, `write_zip` forced to fail with EFBIG inside the sandboxed process
+    (the sections themselves fit): `failed/too_large_output` with its message, `work/` empty, no `.tmp`, the
+    previous `result.zip` kept — and the job re-cuts to `done` from `failed` like any other failed cut."""
+    job_dir = seed_job(settings, analyzed_template, DASH_ID, state="queued", kind="cut")
+    (job_dir / "result.zip").write_bytes(b"previous")
+    forced = (
+        "import errno, sys\n"
+        "from pdf_splitter.worker import cut, task\n"
+        "def refuse(*a, **kw): raise OSError(errno.EFBIG, 'File too large')\n"
+        "cut.write_zip = refuse\n"
+        "sys.exit(task.main(sys.argv[1:]))\n"
+    )
+    runner = Runner(settings, task=lambda kind, job_id: ["-c", forced, kind, "--", job_id], kinds=("cut",))
+    assert runner.run_once(wstore) is True
+    job = wstore.get_job(DASH_ID)
+    assert (job["state"], job["kind"], job["error_code"]) == ("failed", "cut", "too_large_output"), job
+    assert job["message"] == runner_mod.MESSAGES["too_large_output"]
+    assert (job_dir / "result.zip").read_bytes() == b"previous" and not list(job_dir.glob("*.tmp"))
+    assert list((job_dir / "work").glob("*.pdf")) == []
+    assert wstore.transition(DASH_ID, "failed", "queued", kind="cut", expect_kind="cut")
+    assert Runner(settings, kinds=("cut",)).run_once(wstore) is True
+    assert (wstore.get_job(DASH_ID)["state"], wstore.get_job(DASH_ID)["error_code"]) == ("done", None)
+    assert zipfile.ZipFile(job_dir / "result.zip").namelist()[-1] == cut.MANIFEST
 
 
 # ── run_cut / the task / the runner ──────────────────────────────────────────────────────────────────

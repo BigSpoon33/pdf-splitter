@@ -114,18 +114,20 @@ def _accept(
 ) -> JSONResponse:
     if file is None:
         return reject("not_pdf")
-    # Both guards before anything touches the disk: a refused upload leaves no directory and no row. The attempt
-    # is what the window counts (a refused file still cost a copy and a preflight), so it is recorded here, before
-    # the outcome is known.
-    client = ratelimit.ip_hash(ratelimit.client_ip(request, settings.trusted_proxy), secret=settings.ip_salt)
-    wait = ratelimit.retry_after(store, client, settings.rate_per_hour)
+    # Both guards before anything touches the disk: a refused upload leaves no directory and no row. The window
+    # counts the attempt (a refused file still costs a copy and a preflight), and the slot is claimed in the same
+    # transaction that counts the window, so parallel uploads from one client can't all slip past a still-empty
+    # count. It comes first, so a slot is spent on an attempt the disk guard then refuses: a client retrying into
+    # a full disk burns its hour, which is the cheaper failure than a guard that lets a burst through.
+    client, wait = ratelimit.take_slot(
+        store, ratelimit.client_ip(request, settings.trusted_proxy), settings.rate_per_hour, secret=settings.ip_salt
+    )
     if wait is not None:
         log.info("upload refused: rate limited (%s, retry after %ds)", client[:8], wait)
         return reject("rate_limited", headers={"Retry-After": str(wait)})
     if disk_full(settings):
         log.warning("upload refused: less than %s GB free", settings.min_free_gb)
         return reject("disk_full")
-    ratelimit.record(store, client)
     job_id = new_job_id()
     job_dir = settings.jobs_dir / job_id
     part = job_dir / "source.pdf.part"

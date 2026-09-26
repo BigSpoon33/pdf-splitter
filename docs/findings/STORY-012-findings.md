@@ -3,7 +3,9 @@
 **Status:** done
 
 Commit `7e5af5e feat: STORY-012 - rate limit, disk guard, 24 h janitor and queue position` on `feature/mvp`, pushed to
-`origin` and `gitea`. Lines below are as of that commit.
+`origin` and `gitea`. Lines below are as of that commit; § Gate r1 fixes (below) is as of the fix commit
+`fix: STORY-012 - gate r1: atomic rate window across midnight, output budget fits the sandbox, PUT write race is 410`
+(`docs/findings/STORY-012-review.md` round 1, 4 confirmed).
 
 ## AC Verification
 - [x] AC-1: sliding-window rate limit — `src/pdf_splitter/ratelimit.py` (`client_ip` :24, `ip_hash` :35, `retry_after`
@@ -58,7 +60,8 @@ Commit `7e5af5e feat: STORY-012 - rate limit, disk guard, 24 h janitor and queue
   `test_worker.py::test_guarded_maps_exceptions` + `::test_classify` rows.
 
 ## Test Results
-**Command:** `uv run pytest -q` — **Result:** pass — `411 passed in 84.52s` (was 374).
+**Command:** `uv run pytest -q` — **Result:** pass — `411 passed in 84.52s` (was 374); after the gate r1 fix
+`420 passed in 90.48s`.
 **Command:** `uv run ruff check` — **Result:** pass — `All checks passed!`
 **Command:** `cd web && bun run test` — **Result:** pass — `Test Files 21 passed (21) · Tests 284 passed (284)` (was 280).
 **Command:** `cd web && bun run check` — **Result:** pass — `337 FILES 0 ERRORS 0 WARNINGS`.
@@ -97,7 +100,8 @@ Commit `7e5af5e feat: STORY-012 - rate limit, disk guard, 24 h janitor and queue
   seconds until the oldest of the `RATE_PER_HOUR` newest hits leaves, minimum 1.
 - **Salt derivation (ADR-007):** `sha256(sha256("<secret>:<UTC date>") + ip)`; secret = `PDFSPLIT_IP_SALT`, else one
   `secrets.token_hex(16)` per api process. The CLI runs ONE uvicorn process, so the default is shared by all its
-  threads; a multi-process deployment must set the variable (README, config.py). The window restarts at 00:00 UTC.
+  threads; a multi-process deployment must set the variable (README, config.py). ~~The window restarts at 00:00 UTC.~~
+  (gate r1 finding 2 — it no longer does, see § Gate r1 fixes.)
 - **Trusted-proxy rule:** `X-Forwarded-For` is read only when `request.client.host == PDFSPLIT_TRUSTED_PROXY`, and then
   its LAST hop (the one the proxy appended); anything else is client-supplied and ignored. Unset → the peer.
 - **Janitor placement:** its own daemon thread in the worker process (`Runner.serve`), own `Store`, sweep at start
@@ -105,7 +109,8 @@ Commit `7e5af5e feat: STORY-012 - rate limit, disk guard, 24 h janitor and queue
   the alternative. Orphan directories get a 1 h grace on their mtime because `upload.py` creates the directory
   BEFORE the row exists (the copy + preflight happen in between). `rate` rows are pruned once out of the window
   (nothing reads them after that), `deleted` rows after 7 days, directories always before rows.
-- **Output budget:** `min(PDFSPLIT_MAX_OUTPUT_BYTES, max(10 × upload bytes, 256 MB))`; the floor keeps a small book
+- **Output budget:** `min(PDFSPLIT_MAX_OUTPUT_BYTES, max(10 × upload bytes, 256 MB))` (gate r1: and the sandbox
+  ceiling `RLIMIT_FSIZE − 64 MiB`, see § Gate r1 fixes); the floor keeps a small book
   whose every section re-embeds its fonts from being refused. Counted as the on-disk size of `work/*.pdf` after each
   section (engine tick / PyMuPDF save), so both paths and stale files count the same; on abort `_reset_outputs`
   empties the section files (the index cache stays), the previous `result.zip` stays downloadable.
@@ -115,6 +120,61 @@ Commit `7e5af5e feat: STORY-012 - rate limit, disk guard, 24 h janitor and queue
   handle with `Content-Length`/`Content-Disposition` in Starlette's own format (the disposition test still passes).
 - **`Review.svelte` got one line** (outside the authority list, in service of addendum 3): a save from a failed cut
   calls `onsaved` like a save from `done`, so the status card shows `review` after the edit.
+
+## Gate r1 fixes
+
+Round 1 of the review (`docs/findings/STORY-012-review.md`) confirmed four findings; fixed forward in ONE commit on the
+`feature/mvp` tip. Each fix has a test that was run against a `git worktree` of `7e5af5e` with the new test files copied
+in: 8 of the 9 new tests fail there (the 9th, `test_a_plan_write_that_fails_on_a_live_job_is_still_500`, pins behaviour
+the fix must NOT change and passes on both). `uv run pytest -q` → **420 passed** (was 411), `uv run ruff check` clean.
+No web change (SPA baselines unchanged: 284 tests, 0/0 check, 109.15 kB build).
+
+1. **Atomic rate check** (finding 1, `upload.py:121-128`): `store.py:267` `Store.take_rate_slot(hashes, since=, limit=,
+   now=) -> retry_after | None` counts the window and inserts the hit in ONE `BEGIN IMMEDIATE` transaction (a refusal
+   `ROLLBACK`s, nothing recorded); `ratelimit.py:56` `take_slot(store, ip, per_hour, now=, secret=) -> (today's hash,
+   retry_after | None)` is the only caller, from `upload.py:122` `_accept`. `ratelimit.retry_after`/`record` and
+   `Store.rate_hits` are gone (they WERE the finding). **Choice documented:** the slot is claimed BEFORE the disk guard,
+   so an attempt the guard refuses (503) still spends one of the client's `RATE_PER_HOUR` — a client retrying into a
+   full disk burns its hour; the alternative (guard first) would let a burst through the guard's own window.
+   Tests `tests/test_limits.py:123` `::test_the_slot_is_taken_atomically_so_a_burst_from_one_client_gets_exactly_the_limit`
+   (12 stores on 12 threads behind a `Barrier`, limit 6 → 6 slots, 6 × 3600 s, 6 rows) and `:157`
+   `::test_parallel_uploads_from_one_client_get_exactly_the_limit` (the same burst through `POST /api/jobs` on a
+   `TestClient`: six 201s, six 429s, six directories — on `7e5af5e` it reads `At index 6 diff: 201 != 429`, the review's
+   10/10). `::test_rate_window_slides_and_says_how_long_to_wait` was rewritten around `take_rate_slot` (same semantics,
+   plus "a refusal records nothing").
+2. **Window survives midnight** (finding 2, `ratelimit.py:35-38`): `ratelimit.py:47` `window_hashes(ip, now, secret)`
+   returns today's hash, plus yesterday's while `now − 1 h` falls on the previous UTC date; `take_slot` counts under
+   both and records under today's (`hashes[0]`). `ratelimit.py:25` `utcnow()` is the api's clock for the window (the
+   one seam a test freezes; every function still takes `now`). Tests `test_limits.py:180`
+   `::test_window_hashes_reach_into_yesterday_only_during_the_first_hour`, `:190` `::test_the_window_survives_midnight`
+   (frozen clock 23:55 → 00:06 → 00:07 at `rate_per_hour=2`: the third upload is 429 with `Retry-After: 2880`, still
+   429 at 00:54:59 (`Retry-After: 1`), 201 at 00:55:00; the `rate` rows carry two hashes — the salt turned once — and
+   the two accepted jobs' `ip_hash` differ). Architecture ADR-007 "As built" no longer says the window restarts at
+   00:00 UTC; it describes the two-hash count and the atomic slot.
+3. **Budget fits the sandbox** (finding 3, `cut.py:48-49` vs `sandbox.py:20`): `cut.py:49-50` `ZIP_MARGIN` = 64 MiB,
+   `OUTPUT_CEILING = FSIZE_BYTES − ZIP_MARGIN` with `FSIZE_BYTES` IMPORTED from `worker/sandbox.py` (one constant);
+   `:57` `output_budget` = `min(setting, OUTPUT_CEILING, max(10 × upload, 256 MB))` — 960 MiB under the defaults
+   (`config.py:30-33` and the README row say so). `cut.py:117` `_within_budget(work)` (a context manager around both
+   cut paths and the packaging) maps an `OSError(EFBIG)` to `OutputTooLarge` after `_reset_outputs` — a section or
+   the ZIP the sandbox refuses is the same failure as the budget, never `resources`; `:229` `package(job_dir, rows)`
+   wraps `write_zip` with it and `task.py:106` `run_cut` calls it (`write_zip` itself is unchanged, its `.tmp` cleanup
+   and `::test_write_zip_removes_a_tmp_cut_short_by_rlimit_fsize` stand — through `guarded` alone an EFBIG is still
+   `resources`, as for the analyze task's writes). Tests `tests/test_cut.py:137`
+   `::test_output_budget_never_exceeds_the_sandbox_file_limit` (the ceiling is the sandbox constant less the margin;
+   every setting/upload pair lands at or under it), `:236` `::test_a_zip_the_sandbox_refuses_is_too_large_output_and_leaves_no_section`
+   (real EFBIG: `package` under `--fsize 4096` → `too_large_output`, `work/` has no PDF, no `.tmp`, previous ZIP kept),
+   `:258` `::test_runner_fails_a_cut_whose_zip_hits_rlimit_fsize_as_too_large_output` (the real runner + task with
+   `write_zip` forced to EFBIG inside the sandboxed process → row `failed/cut/too_large_output` with the message,
+   `work/` empty, previous ZIP kept, then re-cut to `done` from `failed`). One existing assertion changed because the
+   finding contradicts it: `::test_output_budget_is_ten_uploads_within_a_floor_and_the_ceiling`'s
+   "never past the ceiling" row now expects `OUTPUT_CEILING` (and the 10× row uses a 50 MB upload, since 1000 MiB is
+   over the ceiling). Architecture § Job states "Output budget" carries the ceiling and the EFBIG rule.
+4. **PUT /plan write race** (finding 4, `routes/plan.py:92`): `routes/plan.py:93-101` wraps the `write_json` of
+   `plan.json` — a `FileNotFoundError` re-checks the row through `vanished()`: 410 `expired` when the row is
+   deleted/gone (and any late-write directory is removed again); for a live row the original error propagates (500
+   `internal`, unchanged — a directory that vanished without a DELETE is a server fault, not the job's expiry). Tests
+   `tests/test_api_e2e.py:358` `::test_a_plan_saved_after_a_delete_is_410_not_500` (the REAL DELETE hooked after
+   `validate_plan`: 410, no directory, row `deleted`) and `:376` `::test_a_plan_write_that_fails_on_a_live_job_is_still_500`.
 
 ## Handoff Context for Next Session
 STORY-016 runs in the ENGINE repo (`~/Documents/Repos/monograph-splitter`, branch `feature/web-mode`, tip `8e52cc3`

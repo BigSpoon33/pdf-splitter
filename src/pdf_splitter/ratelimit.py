@@ -2,13 +2,14 @@
 
 The salt is `sha256(secret, UTC date)`: the same for every api thread and process that shares the secret, a
 different one every day, so a hash in `jobs.ip_hash` or `rate` links to nothing after that day and never to the
-raw address. Every function takes `now`, so the tests never sleep.
+raw address. The window does not care about the date: in the first hour of a UTC day it also counts the hits
+recorded under yesterday's hash, so the salt turning never empties anyone's window. Every function takes `now`,
+so the tests never sleep.
 """
 
 from __future__ import annotations
 
 import hashlib
-import math
 import secrets
 from datetime import UTC, datetime, timedelta
 
@@ -19,6 +20,11 @@ from .store import Store
 WINDOW = timedelta(hours=1)
 # Drawn once per process: the default when `PDFSPLIT_IP_SALT` is unset (see config.py for the multi-process caveat).
 _PROCESS_SECRET = secrets.token_hex(16)
+
+
+def utcnow() -> datetime:
+    """The api's clock for the window; a test freezes it here."""
+    return datetime.now(UTC)
 
 
 def client_ip(request: Request, trusted_proxy: str | None) -> str:
@@ -33,20 +39,26 @@ def client_ip(request: Request, trusted_proxy: str | None) -> str:
 
 
 def ip_hash(ip: str, now: datetime | None = None, secret: str | None = None) -> str:
-    day = (now or datetime.now(UTC)).astimezone(UTC).date().isoformat()
+    day = (now or utcnow()).astimezone(UTC).date().isoformat()
     salt = hashlib.sha256(f"{secret or _PROCESS_SECRET}:{day}".encode()).digest()
     return hashlib.sha256(salt + ip.encode()).hexdigest()
 
 
-def retry_after(store: Store, ip_hash: str, per_hour: int, now: datetime | None = None) -> int | None:
-    """None when another upload may go now; else the whole seconds until the oldest hit leaves the window."""
-    now = now or datetime.now(UTC)
-    hits = store.rate_hits(ip_hash, since=now - WINDOW)
-    if len(hits) < per_hour:
-        return None
-    oldest = datetime.fromisoformat(hits[len(hits) - per_hour])
-    return max(1, math.ceil((oldest + WINDOW - now).total_seconds()))
+def window_hashes(ip: str, now: datetime, secret: str | None = None) -> list[str]:
+    """Today's hash first (new hits are recorded under it), then yesterday's while the sliding hour still
+    reaches back into yesterday: the hits a client made before midnight keep counting until they are an hour old."""
+    hashes = [ip_hash(ip, now, secret)]
+    if (now - WINDOW).astimezone(UTC).date() != now.astimezone(UTC).date():
+        hashes.append(ip_hash(ip, now - WINDOW, secret))
+    return hashes
 
 
-def record(store: Store, ip_hash: str, now: datetime | None = None) -> None:
-    store.add_rate(ip_hash, now)
+def take_slot(
+    store: Store, ip: str, per_hour: int, *, now: datetime | None = None, secret: str | None = None
+) -> tuple[str, int | None]:
+    """Claim one of the client's `per_hour` slots in the sliding hour, atomically (`Store.take_rate_slot`).
+    Returns today's hash of the client (the `jobs.ip_hash` value) and None, or the whole seconds until a slot
+    frees up when none was."""
+    now = now or utcnow()
+    hashes = window_hashes(ip, now, secret)
+    return hashes[0], store.take_rate_slot(hashes, since=now - WINDOW, limit=per_hour, now=now)

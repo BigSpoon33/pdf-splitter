@@ -24,7 +24,7 @@ from ..config import Settings
 from ..files import read_json, read_mode, write_json
 from ..store import Store
 from .analyze import MUPDF_ERRORS, analyze, default_plan, ranges_plan
-from .cut import MSG_PACKAGING, OutputTooLarge, cut_book, cut_ranges, output_budget, write_zip
+from .cut import MSG_PACKAGING, OutputTooLarge, cut_book, cut_ranges, output_budget, package
 
 PROGRESS_INTERVAL_S = 0.5
 EXIT_INTERNAL = 1
@@ -103,7 +103,7 @@ def run_cut(settings: Settings, job_id: str, store: Store) -> bool:
     if row is None or row["state"] != "running":
         return False
     throttle(len(rows), len(rows), MSG_PACKAGING)
-    write_zip(job_dir / "result.zip", job_dir / "work", rows)
+    package(job_dir, rows)
     return store.transition(job_id, "running", "done")
 
 

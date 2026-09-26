@@ -7,6 +7,7 @@ import contextlib
 import io
 import json
 import logging
+import shutil
 import subprocess
 import sys
 import zipfile
@@ -29,6 +30,7 @@ from pdf_splitter.config import Settings
 from pdf_splitter.files import read_json
 from pdf_splitter.routes import common as common_routes
 from pdf_splitter.routes import download as download_routes
+from pdf_splitter.routes import plan as plan_routes
 from pdf_splitter.routes import preview as preview_routes
 from pdf_splitter.routes.plan import seconds_left
 from pdf_splitter.store import Store, log_id
@@ -351,6 +353,42 @@ def test_put_plan_from_done_returns_the_job_to_review(settings: Settings, analyz
         assert client.get(f"/api/jobs/{DASH_ID}").json()["state"] == "review"
         # Old outputs stay downloadable until the next cut replaces them.
         assert client.get(f"/api/jobs/{DASH_ID}/result.zip").content == b"old zip"
+
+
+def test_a_plan_saved_after_a_delete_is_410_not_500(
+    settings: Settings, seeded: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Gate r1 finding 4: the real DELETE lands after the body validated and before `plan.json` is written —
+    the write finds no directory, and the answer is the 410 the DELETE earned, with nothing brought back."""
+    real_validate = plan_routes.validate_plan
+
+    def validate_then_delete(*a, **kw):
+        plan = real_validate(*a, **kw)
+        delete_now(settings)
+        return plan
+
+    monkeypatch.setattr(plan_routes, "validate_plan", validate_then_delete)
+    with api(settings) as client:
+        assert_error(client.put(f"/api/jobs/{DASH_ID}/plan", json=plan_with()), 410, "expired")
+    assert not seeded.exists() and row(settings, DASH_ID)["state"] == "deleted"
+
+
+def test_a_plan_write_that_fails_on_a_live_job_is_still_500(
+    settings: Settings, seeded: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same write path with the row untouched: a directory that vanished without a DELETE is a server
+    fault, not the job's expiry."""
+    real_validate = plan_routes.validate_plan
+
+    def validate_then_lose_the_directory(*a, **kw):
+        plan = real_validate(*a, **kw)
+        shutil.rmtree(seeded)
+        return plan
+
+    monkeypatch.setattr(plan_routes, "validate_plan", validate_then_lose_the_directory)
+    with TestClient(create_app(settings), raise_server_exceptions=False) as client:
+        assert_error(client.put(f"/api/jobs/{DASH_ID}/plan", json=plan_with()), 500, "internal")
+    assert row(settings, DASH_ID)["state"] == "review"
 
 
 # ── POST /cut ──────────────────────────────────────────────────────────────────────────────────────────

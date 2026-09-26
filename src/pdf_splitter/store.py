@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import math
 import secrets
 import sqlite3
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -262,12 +264,32 @@ class Store:
     def add_rate(self, ip_hash: str, now: datetime | None = None) -> None:
         self.conn.execute("INSERT INTO rate (ip_hash, at) VALUES (?, ?)", (ip_hash, now_ts(now)))
 
-    def rate_hits(self, ip_hash: str, since: datetime) -> list[str]:
-        """The hits of one hash after `since` (a hit exactly a window old has left it), oldest first."""
-        rows = self.conn.execute(
-            "SELECT at FROM rate WHERE ip_hash = ? AND at > ? ORDER BY at", (ip_hash, now_ts(since))
-        ).fetchall()
-        return [r["at"] for r in rows]
+    def take_rate_slot(
+        self, hashes: Sequence[str], *, since: datetime, limit: int, now: datetime | None = None
+    ) -> int | None:
+        """Count the hits under any of `hashes` after `since` (a hit exactly that old has left the window) and,
+        while there are fewer than `limit`, record one under `hashes[0]` — the count and the insert in ONE write
+        transaction, so parallel uploads from one client can't each read a window with room in it and all get
+        through. None when the slot was taken; else the whole seconds until the oldest of the `limit` newest
+        hits leaves the window."""
+        conn = self.conn
+        marks = ",".join("?" * len(hashes))
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            rows = conn.execute(
+                f"SELECT at FROM rate WHERE ip_hash IN ({marks}) AND at > ? ORDER BY at",
+                (*hashes, now_ts(since)),
+            ).fetchall()
+            if len(rows) >= limit:
+                conn.execute("ROLLBACK")
+                oldest = datetime.fromisoformat(rows[len(rows) - limit]["at"])
+                return max(1, math.ceil((oldest - since).total_seconds()))
+            conn.execute("INSERT INTO rate (ip_hash, at) VALUES (?, ?)", (hashes[0], now_ts(now)))
+            conn.execute("COMMIT")
+        except BaseException:
+            conn.execute("ROLLBACK")
+            raise
+        return None
 
     def prune_rate(self, before: datetime) -> int:
         return self.conn.execute("DELETE FROM rate WHERE at < ?", (now_ts(before),)).rowcount
