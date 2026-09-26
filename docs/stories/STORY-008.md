@@ -1,6 +1,6 @@
 # STORY-008: SPA: scaffold, drop zone, job status
 
-> **Status:** Pending
+> **Status:** Done (2026-09-25)
 > **Size:** S
 > **Date:** 2026-09-25
 > **Architecture ref:** `docs/Architecture.md#web (SPA)`
@@ -28,11 +28,11 @@ First visible product.
 
 ## Acceptance Criteria
 
-- [ ] AC-1: `web/` is a Vite + Svelte + TS app; `bun install && bun run dev` proxies `/api` to :8000; `bun run build` emits static files; `bun run check` (svelte-check) clean
-- [ ] AC-2: DropZone accepts drag-drop and click-to-pick, prechecks `.pdf`/type and `MAX_BYTES` client-side, shows upload % (XHR progress)
-- [ ] AC-3: After upload the URL becomes `/j/<id>`; JobStatus polls every 1.5 s while queued/running and shows state, queue position, and `progress/total`; reloading `/j/<id>` resumes
-- [ ] AC-4: API error codes map to human messages (a single `errors.ts` table covering every code in Architecture)
-- [ ] AC-5: Component tests (vitest + @testing-library/svelte) for DropZone precheck and the error table
+- [x] AC-1: `web/` is a Vite + Svelte + TS app; `bun install && bun run dev` proxies `/api` to :8000; `bun run build` emits static files; `bun run check` (svelte-check) clean
+- [x] AC-2: DropZone accepts drag-drop and click-to-pick, prechecks `.pdf`/type and `MAX_BYTES` client-side, shows upload % (XHR progress)
+- [x] AC-3: After upload the URL becomes `/j/<id>`; JobStatus polls every 1.5 s while queued/running and shows state, queue position, and `progress/total`; reloading `/j/<id>` resumes
+- [x] AC-4: API error codes map to human messages (a single `errors.ts` table covering every code in Architecture)
+- [x] AC-5: Component tests (vitest + @testing-library/svelte) for DropZone precheck and the error table
 
 ---
 
@@ -96,10 +96,10 @@ feat: STORY-008 - SPA scaffold with drop zone and live job status
 
 ## Status
 
-**Pending**
+**Done** (2026-09-25)
 
-- [ ] AC-1
-- [ ] AC-2
-- [ ] AC-3
-- [ ] AC-4
-- [ ] AC-5
+- [x] AC-1
+- [x] AC-2
+- [x] AC-3
+- [x] AC-4
+- [x] AC-5

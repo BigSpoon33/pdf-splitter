@@ -1,0 +1,144 @@
+# The whole stack (Architecture ADR-008): caddy (TLS, the SPA, /api proxy) → api → worker, one `jobs` volume.
+#   docker compose -p pdfsplit -f deploy/compose.yaml up -d --build
+# Interpolated variables come from deploy/.env (see deploy/.env.example) or the environment; PDFSPLIT_IP_SALT
+# has no default on purpose. The fixed project name keeps a bare `docker compose` from defaulting to the
+# directory name ("deploy"), which other stacks on a shared host may already use.
+#
+# Two networks (gate r1): `edge` is where caddy publishes 80/443 and reaches the ACME servers; `backend` is
+# `internal` — caddy and the api, no route out — so the api (which opens uploads in a subprocess, ADR-005) can
+# reach nothing but caddy's replies. The worker has no network at all. Both carry IPv6 (a ULA /64): a v6
+# visitor is then DNAT'd to caddy's own v6 address and forwarded as their real address, instead of every v6
+# visitor arriving from the bridge gateway and sharing one rate bucket.
+name: pdfsplit
+
+x-pdfsplit-env: &pdfsplit-env
+  PDFSPLIT_JOBS_DIR: /jobs
+  PDFSPLIT_WORKERS: ${PDFSPLIT_WORKERS:-2}
+  PDFSPLIT_RATE_PER_HOUR: ${PDFSPLIT_RATE_PER_HOUR:-6}
+  PDFSPLIT_MAX_BYTES: ${PDFSPLIT_MAX_BYTES:-209715200}
+  PDFSPLIT_TTL_HOURS: ${PDFSPLIT_TTL_HOURS:-24}
+  PDFSPLIT_MIN_FREE_GB: ${PDFSPLIT_MIN_FREE_GB:-2}
+  PDFSPLIT_MAX_UPLOADS: ${PDFSPLIT_MAX_UPLOADS:-4}
+  PDFSPLIT_LIMIT_CONCURRENCY: ${PDFSPLIT_LIMIT_CONCURRENCY:-64}
+  # Gates r2/r3: one client's share of the upload slots and of the JSON bodies in flight, and the bound on a
+  # JSON body. How long an UPLOAD may take is caddy's READ_BODY_TIMEOUT below, not the api's.
+  PDFSPLIT_MAX_UPLOADS_PER_CLIENT: ${PDFSPLIT_MAX_UPLOADS_PER_CLIENT:-2}
+  PDFSPLIT_MAX_JSON_BYTES: ${PDFSPLIT_MAX_JSON_BYTES:-4194304}
+  PDFSPLIT_BODY_TIMEOUT: ${PDFSPLIT_BODY_TIMEOUT:-20}
+  PDFSPLIT_MAX_BODIES_PER_CLIENT: ${PDFSPLIT_MAX_BODIES_PER_CLIENT:-8}
+  # The api's rate window keys on this; the worker gets it too because the janitor prunes those rows.
+  PDFSPLIT_IP_SALT: ${PDFSPLIT_IP_SALT:?set PDFSPLIT_IP_SALT (deploy/.env) - the secret under the IP hash}
+  PDFSPLIT_PUBLIC_URL: ${PDFSPLIT_PUBLIC_URL:-https://localhost}
+
+x-python: &python
+  image: pdfsplit-app:${PDFSPLIT_TAG:-local}
+  build:
+    context: ..
+    target: python
+  restart: unless-stopped
+  read_only: true
+  tmpfs:
+    # Scratch only, and small: uploads spool under /jobs/.spool on the volume (upload.py `spooling_to`), so a
+    # tmpfs here can never again grow into RAM the memory limit counts.
+    - /tmp:size=64m
+  cap_drop: [ALL]
+  security_opt:
+    - no-new-privileges:true
+  logging:
+    driver: json-file
+    options: { max-size: "10m", max-file: "3" }
+
+services:
+  caddy:
+    image: pdfsplit-caddy:${PDFSPLIT_TAG:-local}
+    build:
+      context: ..
+      target: caddy
+    restart: unless-stopped
+    ports:
+      - "${PDFSPLIT_HTTP_PORT:-80}:80"
+      - "${PDFSPLIT_HTTPS_PORT:-443}:443"
+    environment:
+      PUBLIC_HOST: ${PUBLIC_HOST:-localhost}
+      # The wall clock for one request's headers + body (deploy/Caddyfile `read_body`): the only bound on how
+      # long an upload may take. 30m fits 200 MiB at ~115 KiB/s; the smoke shortens it to prove the cut.
+      READ_BODY_TIMEOUT: ${PDFSPLIT_READ_BODY:-30m}
+    volumes:
+      # Certificates and the ACME account survive a rebuild; losing them means re-issuing on every deploy.
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      edge:
+        # Joined first, so the published ports and the default route belong to the network that has one.
+        priority: 100
+      backend:
+        # Fixed on purpose: the api believes X-Forwarded-For only from PDFSPLIT_TRUSTED_PROXY, which must be
+        # the address the api's socket sees, and a service name is not what request.client.host reports.
+        # Caddy resolves `api` to A and AAAA records and may connect over either, hence one address per family.
+        ipv4_address: ${PDFSPLIT_CADDY_IP:-172.30.0.10}
+        ipv6_address: ${PDFSPLIT_CADDY_IP6:-fd30:5eaf:9a13::10}
+    depends_on:
+      api:
+        condition: service_healthy
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  api:
+    <<: *python
+    command: ["api", "--host", "0.0.0.0", "--port", "8000"]
+    # Reachable from caddy only; nothing publishes 8000 on the host (Docker would not bind a port on an
+    # internal network anyway — the smoke test reaches it from a one-off container on `backend`).
+    expose: ["8000"]
+    environment:
+      <<: *pdfsplit-env
+      PDFSPLIT_TRUSTED_PROXY: ${PDFSPLIT_CADDY_IP:-172.30.0.10},${PDFSPLIT_CADDY_IP6:-fd30:5eaf:9a13::10}
+    volumes:
+      - jobs:/jobs
+    networks: [backend]
+    mem_limit: 2g
+    # No swap: a container that hits its limit is killed and restarted, not left to page the VM to a crawl.
+    memswap_limit: 2g
+    healthcheck:
+      # The image has no curl; the venv python is on PATH.
+      test: ["CMD", "python", "-c", "import urllib.request as u; assert b'\"ok\":true' in u.urlopen('http://127.0.0.1:8000/api/health', timeout=5).read()"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+
+  worker:
+    <<: *python
+    command: ["worker"]
+    environment:
+      <<: *pdfsplit-env
+    volumes:
+      - jobs:/jobs
+    # Jobs run in rlimited subprocesses of this container (ADR-005); it fetches nothing, so it gets no network.
+    network_mode: none
+    # Two sandboxed tasks at RLIMIT_AS 2 GB each can't both be resident at once on a 4-8 GB VM.
+    mem_limit: 3g
+    memswap_limit: 3g
+    depends_on: [api]
+
+volumes:
+  jobs:
+  caddy_data:
+  caddy_config:
+
+networks:
+  # Explicit subnets, v4 and v6, so caddy's fixed backend address is meaningful and neither network lands on
+  # a range another stack's bridge already uses. Change a pair together (deploy/.env).
+  edge:
+    enable_ipv6: true
+    ipam:
+      config:
+        - subnet: ${PDFSPLIT_EDGE_SUBNET:-172.30.1.0/24}
+        - subnet: ${PDFSPLIT_EDGE_SUBNET6:-fd30:5eaf:9a13:1::/64}
+  backend:
+    internal: true
+    enable_ipv6: true
+    ipam:
+      config:
+        - subnet: ${PDFSPLIT_SUBNET:-172.30.0.0/24}
+        - subnet: ${PDFSPLIT_SUBNET6:-fd30:5eaf:9a13::/64}
