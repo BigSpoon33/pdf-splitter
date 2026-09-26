@@ -3,28 +3,25 @@
 The salt is `sha256(secret, UTC date)`: the same for every api thread and process that shares the secret, a
 different one every day, so a hash in `jobs.ip_hash` or `rate` links to nothing after that day and never to the
 raw address. The window does not care about the date: in the first hour of a UTC day it also counts the hits
-recorded under yesterday's hash, so the salt turning never empties anyone's window. Every function takes `now`,
-so the tests never sleep.
+recorded under yesterday's hash, so the salt turning never empties anyone's window. The clock is read by the
+store while it holds the write lock (`utcnow`, the one seam a test freezes — nothing here sleeps): the hashes
+are dated, so a reading taken before the lock could count under the wrong day.
 """
 
 from __future__ import annotations
 
 import hashlib
 import secrets
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 
 from fastapi import Request
 
-from .store import Store
+from .store import Store, utcnow
 
 WINDOW = timedelta(hours=1)
 # Drawn once per process: the default when `PDFSPLIT_IP_SALT` is unset (see config.py for the multi-process caveat).
 _PROCESS_SECRET = secrets.token_hex(16)
-
-
-def utcnow() -> datetime:
-    """The api's clock for the window; a test freezes it here."""
-    return datetime.now(UTC)
 
 
 def client_ip(request: Request, trusted_proxy: str | None) -> str:
@@ -54,11 +51,20 @@ def window_hashes(ip: str, now: datetime, secret: str | None = None) -> list[str
 
 
 def take_slot(
-    store: Store, ip: str, per_hour: int, *, now: datetime | None = None, secret: str | None = None
+    store: Store,
+    ip: str,
+    per_hour: int,
+    *,
+    secret: str | None = None,
+    clock: Callable[[], datetime] | None = None,
 ) -> tuple[str, int | None]:
-    """Claim one of the client's `per_hour` slots in the sliding hour, atomically (`Store.take_rate_slot`).
-    Returns today's hash of the client (the `jobs.ip_hash` value) and None, or the whole seconds until a slot
-    frees up when none was."""
-    now = now or utcnow()
-    hashes = window_hashes(ip, now, secret)
-    return hashes[0], store.take_rate_slot(hashes, since=now - WINDOW, limit=per_hour, now=now)
+    """Claim one of the client's `per_hour` slots in the sliding hour, atomically (`Store.take_rate_slot`): the
+    store reads `clock` under its lock and the window (today's hash, and yesterday's while the hour reaches back
+    into it) is built from that reading. Returns today's hash of the client (the `jobs.ip_hash` value) and None,
+    or the whole seconds until a slot frees up when none was."""
+
+    def window(now: datetime) -> tuple[list[str], datetime]:
+        return window_hashes(ip, now, secret), now - WINDOW
+
+    # Looked up at call time, so a frozen `ratelimit.utcnow` reaches the store.
+    return store.take_rate_slot(window, limit=per_hour, clock=clock or utcnow)

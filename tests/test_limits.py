@@ -98,7 +98,7 @@ def test_ip_hash_is_salted_shared_by_secret_and_rotates_daily() -> None:
 
 
 def slot(store: Store, hashes: list[str], limit: int, now: datetime) -> int | None:
-    return store.take_rate_slot(hashes, since=now - ratelimit.WINDOW, limit=limit, now=now)
+    return store.take_rate_slot(lambda at: (hashes, at - ratelimit.WINDOW), limit=limit, clock=lambda: now)[1]
 
 
 def rate_rows(store: Store) -> list[tuple[str, str]]:
@@ -218,6 +218,54 @@ def test_the_window_survives_midnight(settings: Settings, monkeypatch: pytest.Mo
     assert [at for _, at in rows] == ["2026-09-25T23:55:00+00:00", "2026-09-26T00:06:00+00:00", "2026-09-26T00:55:00+00:00"]
     assert len(hashes) == 2 and [h for h, _ in rows] == [rows[0][0], rows[1][0], rows[1][0]]    # the salt turned once
     assert job_count(settings) == 3
+
+
+def test_take_rate_slot_reads_its_clock_and_builds_the_window_inside_the_transaction(store: Store) -> None:
+    """Gate r2 finding 1: the clock, and with it the dated hash set, was read before `BEGIN IMMEDIATE`. Now the
+    clock is asked once per attempt while the connection holds the write transaction, and the window is built
+    from exactly that reading — the hit is stamped with it too."""
+    readings: list[tuple[datetime, bool]] = []
+    windows: list[datetime] = []
+    ticks = iter(T0 + timedelta(seconds=i) for i in range(2))
+
+    def clock() -> datetime:
+        now = next(ticks)
+        readings.append((now, store.conn.in_transaction))
+        return now
+
+    def window(now: datetime) -> tuple[list[str], datetime]:
+        windows.append(now)
+        return ["hash-a"], now - ratelimit.WINDOW
+
+    assert store.take_rate_slot(window, limit=1, clock=clock) == ("hash-a", None)
+    assert store.take_rate_slot(window, limit=1, clock=clock) == ("hash-a", 3599)
+    assert readings == [(T0, True), (T0 + timedelta(seconds=1), True)]
+    assert windows == [T0, T0 + timedelta(seconds=1)]
+    assert rate_rows(store) == [("hash-a", "2026-09-25T12:00:00+00:00")]
+    assert not store.conn.in_transaction
+
+
+def test_a_request_that_wins_the_lock_after_midnight_counts_under_that_days_hashes(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Gate r2 finding 1, the reviewer's interleaving: six requests that read the clock at 00:00:00.05 commit
+    first, then six that read it at 23:59:59.9 — they arrived before midnight and waited for the lock. A reading
+    taken on arrival puts the second six under yesterday's hash alone, where the window is empty, and all
+    twelve get through at limit 6. Read under the lock, the day has turned for every one of them: six slots."""
+    before = datetime(2026, 9, 25, 23, 59, 59, 900000, tzinfo=UTC)
+    after = datetime(2026, 9, 26, 0, 0, 0, 50000, tzinfo=UTC)
+    arrival = {"at": after}
+    # The clock answers with the request's arrival while no transaction is open, and with the moment the lock was
+    # won (after midnight for all twelve) once one is: only a read under the lock sees the second answer.
+    monkeypatch.setattr(ratelimit, "utcnow", lambda: after if store.conn.in_transaction else arrival["at"])
+    results: list[tuple[str, int | None]] = []
+    for at in [after] * 6 + [before] * 6:
+        arrival["at"] = at
+        results.append(ratelimit.take_slot(store, "198.51.100.7", 6, secret="s"))
+    today = ratelimit.ip_hash("198.51.100.7", after, "s")
+    assert [wait for _, wait in results] == [None] * 6 + [3600] * 6
+    assert [h for h, _ in results] == [today] * 12
+    assert rate_rows(store) == [(today, "2026-09-26T00:00:00+00:00")] * 6
 
 
 def test_seventh_upload_in_an_hour_is_429_with_retry_after(tmp_path: Path) -> None:

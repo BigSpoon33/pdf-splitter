@@ -5,7 +5,7 @@ import logging
 import math
 import secrets
 import sqlite3
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -42,9 +42,14 @@ BUSY_TIMEOUT_S = 5.0
 log = logging.getLogger(__name__)
 
 
+def utcnow() -> datetime:
+    """The clock a write reads while it holds the database lock; `ratelimit` re-exports it as the seam a test freezes."""
+    return datetime.now(UTC)
+
+
 def now_ts(now: datetime | None = None) -> str:
     """One fixed UTC format everywhere, so TEXT comparison and ORDER BY are time order."""
-    return (now or datetime.now(UTC)).astimezone(UTC).isoformat(timespec="seconds")
+    return (now or utcnow()).astimezone(UTC).isoformat(timespec="seconds")
 
 
 def new_job_id() -> str:
@@ -265,17 +270,26 @@ class Store:
         self.conn.execute("INSERT INTO rate (ip_hash, at) VALUES (?, ?)", (ip_hash, now_ts(now)))
 
     def take_rate_slot(
-        self, hashes: Sequence[str], *, since: datetime, limit: int, now: datetime | None = None
-    ) -> int | None:
-        """Count the hits under any of `hashes` after `since` (a hit exactly that old has left the window) and,
-        while there are fewer than `limit`, record one under `hashes[0]` — the count and the insert in ONE write
-        transaction, so parallel uploads from one client can't each read a window with room in it and all get
-        through. None when the slot was taken; else the whole seconds until the oldest of the `limit` newest
-        hits leaves the window."""
+        self,
+        window: Callable[[datetime], tuple[Sequence[str], datetime]],
+        *,
+        limit: int,
+        clock: Callable[[], datetime] = utcnow,
+    ) -> tuple[str, int | None]:
+        """Read the clock, ask `window(now)` for the hashes to count and the `since` the window starts at, count
+        the hits under any of them after `since` (a hit exactly that old has left the window) and, while there
+        are fewer than `limit`, record one under the first hash — all of it in ONE write transaction, so parallel
+        uploads from one client can't each read a window with room in it and all get through. The clock is read
+        AFTER the lock is taken: the hashes are dated, so a request that arrived before midnight but reached the
+        lock after the day turned must count under the hashes of the moment it commits, or a burst straddling
+        midnight gets two windows. Returns the first hash (what a hit is recorded under) and None when the slot
+        was taken, else the whole seconds until the oldest of the `limit` newest hits leaves the window."""
         conn = self.conn
-        marks = ",".join("?" * len(hashes))
         conn.execute("BEGIN IMMEDIATE")
         try:
+            now = clock()
+            hashes, since = window(now)
+            marks = ",".join("?" * len(hashes))
             rows = conn.execute(
                 f"SELECT at FROM rate WHERE ip_hash IN ({marks}) AND at > ? ORDER BY at",
                 (*hashes, now_ts(since)),
@@ -283,13 +297,13 @@ class Store:
             if len(rows) >= limit:
                 conn.execute("ROLLBACK")
                 oldest = datetime.fromisoformat(rows[len(rows) - limit]["at"])
-                return max(1, math.ceil((oldest - since).total_seconds()))
+                return hashes[0], max(1, math.ceil((oldest - since).total_seconds()))
             conn.execute("INSERT INTO rate (ip_hash, at) VALUES (?, ?)", (hashes[0], now_ts(now)))
             conn.execute("COMMIT")
         except BaseException:
             conn.execute("ROLLBACK")
             raise
-        return None
+        return hashes[0], None
 
     def prune_rate(self, before: datetime) -> int:
         return self.conn.execute("DELETE FROM rate WHERE at < ?", (now_ts(before),)).rowcount

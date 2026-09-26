@@ -23,14 +23,23 @@ and re-pins the web repo. Story file: `docs/stories/STORY-016.md` (AC-1..4).
   `fix: STORY-012 - gate r1: atomic rate window across midnight, output budget fits the sandbox, PUT write race is
   410` (`docs/findings/STORY-012-findings.md` § Gate r1 fixes — the new surface: `Store.take_rate_slot`,
   `ratelimit.take_slot`/`window_hashes`/`utcnow`, `cut.OUTPUT_CEILING`/`ZIP_MARGIN`/`package`/`_within_budget`
-  importing `sandbox.FSIZE_BYTES`, `put_plan`'s write → 410); anything after is the orchestrator's gate work
-  (`git log --oneline -8`). Baselines: `uv run pytest -q` → **420 pass** (≈ 90 s), `uv run ruff check` clean;
+  importing `sandbox.FSIZE_BYTES`, `put_plan`'s write → 410), then the gate r2 fix `fix: STORY-012 - gate r2: the
+  rate clock is read under the lock; PyMuPDF's file-too-large is the output cap too` (§ Gate r2 fixes:
+  `Store.take_rate_slot(window, *, limit, clock=)` reads the clock inside its transaction, `store.utcnow` re-exported
+  by `ratelimit`; `cut.hit_file_limit` + `_within_budget` catching MuPDF's `cannot fwrite: File too large`); anything
+  after is the orchestrator's gate work (`git log --oneline -8`). Baselines: `uv run pytest -q` → **426 pass** (≈ 90 s),
+  `uv run ruff check` clean;
   `cd web && bun run test` → **284 pass** (21 files), `bun run check` 0 errors 0 warnings (337 files), `bun run build`
   ≈ 109.15 kB JS (38.89 kB gzip). `docs/loop-state.json` belongs to the orchestrator: never stage it.
   Two things from the gate that touch the engine bump: the cut task's output ceiling is `sandbox.FSIZE_BYTES − 64 MiB`
   (960 MiB) — a v0.4.2 that writes bigger section files changes nothing here, but a section over 1 GiB would end
-  `too_large_output` (the EFBIG mapping), never `resources`; and `tests/test_cut.py::test_runner_fails_a_cut_whose_zip_hits_rlimit_fsize_as_too_large_output`
-  runs the real task with `cut.write_zip` monkeypatched inside the sandboxed process — a rename of `write_zip` breaks it.
+  `too_large_output` (the EFBIG mapping — Python's `OSError` and MuPDF's `FzErrorSystem('code=2: cannot fwrite: File
+  too large')` alike, `cut.hit_file_limit`), never `resources`; `tests/test_cut.py::test_runner_fails_a_cut_whose_zip_hits_rlimit_fsize_as_too_large_output`
+  runs the real task with `cut.write_zip` monkeypatched inside the sandboxed process — a rename of `write_zip` breaks it;
+  and `::test_a_section_the_sandbox_refuses_is_too_large_output_on_both_paths` runs `cut_book` under a real
+  RLIMIT_FSIZE of half the smallest section of the synthetic book — an engine that writes sections through Python
+  instead of MuPDF's `fwrite` still passes (both raise paths are mapped), one that swallows a section's write error
+  and reports it as `missing` would not.
 - Read, in order: `docs/stories/STORY-016.md`; `docs/findings/STORY-010-review.md:10-16` (the finding, and the SPA's
   per-sheet fix it was paired with); `docs/findings/STORY-003-findings.md` § AC-4 and the "diff gate" paragraphs
   (:30-31 — how the last engine release was gated on the synthetic books and on Maciocia; :5, :11 — how the tags were

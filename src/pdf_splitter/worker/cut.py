@@ -12,7 +12,8 @@ Both paths write under an output budget (STORY-012): the bytes in `work/` are me
 the cut stops with `OutputTooLarge` — its files removed, the previous `result.zip` untouched — the moment they
 pass it. Spans may overlap and sections may be the whole book, so nothing else bounds what a plan can write.
 The budget sits under the sandbox's RLIMIT_FSIZE with room for the ZIP, and a write the sandbox refuses anyway
-(EFBIG) is the same failure to the visitor, cleaned up the same way.
+(EFBIG — from Python as an `OSError`, from MuPDF's own `fwrite` as a MuPDF error that only quotes the errno text)
+is the same failure to the visitor, cleaned up the same way.
 """
 
 from __future__ import annotations
@@ -32,7 +33,7 @@ import pymupdf
 from monograph_splitter.profile import profile_from_dict
 from monograph_splitter.session import MANIFEST_NAME, OVERRIDES_NAME, Book
 
-from .analyze import Progress
+from .analyze import MUPDF_ERRORS, Progress
 from .sandbox import FSIZE_BYTES
 
 ENGINE_NAME_BYTES = 80
@@ -48,10 +49,22 @@ OUTPUT_MULTIPLIER = 10
 OUTPUT_FLOOR = 256 * 1024 * 1024
 ZIP_MARGIN = 64 * 1024 * 1024
 OUTPUT_CEILING = FSIZE_BYTES - ZIP_MARGIN
+# MuPDF saves through its own fwrite and raises the C error as text (`code=2: cannot fwrite: File too large`), so
+# an EFBIG from a section write carries no errno — only libc's words for it, the same libc the sandbox runs on.
+MUPDF_FILE_TOO_LARGE = re.compile(rf"\b{re.escape(os.strerror(errno.EFBIG))}\b|\bEFBIG\b", re.IGNORECASE)
 
 
 class OutputTooLarge(Exception):
     """The cut passed its byte budget; `task.guarded` reports it as `too_large_output`."""
+
+
+def hit_file_limit(e: BaseException) -> bool:
+    """A write the sandbox's RLIMIT_FSIZE refused, whichever side raised it: Python's `OSError(EFBIG)`, or a MuPDF
+    error whose message is the same errno — `code=2` alone is also what MuPDF's allocator says when it fails, so
+    the type and the prefix decide nothing here, only the errno text does."""
+    if isinstance(e, OSError):
+        return e.errno == errno.EFBIG
+    return isinstance(e, MUPDF_ERRORS) and MUPDF_FILE_TOO_LARGE.search(str(e)) is not None
 
 
 def output_budget(max_output_bytes: int, upload_bytes: int) -> int:
@@ -116,15 +129,16 @@ def _reset_outputs(work: Path) -> None:
 @contextmanager
 def _within_budget(work: Path) -> Iterator[None]:
     """Too much output, whether the budget said so or the sandbox did (a section or the ZIP hitting
-    RLIMIT_FSIZE fails with EFBIG — Python ignores SIGXFSZ): the sections go, `OutputTooLarge` comes out. Anything
-    else the sandbox refuses keeps its own code."""
+    RLIMIT_FSIZE fails with EFBIG — Python ignores SIGXFSZ — through Python's `OSError` or MuPDF's own writer):
+    the sections go, `OutputTooLarge` comes out. Anything else the sandbox refuses keeps its own code, so a MuPDF
+    allocator failure still reads as `resources`."""
     try:
         yield
     except OutputTooLarge:
         _reset_outputs(work)
         raise
-    except OSError as e:
-        if e.errno != errno.EFBIG:
+    except (OSError, *MUPDF_ERRORS) as e:
+        if not hit_file_limit(e):
             raise
         _reset_outputs(work)
         raise OutputTooLarge(FSIZE_BYTES) from e

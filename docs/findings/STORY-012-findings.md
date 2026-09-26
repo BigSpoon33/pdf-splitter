@@ -5,7 +5,8 @@
 Commit `7e5af5e feat: STORY-012 - rate limit, disk guard, 24 h janitor and queue position` on `feature/mvp`, pushed to
 `origin` and `gitea`. Lines below are as of that commit; § Gate r1 fixes (below) is as of the fix commit
 `fix: STORY-012 - gate r1: atomic rate window across midnight, output budget fits the sandbox, PUT write race is 410`
-(`docs/findings/STORY-012-review.md` round 1, 4 confirmed).
+(`docs/findings/STORY-012-review.md` round 1, 4 confirmed), and § Gate r2 fixes as of `fix: STORY-012 - gate r2: the
+rate clock is read under the lock; PyMuPDF's file-too-large is the output cap too` (round 2, 2 confirmed).
 
 ## AC Verification
 - [x] AC-1: sliding-window rate limit — `src/pdf_splitter/ratelimit.py` (`client_ip` :24, `ip_hash` :35, `retry_after`
@@ -175,6 +176,51 @@ No web change (SPA baselines unchanged: 284 tests, 0/0 check, 109.15 kB build).
    `internal`, unchanged — a directory that vanished without a DELETE is a server fault, not the job's expiry). Tests
    `tests/test_api_e2e.py:358` `::test_a_plan_saved_after_a_delete_is_410_not_500` (the REAL DELETE hooked after
    `validate_plan`: 410, no directory, row `deleted`) and `:376` `::test_a_plan_write_that_fails_on_a_live_job_is_still_500`.
+
+## Gate r2 fixes
+
+Round 2 (`docs/findings/STORY-012-review.md`, re-review of `76940a7`) confirmed two incomplete fixes; fixed forward in
+ONE commit on the `feature/mvp` tip, `fix: STORY-012 - gate r2: the rate clock is read under the lock; PyMuPDF's
+file-too-large is the output cap too`. Each fix has tests that were run with the `76940a7` source tree under the new
+test files: all six fail there (the two rate tests with the reviewer's 12/12, the three sandbox tests with `resources`
+in place of `too_large_output`, the unit test on `hit_file_limit` at import). `uv run pytest -q` → **426 passed** (was
+420), `uv run ruff check` clean. No web change (`bun run test` 284 pass; check/build baselines stand).
+
+1. **The clock is read under the lock** (finding 1, `ratelimit.py:62-64` + `store.py:275-277`): `store.py:272`
+   `Store.take_rate_slot(window, *, limit, clock=utcnow) -> (hash, retry_after | None)` takes the write lock FIRST
+   (`BEGIN IMMEDIATE`), then reads `clock()` (`:290`) and asks `window(now)` for the hashes to count and the `since`
+   the window starts at — so the dated hash set is built from the moment the request commits, never from the moment it
+   arrived. `store.py:45` `utcnow()` is that clock; `ratelimit.py:20` re-exports it (`from .store import Store,
+   utcnow`), so `ratelimit.utcnow` stays the one seam a test freezes. `ratelimit.py:53` `take_slot(store, ip, per_hour,
+   *, secret=, clock=)` builds the window (`window_hashes(ip, now, secret)`, `now − 1 h`) inside the store's
+   transaction and passes `clock or utcnow` looked up at call time; its `now=` parameter is gone (nothing passed it).
+   `upload.py:122` is unchanged. Tests `tests/test_limits.py:223`
+   `::test_take_rate_slot_reads_its_clock_and_builds_the_window_inside_the_transaction` (the clock is called once per
+   attempt with `conn.in_transaction` True; the window and the hit's `at` are that reading) and `:248`
+   `::test_a_request_that_wins_the_lock_after_midnight_counts_under_that_days_hashes` — the reviewer's interleaving,
+   deterministic: a frozen `ratelimit.utcnow` answers with the request's arrival (00:00:00.05 for six, then 23:59:59.9
+   for six) while no transaction is open and with the moment the lock was won (00:00:00.05) once one is; on `76940a7`
+   the second six read on arrival, look under yesterday's hash alone and get through (12/12), now all twelve read
+   under the lock and exactly six get a slot (six × `Retry-After` 3600, six rows under today's hash). The `slot()`
+   helper (`:100`) moved to the new signature; every r1 assertion stands (burst, midnight, sliding window).
+2. **PyMuPDF's file-too-large is the output cap** (finding 2, `cut.py:116-130`): a section write that hits RLIMIT_FSIZE
+   inside MuPDF is `FzErrorSystem('code=2: cannot fwrite: File too large')` — no errno, and the same `code=2` prefix
+   as MuPDF's allocator failing, so `guarded` read it as `resources` and the truncated section stayed in `work/`.
+   `cut.py:61` `hit_file_limit(e)`: an `OSError` with `errno.EFBIG`, or a MuPDF error (`analyze.MUPDF_ERRORS`, both
+   raise paths) whose message carries libc's words for EFBIG (`:54` `MUPDF_FILE_TOO_LARGE`, built from
+   `os.strerror(errno.EFBIG)` — the same libc MuPDF asked); `:130` `_within_budget` catches `(OSError, *MUPDF_ERRORS)`
+   and converts only those (`:140`) into `OutputTooLarge` after `_reset_outputs`; anything else re-raises, so the
+   allocator's `calloc … failed` still reaches `task.is_mupdf_alloc_failure` → `resources`. `task.py` is unchanged.
+   Tests `tests/test_cut.py:291` `::test_hit_file_limit_tells_the_sandboxs_efbig_from_an_allocator_failure`, `:312`
+   `::test_a_section_the_sandbox_refuses_is_too_large_output_on_both_paths[chapters|ranges]` (the real sandbox with
+   `fsize` = half the smallest section, `cut_book` and `cut_ranges` under `guarded` → `too_large_output`, no PDF and
+   no manifest in `work/`, the index cache byte-identical) and `:342`
+   `::test_runner_fails_a_cut_whose_section_hits_rlimit_fsize_as_too_large_output` (the real runner + task on a
+   120-page ranges job with `sandbox.limits` patched to `fsize` 128 KiB — over the task's own row writes, under one
+   ~500 KB span: row `failed/cut/too_large_output` with the message, `work/` empty, previous ZIP kept, re-cut to
+   `done` under the real limits). A first draft of that runner test at 16 KiB failed on SQLite instead (the fixtures'
+   WAL is already ~40 KB before the task starts and appends hit EFBIG at the first progress write) — hence the big
+   book, and why the runner-level test covers one path: the row plumbing past `guarded` is path-independent.
 
 ## Handoff Context for Next Session
 STORY-016 runs in the ENGINE repo (`~/Documents/Repos/monograph-splitter`, branch `feature/web-mode`, tip `8e52cc3`

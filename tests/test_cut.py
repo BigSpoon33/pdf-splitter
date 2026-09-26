@@ -9,7 +9,9 @@ import subprocess
 import zipfile
 from pathlib import Path
 
+import pymupdf
 import pytest
+from fixtures.books import text_book
 from fixtures.hostile import link_uri_bomb
 from helpers import DASH_ID, assert_id_gone, seed_job
 from monograph_splitter.session import MANIFEST_NAME, OVERRIDES_NAME
@@ -19,11 +21,14 @@ from pdf_splitter.files import read_json, write_json
 from pdf_splitter.store import Store, log_id
 from pdf_splitter.worker import cut, sandbox, task
 from pdf_splitter.worker import runner as runner_mod
+from pdf_splitter.worker.analyze import DEFAULT_SETTINGS
 from pdf_splitter.worker.cut import (
     OutputTooLarge,
     cut_book,
+    cut_ranges,
     engine_entries,
     engine_name,
+    hit_file_limit,
     output_budget,
     write_zip,
     zip_entry,
@@ -277,6 +282,90 @@ def test_runner_fails_a_cut_whose_zip_hits_rlimit_fsize_as_too_large_output(
     assert job["message"] == runner_mod.MESSAGES["too_large_output"]
     assert (job_dir / "result.zip").read_bytes() == b"previous" and not list(job_dir.glob("*.tmp"))
     assert list((job_dir / "work").glob("*.pdf")) == []
+    assert wstore.transition(DASH_ID, "failed", "queued", kind="cut", expect_kind="cut")
+    assert Runner(settings, kinds=("cut",)).run_once(wstore) is True
+    assert (wstore.get_job(DASH_ID)["state"], wstore.get_job(DASH_ID)["error_code"]) == ("done", None)
+    assert zipfile.ZipFile(job_dir / "result.zip").namelist()[-1] == cut.MANIFEST
+
+
+def test_hit_file_limit_tells_the_sandboxs_efbig_from_an_allocator_failure() -> None:
+    """Gate r2 finding 2: MuPDF's section write under RLIMIT_FSIZE is `FzErrorSystem('code=2: cannot fwrite:
+    File too large')` — the same `code=2` prefix as its allocator failing, so only the errno text can tell them
+    apart; the allocator's stays `resources` (`task.is_mupdf_alloc_failure`)."""
+    assert hit_file_limit(OSError(errno.EFBIG, "File too large"))
+    assert not hit_file_limit(OSError(errno.EIO, "Input/output error"))
+    assert hit_file_limit(pymupdf.mupdf.FzErrorSystem("cannot fwrite: File too large"))
+    assert hit_file_limit(RuntimeError("code=2: cannot fwrite: File too large"))
+    assert not hit_file_limit(RuntimeError("code=2: cannot fwrite: No space left on device"))
+    assert not hit_file_limit(ValueError("File too large"))                       # Python's words, not MuPDF's
+    calloc = pymupdf.mupdf.FzErrorSystem("calloc (4104 x 1 bytes) failed")
+    assert not hit_file_limit(calloc) and task.is_mupdf_alloc_failure(calloc)
+
+
+def ranges_plan_of(plan: dict, pages: int) -> dict:
+    """The chapter plan's sections as whole-page spans to the end of the book (ADR-009's shape)."""
+    spans = [{"name": s["name"], "page": s["page"], "endPage": pages} for s in plan["sections"]]
+    return {**plan, "source": "ranges", "sections": spans, "overrides": {}}
+
+
+@pytest.mark.parametrize("path", ["chapters", "ranges"])
+def test_a_section_the_sandbox_refuses_is_too_large_output_on_both_paths(
+    settings: Settings, analyzed_template: Path, path: str
+) -> None:
+    """Gate r2 finding 2, under the real sandbox with an fsize below one section: PyMuPDF writes the section
+    through MuPDF's own fwrite, so the EFBIG arrives as a MuPDF error, not an `OSError`, and read as
+    `resources` with the truncated section left in `work/`. On the engine path and the page-range path alike
+    it is the output being too large: `too_large_output`, no section left, the index cache untouched."""
+    job_dir = seed_job(settings, analyzed_template, DASH_ID)
+    work = job_dir / "work"
+    plan = read_json(job_dir / "plan.json")
+    fn = cut_book
+    if path == "ranges":
+        plan, fn = ranges_plan_of(plan, 6), cut_ranges
+    # The limit sits under the smallest section as it is on this build, so a fixture that grows can't pass by size.
+    rows, _ = fn(job_dir, plan, lambda *_: None)
+    smallest = min((work / f"{r['formula']}.pdf").stat().st_size for r in rows)
+    assert len(rows) == 3 and smallest > 8192
+    index_before = (work / ".book-index.json").read_bytes()
+    code = (
+        GUARDED + f"import json; from pathlib import Path; from pdf_splitter.worker.cut import {fn.__name__}; "
+        f"plan = json.loads({json.dumps(plan)!r}); "
+        f"sys.exit(guarded(lambda: ({fn.__name__}(Path({str(job_dir)!r}), plan, lambda *_: None), True)[1]))"
+    )
+    cmd = sandbox.command({**sandbox.limits(10), "fsize": smallest // 2}, ["-c", code])
+    proc = subprocess.run(cmd, capture_output=True, check=False, stdin=subprocess.DEVNULL, timeout=60)
+    assert classify(proc.returncode, proc.stdout) == "too_large_output", proc.stderr
+    assert list(work.glob("*.pdf")) == [] and not (work / MANIFEST_NAME).exists()
+    assert (work / ".book-index.json").read_bytes() == index_before
+
+
+def test_runner_fails_a_cut_whose_section_hits_rlimit_fsize_as_too_large_output(
+    settings: Settings, wstore: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same EFBIG through the real runner and task (the row plumbing is the same on both paths, so one —
+    page ranges — stands for it): the sandbox's fsize lowered to 128 KiB, well over the task's own writes on the
+    way (the row updates append to the WAL that the fixtures already filled, ~40 KB) and well under one
+    ~500 KB whole-book span. The row ends `failed/cut/too_large_output` with its message, `work/` holds no
+    section, the previous `result.zip` is kept — then, under the real limits, the job re-cuts to `done`."""
+    job_dir = settings.jobs_dir / DASH_ID
+    job_dir.mkdir(parents=True)
+    text_book(job_dir / "source.pdf", 120)
+    write_json(job_dir / "plan.json", {
+        "source": "ranges", "settings": DEFAULT_SETTINGS, "overrides": {},
+        "sections": [{"name": "Whole", "page": 1, "endPage": 120}, {"name": "Again", "page": 1, "endPage": 120}],
+    })
+    (job_dir / "result.zip").write_bytes(b"previous")
+    wstore.create_job(job_id=DASH_ID, ip_hash="h", filename="b.pdf", bytes=(job_dir / "source.pdf").stat().st_size,
+                      pages=120, ttl_hours=24, state="queued", kind="cut")
+    real = sandbox.limits
+    monkeypatch.setattr(sandbox, "limits", lambda timeout: {**real(timeout), "fsize": 128 * 1024})
+    assert Runner(settings, kinds=("cut",)).run_once(wstore) is True
+    job = wstore.get_job(DASH_ID)
+    assert (job["state"], job["kind"], job["error_code"]) == ("failed", "cut", "too_large_output"), job
+    assert job["message"] == runner_mod.MESSAGES["too_large_output"]
+    assert list((job_dir / "work").glob("*.pdf")) == [] and not list(job_dir.glob("*.tmp"))
+    assert (job_dir / "result.zip").read_bytes() == b"previous"
+    monkeypatch.setattr(sandbox, "limits", real)
     assert wstore.transition(DASH_ID, "failed", "queued", kind="cut", expect_kind="cut")
     assert Runner(settings, kinds=("cut",)).run_once(wstore) is True
     assert (wstore.get_job(DASH_ID)["state"], wstore.get_job(DASH_ID)["error_code"]) == ("done", None)
