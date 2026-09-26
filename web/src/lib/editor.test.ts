@@ -1,13 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ApiError, type Plan } from './api'
-import { PlanEditor } from './editor.svelte'
-import { planOf, sectionsOf } from './fixtures'
+import { PlanEditor, type SendOptions } from './editor.svelte'
+import { planOf, rowOf, sectionsOf } from './fixtures'
 
 /** A save whose answers are released by the test, so requests can overlap deterministically. */
 function deferredSave() {
   const pending: { plan: Plan; resolve: (p: Plan) => void; reject: (e: unknown) => void }[] = []
   const save = vi.fn(
-    (plan: Plan) =>
+    (plan: Plan, _opts?: SendOptions) =>
       new Promise<Plan>((resolve, reject) => {
         pending.push({ plan, resolve, reject })
       }),
@@ -15,7 +15,7 @@ function deferredSave() {
   return { save, pending, release: (i = 0, answer?: Plan) => pending[i]!.resolve(answer ?? pending[i]!.plan) }
 }
 
-const echo = vi.fn(async (plan: Plan) => plan)
+const echo = vi.fn(async (plan: Plan, _opts?: SendOptions) => plan)
 
 beforeEach(() => {
   vi.useFakeTimers()
@@ -188,6 +188,23 @@ describe('PlanEditor source switch + undo (AC-2, AC-6)', () => {
     expect(echo.mock.calls[1]?.[0].source).toBe('outline')
   })
 
+  it('Undo restores the source, list, overrides and picker controls — never a setting changed since (gate r1 F6, F8)', async () => {
+    const picker = { outlineLevel: 1, headingLevel: 1, threshold: 1, maxLength: 90 }
+    const editor = new PlanEditor(planOf({ overrides: { '0': { startCut: 5 } } }), echo, { picker })
+    editor.replaceSections('outline', sectionsOf([['1.1', 1]]), 'the outline (level 2)', { ...picker, outlineLevel: 2 })
+    expect(editor.picker.outlineLevel).toBe(2)
+    editor.setSetting('header_band', 60)
+    editor.setSetting('single_column', true)
+    editor.undoLast()
+    expect(editor.plan.source).toBe('outline')
+    expect(editor.plan.sections).toHaveLength(3)
+    expect(editor.plan.overrides).toEqual({ '0': { startCut: 5 } })
+    expect(editor.picker).toEqual(picker)
+    expect(editor.plan.settings).toMatchObject({ header_band: 60, single_column: true })
+    await vi.advanceTimersByTimeAsync(600)
+    expect(echo.mock.lastCall?.[0].settings).toMatchObject({ header_band: 60, single_column: true })
+  })
+
   it('the Undo offer expires', async () => {
     const editor = new PlanEditor(planOf(), echo, { undoMs: 1000 })
     editor.replaceSections('manual', [], 'the pasted list')
@@ -197,5 +214,121 @@ describe('PlanEditor source switch + undo (AC-2, AC-6)', () => {
     expect(editor.undo).toBeNull()
     editor.undoLast() // nothing to undo: a no-op
     expect(editor.plan.source).toBe('manual')
+  })
+})
+
+describe('PlanEditor never loses a save (gate r1 F7)', () => {
+  /** A stand-in for the window: the editor listens here, the test fires the events. */
+  function fakePage(visibility: DocumentVisibilityState = 'visible') {
+    const listeners = new Map<string, () => void>()
+    return {
+      document: { visibilityState: visibility },
+      addEventListener: (type: string, fn: () => void) => void listeners.set(type, fn),
+      removeEventListener: (type: string) => void listeners.delete(type),
+      fire: (type: string) => listeners.get(type)?.(),
+      listening: () => [...listeners.keys()].sort(),
+    }
+  }
+
+  it('destroy() sends a pending edit without awaiting it', async () => {
+    const page = fakePage()
+    const editor = new PlanEditor(planOf(), echo, { page })
+    expect(page.listening()).toEqual(['pagehide', 'visibilitychange'])
+    editor.setPage(0, 2)
+    editor.destroy()
+    expect(echo).toHaveBeenCalledTimes(1)
+    expect(echo.mock.calls[0]?.[0].sections[0]?.page).toBe(2)
+    expect(echo.mock.calls[0]?.[1]).toEqual({})
+    expect(page.listening()).toEqual([])
+    // Nothing pending: destroy() sends nothing.
+    const idle = new PlanEditor(planOf(), echo, { page: fakePage() })
+    idle.destroy()
+    expect(echo).toHaveBeenCalledTimes(1)
+  })
+
+  it('destroy() commits a name still being typed before it sends', () => {
+    const editor = new PlanEditor(planOf(), echo, { page: fakePage() })
+    editor.setDraft(1, 'Typed')
+    editor.destroy()
+    expect(echo).toHaveBeenCalledTimes(1)
+    expect(echo.mock.calls[0]?.[0].sections[1]?.name).toBe('Typed')
+  })
+
+  it('pagehide sends the unsent edit with keepalive, even while an older request is still out', async () => {
+    const { save, pending } = deferredSave()
+    const page = fakePage()
+    const editor = new PlanEditor(planOf(), save, { page })
+    editor.rename(0, 'A')
+    await vi.advanceTimersByTimeAsync(600)
+    expect(save).toHaveBeenCalledTimes(1)
+    editor.rename(0, 'AB')
+    page.fire('pagehide')
+    expect(save).toHaveBeenCalledTimes(2)
+    expect(pending[1]?.plan.sections[0]?.name).toBe('AB')
+    expect(save.mock.calls[1]?.[1]).toEqual({ keepalive: true })
+    // The debounce that was pending is not sent a third time.
+    await vi.advanceTimersByTimeAsync(600)
+    expect(save).toHaveBeenCalledTimes(2)
+    // Nothing new since: a second pagehide sends nothing.
+    page.fire('pagehide')
+    expect(save).toHaveBeenCalledTimes(2)
+  })
+
+  it('a tab going hidden sends like pagehide; going visible does not', () => {
+    const page = fakePage('visible')
+    const editor = new PlanEditor(planOf(), echo, { page })
+    editor.rename(0, 'A')
+    page.fire('visibilitychange')
+    expect(echo).not.toHaveBeenCalled()
+    page.document.visibilityState = 'hidden'
+    page.fire('visibilitychange')
+    expect(echo).toHaveBeenCalledTimes(1)
+    expect(echo.mock.calls[0]?.[1]).toEqual({ keepalive: true })
+  })
+
+  it('a gone job sends nothing on unload', async () => {
+    const page = fakePage()
+    const save = vi.fn().mockRejectedValue(new ApiError(410, 'expired'))
+    const editor = new PlanEditor(planOf(), save, { page })
+    editor.rename(0, 'x')
+    await vi.advanceTimersByTimeAsync(600)
+    expect(editor.gone).toBe(true)
+    editor.rename(0, 'y')
+    page.fire('pagehide')
+    editor.destroy()
+    expect(save).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('PlanEditor name drafts', () => {
+  it('a draft reaches the plan on commit only, and a same name is not an edit', async () => {
+    const editor = new PlanEditor(planOf(), echo)
+    editor.setDraft(0, '1 Foundations of Testing')
+    editor.commitDraft()
+    expect(editor.dirty).toBe(false)
+    editor.setDraft(0, '1 Foundations')
+    expect(editor.plan.sections[0]?.name).toBe('1 Foundations of Testing')
+    expect(editor.dirty).toBe(false)
+    // Focus moving to another row commits the first draft.
+    editor.setDraft(1, 'Two')
+    expect(editor.plan.sections[0]?.name).toBe('1 Foundations')
+    expect(editor.draft).toEqual({ i: 1, name: 'Two' })
+    editor.commitDraft()
+    expect(editor.draft).toBeNull()
+    await vi.advanceTimersByTimeAsync(600)
+    expect(echo.mock.lastCall?.[0].sections.map((s) => s.name)).toEqual(['1 Foundations', 'Two', '3 Closing Chapter'])
+  })
+})
+
+describe('PlanEditor manifest rows', () => {
+  it('a merge drops the row of the section that absorbed the next; other edits leave the rows alone', () => {
+    const editor = new PlanEditor(planOf(), echo)
+    editor.rows = [rowOf(0, 'a'), rowOf(1, 'b'), rowOf(2, 'c')]
+    editor.rename(2, 'C')
+    editor.setPage(2, 5)
+    expect(editor.rows).toHaveLength(3)
+    editor.merge(1)
+    expect(editor.rows.map((r) => r.index)).toEqual([0, 2])
+    expect(editor.edited).toBe(true)
   })
 })

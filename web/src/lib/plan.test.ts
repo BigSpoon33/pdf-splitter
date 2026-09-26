@@ -7,7 +7,9 @@ import {
   headingSections,
   initialHeadingLevel,
   initialOutlineLevel,
+  initialPicker,
   insertSection,
+  MAX_HEADING_LENGTH,
   MAX_NAME,
   mergeWithNext,
   outlineSections,
@@ -49,16 +51,45 @@ describe('headingSections', () => {
   const a = analysisOf()
 
   it('filters by threshold × body size and by level', () => {
-    expect(headingSections(a, 0, 1).map((s) => s.page)).toEqual([1, 3, 4, 1, 2, 3, 5])
-    expect(headingSections(a, 0, 1.3).map((s) => s.name)).toEqual([
+    expect(headingSections(a, { level: 0, threshold: 1 }).map((s) => s.page)).toEqual([1, 3, 4, 1, 2, 3, 5])
+    expect(headingSections(a, { level: 0, threshold: 1.3 }).map((s) => s.name)).toEqual([
       'Foundations of Testing',
       'Chapter Two: The Middle of the Synthetic Book',
       'Closing Chapter',
     ])
-    expect(headingSections(a, 2, 1)).toHaveLength(4)
-    expect(headingSections(a, 2, 1.3)).toEqual([])
-    expect(headingSections(a, 1, 1.68)).toHaveLength(3)
-    expect(headingSections(a, 1, 1.69)).toEqual([])
+    expect(headingSections(a, { level: 2, threshold: 1 })).toHaveLength(4)
+    expect(headingSections(a, { level: 2, threshold: 1.3 })).toEqual([])
+    expect(headingSections(a, { level: 1, threshold: 1.68 })).toHaveLength(3)
+    expect(headingSections(a, { level: 1, threshold: 1.69 })).toEqual([])
+  })
+
+  it('drops candidates longer than maxLength and those inside the current bands (PRD scope 2)', () => {
+    const all = { level: 0, threshold: 1 }
+    // 'Second Principles of Wrapped Section Headings' and 'Chapter Two: The Middle of the Synthetic Book' are 45 characters.
+    expect(headingSections(a, { ...all, maxLength: 44 }).map((s) => s.name)).toEqual([
+      'Foundations of Testing',
+      'Closing Chapter',
+      'First Principles',
+      'Middle Matters',
+      'Final Section',
+    ])
+    expect(headingSections(a, { ...all, maxLength: 45 })).toHaveLength(7)
+    expect(headingSections(a, { ...all, maxLength: 90 })).toHaveLength(7)
+    // Chapters sit at y 90, sections at y 300 on 789.6 pt sheets: a 91 pt header band swallows the chapters,
+    // a 490 pt footer band (789.6 − 300 = 489.6) the sections.
+    const defaults = { header_band: 50, footer_band: 32 }
+    expect(headingSections(a, { ...all, bands: defaults })).toHaveLength(7)
+    expect(headingSections(a, { ...all, bands: { header_band: 91, footer_band: 32 } }).map((s) => s.page)).toEqual([1, 2, 3, 5])
+    expect(headingSections(a, { ...all, bands: { header_band: 90, footer_band: 32 } })).toHaveLength(7)
+    expect(headingSections(a, { ...all, bands: { header_band: 50, footer_band: 490 } }).map((s) => s.page)).toEqual([1, 3, 4])
+    expect(headingSections(a, { ...all, bands: { header_band: 50, footer_band: 489 } })).toHaveLength(7)
+    // A sheet without a known size is only bounded at the top.
+    const noSize = analysisOf({ size: [] })
+    expect(headingSections(noSize, { ...all, bands: { header_band: 50, footer_band: 700 } })).toHaveLength(7)
+  })
+
+  it('initialPicker starts from the suggested levels, threshold 1 and the analysis max length', () => {
+    expect(initialPicker(a)).toEqual({ outlineLevel: 1, headingLevel: 1, threshold: 1, maxLength: MAX_HEADING_LENGTH })
   })
 
   it('slider top is the biggest level in body sizes, rounded up to 0.1, at least 2', () => {
@@ -140,6 +171,52 @@ describe('list operations re-key overrides by section index', () => {
     expect(plan.sections).toHaveLength(4) // the input is untouched
   })
 
+  // Gate r1 F2, on headed_book (6 sheets of 789.6 pt; chapters start on sheets 1, 3, 4): an end override names a y on
+  // what was the section's LAST sheet. When the section after it goes, its end moves to the next start (or the end of
+  // the book) and the engine would apply that y on a sheet it was never meant for — so the end override goes too.
+  const book = planOf({
+    overrides: {
+      '0': { startCut: 70, endCut: 300, endCol: 'left' }, // sheets 1–2
+      '1': { startCut: 88, endCut: 520 }, // sheet 3
+      '2': { startCut: 400, startCol: 'right' }, // sheets 4–6
+    },
+  })
+
+  it('removeSection: the section before the removed one keeps its start override and loses its end', () => {
+    const next = removeSection(book, 1)
+    expect(next.sections.map((s) => s.page)).toEqual([1, 4])
+    expect(next.overrides).toEqual({ '0': { startCut: 70 }, '1': { startCut: 400, startCol: 'right' } })
+    // The first section has nothing before it; removing the last one moves its predecessor's end to the book's end.
+    expect(removeSection(book, 0).overrides).toEqual({ '0': { startCut: 88, endCut: 520 }, '1': { startCut: 400, startCol: 'right' } })
+    expect(removeSection(book, 2).overrides).toEqual({ '0': { startCut: 70, endCut: 300, endCol: 'left' }, '1': { startCut: 88 } })
+    // An override that was only an end disappears rather than leaving `{}` behind.
+    const endOnly = planOf({ overrides: { '0': { endCut: 300 } } })
+    expect(removeSection(endOnly, 1).overrides).toEqual({})
+  })
+
+  it('insertSection: the new section starts clean and the one before it loses its end', () => {
+    const { plan: next, index } = insertSection(book, { name: 'Interlude', page: 2, heading: '' })
+    expect(index).toBe(1)
+    expect(next.sections.map((s) => s.page)).toEqual([1, 2, 3, 4])
+    expect(next.overrides).toEqual({
+      '0': { startCut: 70 },
+      '2': { startCut: 88, endCut: 520 },
+      '3': { startCut: 400, startCol: 'right' },
+    })
+    // A same-page insert lands AFTER the section already there (book order), so that one's end moves too;
+    // appending at the end takes the last section's end away.
+    expect(insertSection(book, { name: 'Cover', page: 1, heading: '' }).plan.overrides).toEqual({
+      '0': { startCut: 70 },
+      '2': { startCut: 88, endCut: 520 },
+      '3': { startCut: 400, startCol: 'right' },
+    })
+    expect(insertSection(book, { name: 'Index', page: 6, heading: '' }).plan.overrides).toEqual({
+      '0': { startCut: 70, endCut: 300, endCol: 'left' },
+      '1': { startCut: 88, endCut: 520 },
+      '2': { startCut: 400, startCol: 'right' },
+    })
+  })
+
   it('mergeWithNext keeps the first start, takes the next end, shifts the rest', () => {
     const next = mergeWithNext(plan, 1)
     expect(next.sections.map((s) => s.name)).toEqual(['A', 'B', 'D'])
@@ -163,7 +240,7 @@ describe('list operations re-key overrides by section index', () => {
     expect(next.sections.map((s) => s.name)).toEqual(['A', 'B', 'B2', 'C', 'D'])
     expect(next.overrides).toEqual({
       '0': { startCut: 10 },
-      '1': { startCut: 20, endCut: 25 },
+      '1': { startCut: 20 }, // B now ends where B2 starts
       '3': { endCut: 30, endCol: 'left' },
       '4': { startCol: 'right' },
     })

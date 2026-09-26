@@ -1,16 +1,14 @@
 <script lang="ts">
-  import type { Analysis, ManifestRow } from '../lib/api'
+  import type { Analysis } from '../lib/api'
   import type { PlanEditor } from '../lib/editor.svelte'
   import { badgeFlags, flagLabel, MAX_NAME, rowFor } from '../lib/plan'
 
   interface Props {
     editor: PlanEditor
     analysis: Analysis
-    /** The last cut's manifest, `[]` before any cut. */
-    rows?: ManifestRow[]
   }
 
-  let { editor, analysis, rows = [] }: Props = $props()
+  let { editor, analysis }: Props = $props()
 
   const sections = $derived(editor.plan.sections)
   const last = $derived(sections.length - 1)
@@ -24,8 +22,20 @@
     return analysis.pageLabels[page - 1] ?? ''
   }
 
+  /** What the name input shows: the draft while it is being typed, so a save's normalized name never lands under the cursor. */
+  function nameOf(i: number, saved: string): string {
+    return editor.draft?.i === i ? editor.draft.name : saved
+  }
+
   function pageOf(e: Event): number {
     return (e.currentTarget as HTMLInputElement).valueAsNumber
+  }
+
+  function onNameKey(e: KeyboardEvent) {
+    // Enter commits like a form would.
+    if (e.key !== 'Enter') return
+    editor.commitDraft()
+    ;(e.currentTarget as HTMLInputElement).blur()
   }
 
   function add(e: SubmitEvent) {
@@ -56,7 +66,7 @@
   {#each sections as s, i (i)}
     {@const nameError = editor.errorAt('sections', i, 'name')}
     {@const pageError = editor.errorAt('sections', i, 'page')}
-    {@const flags = badgeFlags(rowFor(rows, editor.plan, i), i === last)}
+    {@const flags = badgeFlags(rowFor(editor.rows, editor.plan, i), i === last)}
     <li class="row" class:selected={editor.selected === i}>
       <label class="select">
         <input type="radio" name="selected" value={i} aria-label="Select section {i + 1}" checked={editor.selected === i} onchange={() => editor.select(i)} />
@@ -66,11 +76,14 @@
         <input
           type="text"
           aria-label="Name of section {i + 1}"
-          value={s.name}
+          value={nameOf(i, s.name)}
           maxlength={MAX_NAME}
           aria-invalid={nameError !== null}
           aria-describedby={nameError ? `name-error-${i}` : undefined}
-          oninput={(e) => editor.rename(i, e.currentTarget.value)}
+          onfocus={(e) => editor.setDraft(i, e.currentTarget.value)}
+          oninput={(e) => editor.setDraft(i, e.currentTarget.value)}
+          onkeydown={onNameKey}
+          onblur={() => editor.commitDraft()}
         />
         {#if nameError}
           <p class="field-error" id="name-error-{i}">{nameError}</p>

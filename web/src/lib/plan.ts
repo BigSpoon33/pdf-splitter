@@ -5,11 +5,13 @@
  * (`tests/test_api_e2e.py::test_put_plan_rejects_bad_plans_with_field_errors`).
  * Limits mirror `src/pdf_splitter/models.py` (`Section`, `PlanSettings`).
  */
-import type { Analysis, ManifestRow, Override, Plan, Section } from './api'
+import type { Analysis, ManifestRow, Override, Plan, PlanSettings, Section } from './api'
 
 export const MAX_NAME = 120
 export const MAX_HEADING = 500
 export const MIN_THRESHOLD = 1
+/** The analysis detects candidates up to this many characters (`heading_candidates(max_len=90)` in the engine). */
+export const MAX_HEADING_LENGTH = 90
 
 // ── Sources ──────────────────────────────────────────────────────────────────────────────────────────
 
@@ -23,13 +25,52 @@ export function outlineSections(analysis: Analysis, level: number): Section[] {
 }
 
 /**
- * Heading candidates at least `threshold` × body size (and at `level` when `level` > 0). The candidates were
- * detected once at a low threshold, so this is instant and needs no request.
+ * What the picker's controls hold. It lives in the editor (not the picker) so an Undo restores the controls along
+ * with the list they produced, and so the same choice can be re-applied by choosing it again.
  */
-export function headingSections(analysis: Analysis, level: number, threshold: number): Section[] {
+export interface PickerState {
+  outlineLevel: number
+  /** 0 = any level. */
+  headingLevel: number
+  /** In multiples of the body size. */
+  threshold: number
+  /** Candidates longer than this (characters) are not headings (PRD scope 2). */
+  maxLength: number
+}
+
+export function initialPicker(analysis: Analysis): PickerState {
+  return {
+    outlineLevel: initialOutlineLevel(analysis),
+    headingLevel: initialHeadingLevel(analysis),
+    threshold: MIN_THRESHOLD,
+    maxLength: MAX_HEADING_LENGTH,
+  }
+}
+
+export interface HeadingFilter {
+  /** 0 = any level. */
+  level: number
+  threshold: number
+  maxLength?: number
+  /** The current bands: a candidate whose top sits inside them is a running head or a folio, not a heading. */
+  bands?: Pick<PlanSettings, 'header_band' | 'footer_band'>
+}
+
+/**
+ * Heading candidates at least `threshold` × body size (and at `level` when `level` > 0), no longer than
+ * `maxLength`, outside the header/footer bands. The candidates were detected once at a low threshold with the
+ * default bands, so this is instant and needs no request; a band grown past the default drops more here.
+ */
+export function headingSections(analysis: Analysis, filter: HeadingFilter): Section[] {
+  const { level, threshold, maxLength = Infinity, bands } = filter
   const floor = threshold * analysis.headings.body_size
   return analysis.headings.candidates
-    .filter((c) => c.size >= floor && (level === 0 || c.level === level))
+    .filter((c) => {
+      if (c.size < floor || (level !== 0 && c.level !== level) || c.name.length > maxLength) return false
+      if (!bands) return true
+      const H = analysis.size[c.page - 1]?.H
+      return c.y >= bands.header_band && (H === undefined || c.y < H - bands.footer_band)
+    })
     .map((c) => section(c.name, c.page, c.heading))
 }
 
@@ -112,12 +153,22 @@ export function shiftOverrides(overrides: Record<string, Override>, map: (i: num
   return out
 }
 
+/**
+ * A section whose END moved (its neighbour was removed, inserted or merged away) keeps its start override only:
+ * an end cut names a y on what used to be its last sheet, and the engine would apply it on the new one.
+ */
+function dropEnd(overrides: Record<string, Override>, i: number): void {
+  const ov = overrides[String(i)]
+  if (!ov) return
+  const { endCut: _endCut, endCol: _endCol, ...start } = ov
+  if (Object.keys(start).length) overrides[String(i)] = start
+  else delete overrides[String(i)]
+}
+
 export function removeSection(plan: Plan, i: number): Plan {
-  return {
-    ...plan,
-    sections: plan.sections.filter((_, k) => k !== i),
-    overrides: shiftOverrides(plan.overrides, (k) => (k === i ? null : k > i ? k - 1 : k)),
-  }
+  const overrides = shiftOverrides(plan.overrides, (k) => (k === i ? null : k > i ? k - 1 : k))
+  dropEnd(overrides, i - 1)
+  return { ...plan, sections: plan.sections.filter((_, k) => k !== i), overrides }
 }
 
 /**
@@ -138,15 +189,17 @@ export function mergeWithNext(plan: Plan, i: number): Plan {
   return { ...plan, sections: plan.sections.filter((_, k) => k !== i + 1), overrides }
 }
 
-/** Inserts `s` after the last section that starts on or before its page (keeps the list in book order). */
+/**
+ * Inserts `s` after the last section that starts on or before its page (keeps the list in book order). The new
+ * section has no override; the one before it now ends where `s` starts, so its end override goes.
+ */
 export function insertSection(plan: Plan, s: Section): { plan: Plan; index: number } {
   let index = plan.sections.length
   while (index > 0 && plan.sections[index - 1]!.page > s.page) index--
   const sections = [...plan.sections.slice(0, index), s, ...plan.sections.slice(index)]
-  return {
-    plan: { ...plan, sections, overrides: shiftOverrides(plan.overrides, (k) => (k >= index ? k + 1 : k)) },
-    index,
-  }
+  const overrides = shiftOverrides(plan.overrides, (k) => (k >= index ? k + 1 : k))
+  dropEnd(overrides, index - 1)
+  return { plan: { ...plan, sections, overrides }, index }
 }
 
 // ── Flags ────────────────────────────────────────────────────────────────────────────────────────────

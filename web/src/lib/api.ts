@@ -232,13 +232,20 @@ export function getPlan(id: string, signal?: AbortSignal): Promise<Plan> {
   return request<Plan>(jobUrl(id, '/plan'), { signal })
 }
 
+export interface SaveOptions {
+  signal?: AbortSignal
+  /** The page is going away: the browser finishes the request after unload. */
+  keepalive?: boolean
+}
+
 /** 200 returns the NORMALIZED plan (names trimmed, duplicates suffixed); 422 carries `errors[].loc` per field. */
-export function putPlan(id: string, plan: Plan, signal?: AbortSignal): Promise<Plan> {
+export function putPlan(id: string, plan: Plan, { signal, keepalive }: SaveOptions = {}): Promise<Plan> {
   return request<Plan>(jobUrl(id, '/plan'), {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(plan),
     signal,
+    keepalive,
   })
 }
 

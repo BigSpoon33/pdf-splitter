@@ -8,9 +8,11 @@
     type Analysis,
     type ManifestRow,
     type Plan,
+    type SaveOptions,
   } from '../lib/api'
   import { PlanEditor } from '../lib/editor.svelte'
   import { messageFor } from '../lib/errors'
+  import { initialPicker } from '../lib/plan'
   import LayoutPanel from './LayoutPanel.svelte'
   import SectionList from './SectionList.svelte'
   import SourcePicker from './SourcePicker.svelte'
@@ -18,12 +20,12 @@
   interface Props {
     id: string
     pages: number
-    /** The last cut's manifest exists (flags for the badges). */
-    done?: boolean
+    /** `done`: the last cut matches the saved plan; `review`: no cut yet, or the plan changed since one. */
+    jobState: 'review' | 'done'
     loadAnalysis?: (id: string, signal: AbortSignal) => Promise<Analysis>
     loadPlan?: (id: string, signal: AbortSignal) => Promise<Plan>
     loadManifest?: (id: string, signal: AbortSignal) => Promise<ManifestRow[]>
-    save?: (id: string, plan: Plan) => Promise<Plan>
+    save?: (id: string, plan: Plan, opts?: SaveOptions) => Promise<Plan>
     debounceMs?: number
     undoMs?: number
   }
@@ -31,7 +33,7 @@
   let {
     id,
     pages,
-    done = false,
+    jobState,
     loadAnalysis = getAnalysis,
     loadPlan = getPlan,
     loadManifest = getManifest,
@@ -42,19 +44,29 @@
 
   let analysis = $state<Analysis | null>(null)
   let editor = $state<PlanEditor | null>(null)
-  let rows = $state<ManifestRow[]>([])
+  /** A cut happened at some point (its manifest exists), so the badges and the "cut again" note apply. */
+  let hasManifest = $state(false)
   let loadError = $state<string | null>(null)
 
   $effect(() => {
     const ctrl = new AbortController()
     let created: PlanEditor | null = null
+    // Badges are a bonus: a manifest that can't be read (409 before any cut, a hiccup) just means no badges.
+    const manifest = loadManifest(id, ctrl.signal).then(
+      (rows) => rows,
+      () => null,
+    )
     void (async () => {
       try {
         const [a, plan] = await Promise.all([loadAnalysis(id, ctrl.signal), loadPlan(id, ctrl.signal)])
         if (ctrl.signal.aborted) return
         analysis = a
-        created = new PlanEditor(plan, (p) => save(id, p), { debounceMs, undoMs })
+        created = new PlanEditor(plan, (p, o) => save(id, p, o), { debounceMs, undoMs, picker: initialPicker(a) })
         editor = created
+        const rows = await manifest
+        if (ctrl.signal.aborted || !rows) return
+        created.rows = rows
+        hasManifest = true
       } catch (err) {
         if (ctrl.signal.aborted) return
         loadError = err instanceof ApiError ? err.userMessage : messageFor(null)
@@ -66,19 +78,6 @@
     }
   })
 
-  $effect(() => {
-    if (!done) return
-    const ctrl = new AbortController()
-    // Badges are a bonus: a manifest that can't be read (409 before a cut, a hiccup) just means no badges.
-    loadManifest(id, ctrl.signal).then(
-      (r) => {
-        if (!ctrl.signal.aborted) rows = r
-      },
-      () => {},
-    )
-    return () => ctrl.abort()
-  })
-
   const status = $derived.by(() => {
     if (!editor) return null
     if (editor.error) return null
@@ -86,6 +85,9 @@
     if (editor.dirty) return 'Unsaved changes'
     return 'Saved'
   })
+
+  /** The files of the last cut follow an older plan: from `review` they already do; from `done`, once an edit lands. */
+  const stale = $derived(hasManifest && (jobState === 'review' || (editor?.edited ?? false)))
 </script>
 
 {#if loadError}
@@ -101,7 +103,9 @@
         {pages}
         source={editor.plan.source}
         sections={editor.plan.sections}
-        onpick={(source, sections, label) => editor?.replaceSections(source, sections, label)}
+        picker={editor.picker}
+        settings={editor.plan.settings}
+        onpick={(source, sections, label, picker) => editor?.replaceSections(source, sections, label, picker)}
       />
       {#if editor.errorAt('source')}
         <p class="field-error" role="alert">{editor.errorAt('source')}</p>
@@ -109,7 +113,7 @@
     </section>
 
     <section class="card">
-      <SectionList {editor} {analysis} {rows} />
+      <SectionList {editor} {analysis} />
     </section>
 
     <section class="card">
@@ -126,7 +130,7 @@
       {:else if status}
         {status}
       {/if}
-      {#if done && editor.dirty}
+      {#if stale}
         <span class="muted">Your edits replace the plan of the last cut; cut again to refresh the files.</span>
       {/if}
     </p>

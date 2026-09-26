@@ -1,42 +1,60 @@
 <script lang="ts">
-  import { untrack } from 'svelte'
-  import type { Analysis, Section, Source } from '../lib/api'
+  import type { Analysis, PlanSettings, Section, Source } from '../lib/api'
   import {
     formatList,
     headingSections,
-    initialHeadingLevel,
-    initialOutlineLevel,
+    MAX_HEADING_LENGTH,
     MIN_THRESHOLD,
     outlineSections,
     parseList,
     thresholdMax,
+    type PickerState,
   } from '../lib/plan'
 
   interface Props {
     analysis: Analysis
     pages: number
-    /** The saved plan's source (checked radio). */
+    /** The saved plan's source. */
     source: Source
-    /** The current list, to pre-fill the paste box when the user switches to it. */
+    /** The current list: the paste box is seeded from it, and the headings count is compared with it. */
     sections: Section[]
-    /** A user choice that replaces the list: the new source, the sections, and a label for the Undo toast. */
-    onpick: (source: Source, sections: Section[], label: string) => void
+    /** The controls' state, owned by the editor so an Undo restores it with the list (see `PlanEditor.picker`). */
+    picker: PickerState
+    /** The current bands: candidates inside them are not headings. */
+    settings: Pick<PlanSettings, 'header_band' | 'footer_band'>
+    /** A user choice that replaces the list: the new source, the sections, a label for the Undo toast, the controls. */
+    onpick: (source: Source, sections: Section[], label: string, picker: PickerState) => void
   }
 
-  let { analysis, pages, source, sections, onpick }: Props = $props()
+  let { analysis, pages, source, sections, picker, settings, onpick }: Props = $props()
 
   const outlineLevels = $derived(analysis.outline.levels)
   const hasOutline = $derived(outlineLevels.some((n) => n > 0))
   const hasHeadings = $derived(analysis.headings.candidates.length > 0)
 
-  // The starting levels come from the analysis once; the analysis of a job never changes afterwards.
-  let outlineLevel = $state(untrack(() => initialOutlineLevel(analysis)))
-  let headingLevel = $state(untrack(() => initialHeadingLevel(analysis)))
-  let threshold = $state(MIN_THRESHOLD)
-  let pasted = $state('')
+  /**
+   * "Paste a list" is a view, not a pick: choosing it changes no section (only "Use this list" does), so the
+   * expanded radio is local until the saved source moves on (a pick, an Undo) — then the saved source wins.
+   */
+  let local = $state<{ mode: Source; forSource: Source } | null>(null)
+  const mode = $derived(local?.forSource === source ? local.mode : source)
+
+  /** The box shows the current list until the user types; null = untouched, so a fresh list re-seeds it. */
+  let typed = $state<string | null>(null)
+  const pasted = $derived(typed ?? formatList(sections))
 
   const maxThreshold = $derived(thresholdMax(analysis))
-  const headingPick = $derived(headingSections(analysis, headingLevel, threshold))
+  const headingFilter = $derived({
+    level: picker.headingLevel,
+    threshold: picker.threshold,
+    maxLength: picker.maxLength,
+    bands: settings,
+  })
+  const headingPick = $derived(headingSections(analysis, headingFilter))
+  /** The bands changed under a headings list: the count no longer describes the list until it is re-applied. */
+  const headingsDiffer = $derived(
+    source === 'headings' && (headingPick.length !== sections.length || headingPick.some((s, i) => s.page !== sections[i]?.page)),
+  )
   const parsed = $derived(parseList(pasted, pages))
   const canUseList = $derived(parsed.errors.length === 0 && parsed.sections.length > 0)
 
@@ -47,26 +65,31 @@
   }
 
   function pickOutline(level: number) {
-    outlineLevel = level
-    onpick('outline', outlineSections(analysis, level), `the outline (level ${level})`)
+    local = null
+    onpick('outline', outlineSections(analysis, level), `the outline (level ${level})`, { ...picker, outlineLevel: level })
   }
 
-  function pickHeadings() {
-    onpick('headings', headingPick, 'the detected headings')
+  function pickHeadings(next: Partial<PickerState> = {}) {
+    local = null
+    const state = { ...picker, ...next }
+    onpick('headings', headingSections(analysis, { ...headingFilter, level: state.headingLevel, threshold: state.threshold, maxLength: state.maxLength }), 'the detected headings', state)
   }
 
   function choose(next: Source) {
-    if (next === 'outline') pickOutline(outlineLevel)
+    if (next === 'outline') pickOutline(picker.outlineLevel)
     else if (next === 'headings') pickHeadings()
     else {
-      // The current list becomes the pasted one, so switching loses nothing until the user edits the text.
-      if (!pasted.trim()) pasted = formatList(sections)
-      onpick('manual', parseList(pasted, pages).sections, 'the pasted list')
+      local = { mode: 'manual', forSource: source }
+      typed = null
     }
   }
 
   function useList() {
-    if (canUseList) onpick('manual', parsed.sections, 'the pasted list')
+    if (!canUseList) return
+    const sections = parsed.sections
+    // The box follows the list again, so it shows the names as the server normalized them.
+    typed = null
+    onpick('manual', sections, 'the pasted list', picker)
   }
 
   function number(e: Event): number {
@@ -79,15 +102,15 @@
 
   <div class="choice">
     <label>
-      <input type="radio" name="source" value="outline" checked={source === 'outline'} disabled={!hasOutline} onchange={() => choose('outline')} />
+      <input type="radio" name="source" value="outline" checked={mode === 'outline'} disabled={!hasOutline} onchange={() => choose('outline')} />
       Outline
     </label>
     {#if !hasOutline}
       <p class="why">This PDF has no outline (bookmarks), so there are no chapters to read from it.</p>
-    {:else if source === 'outline'}
+    {:else if mode === 'outline'}
       <label class="field">
         <span>Level</span>
-        <select value={outlineLevel} onchange={(e) => pickOutline(number(e))}>
+        <select value={picker.outlineLevel} onchange={(e) => pickOutline(number(e))}>
           {#each outlineLevels as count, i (i)}
             <option value={i + 1} disabled={count === 0}>
               Level {i + 1} — {count} {count === 1 ? 'item' : 'items'}{count ? `: ${samples(i + 1)}` : ''}
@@ -100,56 +123,73 @@
 
   <div class="choice">
     <label>
-      <input type="radio" name="source" value="headings" checked={source === 'headings'} disabled={!hasHeadings} onchange={() => choose('headings')} />
+      <input type="radio" name="source" value="headings" checked={mode === 'headings'} disabled={!hasHeadings} onchange={() => choose('headings')} />
       Headings
     </label>
     {#if !hasHeadings}
       <p class="why">No headings bigger than the body text were found.</p>
-    {:else if source === 'headings'}
+    {:else if mode === 'headings'}
       <div class="row">
         <label class="field">
-          <span>At least {threshold.toFixed(1)}× the body size ({(threshold * analysis.headings.body_size).toFixed(1)} pt)</span>
+          <span>At least {picker.threshold.toFixed(1)}× the body size ({(picker.threshold * analysis.headings.body_size).toFixed(1)} pt)</span>
           <input
             type="range"
             min={MIN_THRESHOLD}
             max={maxThreshold}
             step="0.1"
-            value={threshold}
-            oninput={(e) => {
-              threshold = number(e)
-              pickHeadings()
-            }}
+            value={picker.threshold}
+            oninput={(e) => pickHeadings({ threshold: number(e) })}
           />
         </label>
         <label class="field">
           <span>Level</span>
-          <select
-            value={headingLevel}
-            onchange={(e) => {
-              headingLevel = number(e)
-              pickHeadings()
-            }}
-          >
+          <select value={picker.headingLevel} onchange={(e) => pickHeadings({ headingLevel: number(e) })}>
             <option value={0}>Any level</option>
             {#each analysis.headings.levels as lvl, i (i)}
               <option value={i + 1}>Level {i + 1} — {lvl.size.toFixed(1)} pt, {lvl.count} found</option>
             {/each}
           </select>
         </label>
-        <p class="count" data-testid="heading-count">{headingPick.length} {headingPick.length === 1 ? 'section' : 'sections'}</p>
+        <label class="field">
+          <span>Max heading length (characters)</span>
+          <input
+            type="number"
+            min="1"
+            max={MAX_HEADING_LENGTH}
+            step="1"
+            value={picker.maxLength}
+            onchange={(e) => {
+              const v = number(e)
+              if (Number.isInteger(v) && v >= 1) pickHeadings({ maxLength: v })
+            }}
+          />
+        </label>
+        <p class="count">
+          <span data-testid="heading-count">{headingPick.length} {headingPick.length === 1 ? 'section' : 'sections'}</span>
+          <span>outside the header and footer bands</span>
+          {#if headingsDiffer}
+            <button type="button" onclick={() => pickHeadings()}>Use these headings</button>
+          {/if}
+        </p>
       </div>
     {/if}
   </div>
 
   <div class="choice">
     <label>
-      <input type="radio" name="source" value="manual" checked={source === 'manual'} onchange={() => choose('manual')} />
+      <input type="radio" name="source" value="manual" checked={mode === 'manual'} onchange={() => choose('manual')} />
       Paste a list
     </label>
-    {#if source === 'manual'}
+    {#if mode === 'manual'}
       <label class="field">
         <span>One section per line as <code>Name, page</code> (page = sheet number, counted from 1)</span>
-        <textarea rows="8" bind:value={pasted} aria-invalid={parsed.errors.length > 0} aria-describedby="paste-errors"></textarea>
+        <textarea
+          rows="8"
+          value={pasted}
+          oninput={(e) => (typed = e.currentTarget.value)}
+          aria-invalid={parsed.errors.length > 0}
+          aria-describedby="paste-errors"
+        ></textarea>
       </label>
       <ul id="paste-errors" class="line-errors" aria-live="polite">
         {#each parsed.errors as err (err.line)}
@@ -192,6 +232,12 @@
     margin: 0;
     color: var(--muted);
     font-size: 0.9rem;
+  }
+  .count {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    flex-basis: 100%;
   }
   .row {
     display: flex;

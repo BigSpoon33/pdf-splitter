@@ -9,17 +9,38 @@ const echo = async (p: Plan) => p
 
 function mount(plan: Plan = planOf(), rows = [] as ReturnType<typeof rowOf>[], analysis = analysisOf()) {
   const editor = new PlanEditor(plan, echo, { debounceMs: 100_000 })
-  const utils = render(SectionList, { editor, analysis, rows })
+  editor.rows = rows
+  const utils = render(SectionList, { editor, analysis })
   return { editor, analysis, ...utils }
 }
 
 const names = () => screen.getAllByLabelText(/^Name of section/).map((el) => (el as HTMLInputElement).value)
 
 describe('SectionList (AC-3)', () => {
-  it('renames as you type', async () => {
+  it('keeps a typed name as a draft and commits it on blur', async () => {
     const { editor } = mount()
-    await fireEvent.input(screen.getByLabelText('Name of section 2'), { target: { value: 'Part Two' } })
-    expect(editor.plan.sections[1]?.name).toBe('Part Two')
+    const input = screen.getByLabelText('Name of section 2') as HTMLInputElement
+    await fireEvent.focus(input)
+    await fireEvent.input(input, { target: { value: 'Part Two ' } })
+    expect(editor.plan.sections[1]?.name).toBe('2 Chapter Two: The Middle of the Synthetic Book')
+    expect(editor.dirty).toBe(false)
+    expect(input.value).toBe('Part Two ')
+    // A save that lands meanwhile (normalized names) never rewrites the focused input.
+    editor.plan.sections[1]!.name = 'Part Two'
+    await Promise.resolve()
+    expect(input.value).toBe('Part Two ')
+    await fireEvent.blur(input)
+    expect(editor.plan.sections[1]?.name).toBe('Part Two ')
+    expect(editor.dirty).toBe(true)
+  })
+
+  it('Enter commits the draft', async () => {
+    const { editor } = mount()
+    const input = screen.getByLabelText('Name of section 1')
+    await fireEvent.input(input, { target: { value: 'One' } })
+    await fireEvent.keyDown(input, { key: 'Enter' })
+    expect(editor.plan.sections[0]?.name).toBe('One')
+    expect(editor.draft).toBeNull()
   })
 
   it('changes the page and shows the printed label when the PDF has one', async () => {
@@ -86,6 +107,16 @@ describe('SectionList (AC-3)', () => {
     await fireEvent.click(screen.getByLabelText('Delete section 1'))
     expect(editor.plan.sections).toHaveLength(2)
     expect(document.querySelectorAll('.badge')).toHaveLength(0)
+  })
+
+  it('a merge drops the badge of the section that absorbed the next one (its row describes the old span)', async () => {
+    const rows = [rowOf(0, '1 Foundations of Testing', ['heading-not-found']), rowOf(1, '2 Chapter Two: The Middle of the Synthetic Book', ['leak'])]
+    const { editor } = mount(planOf(), rows)
+    expect(document.querySelectorAll('.badge')).toHaveLength(2)
+    await fireEvent.click(screen.getAllByRole('button', { name: 'Merge ↓' })[0]!)
+    expect(names()).toEqual(['1 Foundations of Testing', '3 Closing Chapter'])
+    expect(document.querySelectorAll('.badge')).toHaveLength(0)
+    expect(editor.rows.map((r) => r.index)).toEqual([1])
   })
 
   it('selects a section for the preview', async () => {

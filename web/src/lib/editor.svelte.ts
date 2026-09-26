@@ -4,16 +4,40 @@
  * the local plan when nothing changed while the request was out (the server normalizes names, so the body
  * is the truth for what was sent — not for what was typed since). 422 field errors are kept by `loc` so a
  * control can show its own (AC-5); 409 `busy` and network failures are shown, never retried in a loop.
+ * Leaving the page never loses an edit: `destroy()` sends what is pending, and `pagehide` / a hidden tab send
+ * it with `keepalive` so the browser finishes the request after unload.
  */
-import { ApiError, isGone, type Plan, type PlanSettings, type Section, type Source } from './api'
+import { ApiError, isGone, type ManifestRow, type Plan, type PlanSettings, type Section, type Source } from './api'
 import { SAVE_DEBOUNCE_MS, UNDO_MS } from './config'
-import { insertSection, mergeWithNext, removeSection } from './plan'
+import { insertSection, mergeWithNext, removeSection, type PickerState } from './plan'
 
-export type SavePlan = (plan: Plan) => Promise<Plan>
+export interface SendOptions {
+  keepalive?: boolean
+}
+
+export type SavePlan = (plan: Plan, opts?: SendOptions) => Promise<Plan>
+
+/** The page's `pagehide` / `visibilitychange` source: the real window in the app, a stand-in in tests. */
+export interface UnloadSource {
+  addEventListener(type: 'pagehide' | 'visibilitychange', listener: () => void): void
+  removeEventListener(type: 'pagehide' | 'visibilitychange', listener: () => void): void
+  document?: { visibilityState: DocumentVisibilityState }
+}
 
 export interface EditorOptions {
   debounceMs?: number
   undoMs?: number
+  picker?: PickerState
+  page?: UnloadSource
+}
+
+/** What an Undo puts back: the list and where it came from — never the settings edited since (they are the user's). */
+interface UndoSnapshot {
+  label: string
+  source: Source
+  sections: Section[]
+  overrides: Plan['overrides']
+  picker: PickerState
 }
 
 /** `["body", "sections", 0, "page"]` → `"sections.0.page"`: the key a control asks `errorAt` for. */
@@ -34,56 +58,90 @@ const PLACEHOLDER: Plan = {
   overrides: {},
 }
 
+const DEFAULT_PICKER: PickerState = { outlineLevel: 1, headingLevel: 0, threshold: 1, maxLength: 90 }
+
 export class PlanEditor {
   plan = $state<Plan>(PLACEHOLDER)
+  /** The picker's controls, snapshotted with the list they produced (an Undo restores both). */
+  picker = $state<PickerState>(DEFAULT_PICKER)
+  /** The last cut's manifest rows (badges), `[]` before any cut; a merge drops the row it no longer describes. */
+  rows = $state<ManifestRow[]>([])
   /** Edits not yet acknowledged by the server. */
   dirty = $state(false)
+  /** Any edit since the plan was loaded — the badges from the last cut describe an older plan from then on. */
+  edited = $state(false)
   saving = $state(false)
   /** The last save's failure other than field errors (busy, network, gone…). */
   error = $state<ApiError | null>(null)
   /** 422 `errors[]` from the last save, keyed by `locKey`; cleared by the next 200. */
   fieldErrors = $state<Record<string, string>>({})
   /** The list a source switch replaced, while "Undo" is on offer. */
-  undo = $state<{ label: string; plan: Plan } | null>(null)
+  undo = $state<UndoSnapshot | null>(null)
   /** The section the preview (STORY-010) shows; null until the user picks one. */
   selected = $state<number | null>(null)
+  /** A name being typed: it reaches the plan on commit (blur/Enter/leaving), never rewritten under the cursor. */
+  draft = $state<{ i: number; name: string } | null>(null)
   /** 404/410: the job will never answer again. */
   gone = $state(false)
 
   private readonly save: SavePlan
   private readonly debounceMs: number
   private readonly undoMs: number
+  private readonly page: UnloadSource | undefined
   private timer: ReturnType<typeof setTimeout> | undefined
   private undoTimer: ReturnType<typeof setTimeout> | undefined
   private inflight: Promise<void> | null = null
   private queued = false
+  /** An edit no request has carried yet (distinct from `dirty`, which also covers a request still out). */
+  private unsent = false
   /** Bumped by every edit; a response is adopted only when it still matches. */
   private version = 0
+  private readonly onHide = () => this.sendBeforeUnload()
+  private readonly onVisibility = () => {
+    if (this.page?.document?.visibilityState === 'hidden') this.sendBeforeUnload()
+  }
 
   constructor(plan: Plan, save: SavePlan, opts: EditorOptions = {}) {
     this.plan = plan
     this.save = save
     this.debounceMs = opts.debounceMs ?? SAVE_DEBOUNCE_MS
     this.undoMs = opts.undoMs ?? UNDO_MS
+    this.picker = opts.picker ?? DEFAULT_PICKER
+    this.page = opts.page ?? (typeof window === 'undefined' ? undefined : window)
+    this.page?.addEventListener('pagehide', this.onHide)
+    this.page?.addEventListener('visibilitychange', this.onVisibility)
   }
 
   // ── Edits ──
 
-  /** A source switch (AC-2): the whole list and its overrides go, with one Undo back to the list before the run. */
-  replaceSections(source: Source, sections: Section[], label: string): void {
+  /**
+   * A source switch (AC-2): the whole list and its overrides go, with one Undo back to the list before the run.
+   * `picker` is the control state that produced `sections`, so Undo can put the controls back too.
+   */
+  replaceSections(source: Source, sections: Section[], label: string, picker: PickerState = this.picker): void {
     // A run of picker changes (a slider drag) keeps the first snapshot, so Undo returns to where the run began.
-    if (!this.undo) this.undo = { label, plan: $state.snapshot(this.plan) }
-    else this.undo = { ...this.undo, label }
+    if (!this.undo) {
+      const { source: from, sections: list, overrides } = $state.snapshot(this.plan)
+      this.undo = { label, source: from, sections: list, overrides, picker: $state.snapshot(this.picker) }
+    } else this.undo = { ...this.undo, label }
     clearTimeout(this.undoTimer)
     this.undoTimer = setTimeout(() => (this.undo = null), this.undoMs)
+    this.picker = picker
     this.plan = { ...this.plan, source, sections, overrides: {} }
     this.selected = null
     this.touch()
   }
 
+  /** Only the picker's controls changed (a filter that narrows the count): nothing to save. */
+  setPicker(picker: PickerState): void {
+    this.picker = picker
+  }
+
   undoLast(): void {
     if (!this.undo) return
-    this.plan = this.undo.plan
+    const { source, sections, overrides, picker } = this.undo
+    this.plan = { ...this.plan, source, sections, overrides }
+    this.picker = picker
     this.undo = null
     clearTimeout(this.undoTimer)
     this.selected = null
@@ -92,9 +150,22 @@ export class PlanEditor {
 
   rename(i: number, name: string): void {
     const s = this.plan.sections[i]
-    if (!s) return
+    if (!s || s.name === name) return
     s.name = name
     this.touch()
+  }
+
+  /** The name input for section `i` took focus or a keystroke: the text is held here until it commits. */
+  setDraft(i: number, name: string): void {
+    if (this.draft && this.draft.i !== i) this.commitDraft()
+    this.draft = { i, name }
+  }
+
+  commitDraft(): void {
+    if (!this.draft) return
+    const { i, name } = this.draft
+    this.draft = null
+    this.rename(i, name)
   }
 
   setPage(i: number, page: number): void {
@@ -114,6 +185,8 @@ export class PlanEditor {
   merge(i: number): void {
     if (i + 1 >= this.plan.sections.length) return
     this.plan = mergeWithNext($state.snapshot(this.plan), i)
+    // The row for i described the span before the merge; the later rows no longer line up by index anyway.
+    this.rows = this.rows.filter((r) => r.index !== i)
     if (this.selected !== null && this.selected > i) this.selected = this.selected === i + 1 ? i : this.selected - 1
     this.touch()
   }
@@ -151,6 +224,8 @@ export class PlanEditor {
 
   private touch(): void {
     this.dirty = true
+    this.edited = true
+    this.unsent = true
     this.version++
     clearTimeout(this.timer)
     this.timer = setTimeout(() => void this.flush(), this.debounceMs)
@@ -161,7 +236,7 @@ export class PlanEditor {
     clearTimeout(this.timer)
     if (this.gone || !this.dirty) return this.inflight ?? Promise.resolve()
     if (this.inflight) {
-      this.queued = true
+      if (this.unsent) this.queued = true
       return this.inflight
     }
     this.inflight = this.send().finally(() => {
@@ -175,12 +250,25 @@ export class PlanEditor {
     })
   }
 
-  private async send(): Promise<void> {
+  /**
+   * The page is unloading or hidden: a request still out may be cut short and nothing will run after it, so an
+   * unsent edit goes now with `keepalive`, ahead of the one-in-flight rule (the older request left first).
+   */
+  private sendBeforeUnload(): void {
+    this.commitDraft()
+    if (this.gone || !this.unsent) return
+    clearTimeout(this.timer)
+    this.queued = false
+    void this.send({ keepalive: true })
+  }
+
+  private async send(opts: SendOptions = {}): Promise<void> {
     const sent = this.version
+    this.unsent = false
     this.saving = true
     this.error = null
     try {
-      const saved = await this.save($state.snapshot(this.plan))
+      const saved = await this.save($state.snapshot(this.plan), opts)
       this.fieldErrors = {}
       if (this.version === sent) {
         this.plan = saved
@@ -201,9 +289,12 @@ export class PlanEditor {
     }
   }
 
+  /** The component is going away: a pending save is sent (not awaited), never dropped. */
   destroy(): void {
-    clearTimeout(this.timer)
+    this.page?.removeEventListener('pagehide', this.onHide)
+    this.page?.removeEventListener('visibilitychange', this.onVisibility)
     clearTimeout(this.undoTimer)
+    this.commitDraft()
+    void this.flush()
   }
 }
-
